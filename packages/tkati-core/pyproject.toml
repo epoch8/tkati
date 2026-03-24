@@ -1,0 +1,16 @@
+[project]
+name = "tkati-core"
+version = "0.1.0"
+description = "Declarative data pipeline orchestration — core library"
+readme = "README.md"
+authors = [
+    { name = "Andrey Tatarinov", email = "a@tatarinov.co" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "jsonnet>=0.20",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.3,<0.11.0"]
+build-backend = "uv_build"
