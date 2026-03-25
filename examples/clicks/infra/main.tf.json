@@ -1,0 +1,180 @@
+{
+   "resource": {
+      "kafka_topic": {
+         "prod__clicks_enriched": {
+            "config": {
+               "cleanup.policy": "delete",
+               "retention.ms": "2592000000"
+            },
+            "name": "clicks_enriched",
+            "partitions": 12,
+            "provider": "kafka.prod",
+            "replication_factor": 3
+         },
+         "prod__clicks_hourly": {
+            "config": {
+               "cleanup.policy": "delete",
+               "retention.ms": "7776000000"
+            },
+            "name": "clicks_hourly",
+            "partitions": 4,
+            "provider": "kafka.prod",
+            "replication_factor": 3
+         },
+         "prod__clicks_raw": {
+            "config": {
+               "cleanup.policy": "delete",
+               "retention.ms": "604800000"
+            },
+            "name": "clicks_raw",
+            "partitions": 12,
+            "provider": "kafka.prod",
+            "replication_factor": 3
+         }
+      },
+      "kubernetes_deployment": {
+         "click_aggregator": {
+            "metadata": [
+               {
+                  "name": "click-aggregator",
+                  "namespace": "pipelines"
+               }
+            ],
+            "spec": [
+               {
+                  "replicas": 1,
+                  "selector": [
+                     {
+                        "match_labels": {
+                           "app": "click-aggregator"
+                        }
+                     }
+                  ],
+                  "template": [
+                     {
+                        "metadata": [
+                           {
+                              "labels": {
+                                 "app": "click-aggregator"
+                              }
+                           }
+                        ],
+                        "spec": [
+                           {
+                              "container": [
+                                 {
+                                    "command": [
+                                       "tkati-node",
+                                       "pipelines.clicks.aggregate_hourly"
+                                    ],
+                                    "env": [
+                                       {
+                                          "name": "TKATI_INPUTS",
+                                          "value": "prod/clicks_enriched"
+                                       },
+                                       {
+                                          "name": "TKATI_OUTPUTS",
+                                          "value": "prod/clicks_hourly"
+                                       },
+                                       {
+                                          "name": "TKATI_CONFIG",
+                                          "value": "{}"
+                                       }
+                                    ],
+                                    "image": "my-registry/pipelines:1.4.2",
+                                    "name": "node",
+                                    "resources": [
+                                       {
+                                          "limits": {
+                                             "cpu": "1",
+                                             "memory": "1Gi"
+                                          },
+                                          "requests": {
+                                             "cpu": "500m",
+                                             "memory": "512Mi"
+                                          }
+                                       }
+                                    ]
+                                 }
+                              ]
+                           }
+                        ]
+                     }
+                  ]
+               }
+            ]
+         },
+         "click_enricher": {
+            "metadata": [
+               {
+                  "name": "click-enricher",
+                  "namespace": "pipelines"
+               }
+            ],
+            "spec": [
+               {
+                  "replicas": 1,
+                  "selector": [
+                     {
+                        "match_labels": {
+                           "app": "click-enricher"
+                        }
+                     }
+                  ],
+                  "template": [
+                     {
+                        "metadata": [
+                           {
+                              "labels": {
+                                 "app": "click-enricher"
+                              }
+                           }
+                        ],
+                        "spec": [
+                           {
+                              "container": [
+                                 {
+                                    "command": [
+                                       "tkati-node",
+                                       "pipelines.clicks.enrich_batch"
+                                    ],
+                                    "env": [
+                                       {
+                                          "name": "TKATI_INPUTS",
+                                          "value": "prod/clicks_raw"
+                                       },
+                                       {
+                                          "name": "TKATI_OUTPUTS",
+                                          "value": "prod/clicks_enriched"
+                                       },
+                                       {
+                                          "name": "TKATI_CONFIG",
+                                          "value": "{\"geoip_db\":\"/data/GeoLite2-City.mmdb\"}"
+                                       }
+                                    ],
+                                    "image": "my-registry/pipelines:1.4.2",
+                                    "name": "node",
+                                    "resources": [
+                                       {
+                                          "limits": {
+                                             "cpu": "1",
+                                             "memory": "1Gi"
+                                          },
+                                          "requests": {
+                                             "cpu": "500m",
+                                             "memory": "512Mi"
+                                          }
+                                       }
+                                    ]
+                                 }
+                              ]
+                           }
+                        ]
+                     }
+                  ]
+               }
+            ]
+         }
+      }
+   }
+}
