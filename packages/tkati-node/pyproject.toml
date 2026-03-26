@@ -1,0 +1,22 @@
+[project]
+name = "tkati-node"
+version = "0.1.0"
+description = "Declarative data pipeline orchestration — node runtime SDK"
+readme = "README.md"
+authors = [
+    { name = "Andrey Tatarinov", email = "a@tatarinov.co" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "pyarrow>=14",
+    "kafka-python>=2.0",
+    "prometheus-client>=0.19",
+    "pydantic-settings>=2.0",
+]
+
+[project.scripts]
+tkati-node = "tkati_node.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.10.3,<0.11.0"]
+build-backend = "uv_build"
