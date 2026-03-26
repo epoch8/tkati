@@ -77,6 +77,27 @@ function(env)
 
 
 
+try:
+    from tkati_compose.cli import compose_group as _compose_group
+    cli.add_command(_compose_group, name="compose")
+except ImportError:
+    @cli.group("compose")
+    def _compose_stub() -> None:
+        """Manage the local Docker Compose development environment."""
+
+    @_compose_stub.command("up")
+    def _compose_up_stub() -> None:
+        """Start Redpanda, wait for it to be ready, and provision topics."""
+        click.echo("tkati-compose is not installed. Run: uv add tkati-compose", err=True)
+        sys.exit(1)
+
+    @_compose_stub.command("down")
+    def _compose_down_stub() -> None:
+        """Stop and remove all containers for this pipeline."""
+        click.echo("tkati-compose is not installed. Run: uv add tkati-compose", err=True)
+        sys.exit(1)
+
+
 def main() -> None:
     cli()
 
