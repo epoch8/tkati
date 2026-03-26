@@ -75,6 +75,16 @@ function(env)
         click.echo(result, nl=False)
 
 
+try:
+    from tkati_ui.cli import ui as _ui_cmd
+    cli.add_command(_ui_cmd, name="ui")
+except ImportError:
+    @cli.command("ui")
+    @click.pass_context
+    def _ui_stub(ctx: click.Context) -> None:
+        """Open the pipeline graph UI in a browser."""
+        click.echo("tkati-ui is not installed. Run: uv add tkati-ui", err=True)
+        sys.exit(1)
 
 
 try:
