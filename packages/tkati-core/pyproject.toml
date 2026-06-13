@@ -1,0 +1,28 @@
+[project]
+name = "tkati-core"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "confluent-kafka>=2.11.0",
+    "loguru>=0.7.3",
+    "orjson>=3.9.0",
+    "pyarrow>=21.0.0",
+    "pydantic-settings>=2.11.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.0.1"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tkati_core"]
+
+[tool.uv-workspace-codegen]
+generate = true
+template_type = "package"
