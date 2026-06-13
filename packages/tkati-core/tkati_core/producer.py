@@ -8,7 +8,7 @@ from confluent_kafka import Producer
 from loguru import logger
 
 if TYPE_CHECKING:
-    from tkati_core.settings import KafkaOutputSettings
+    from tkati_core.settings import KafkaOutputSettings, KafkaTopicSettings
 
 
 class KafkaProducer:
@@ -42,16 +42,17 @@ class KafkaProducer:
         )
 
     @classmethod
-    def from_output_settings(cls, settings: "KafkaOutputSettings") -> "KafkaProducer":
-        """
-        Construct a KafkaProducer from a KafkaOutputSettings instance.
-        """
+    def from_topic_settings(cls, topic: "KafkaTopicSettings") -> "KafkaProducer":
         return cls(
-            kafka_config={"bootstrap.servers": settings.topic.broker},
-            topic_name=settings.topic.name,
-            format=settings.topic.format,
-            key_column=settings.topic.key_column,
+            kafka_config={"bootstrap.servers": topic.broker},
+            topic_name=topic.name,
+            format=topic.format,
+            key_column=topic.key_column,
         )
+
+    @classmethod
+    def from_output_settings(cls, settings: "KafkaOutputSettings") -> "KafkaProducer":
+        return cls.from_topic_settings(settings.topic)
 
     def produce_arrow(self, data: pa.Table | pa.RecordBatch) -> None:
         """
