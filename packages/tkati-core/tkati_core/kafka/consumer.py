@@ -11,7 +11,7 @@ from loguru import logger
 from pyarrow import json as pa_json
 
 if TYPE_CHECKING:
-    from tkati_core.settings import KafkaInputSettings
+    from tkati_core.kafka.settings import KafkaInputSettings
 
 
 class KafkaConsumer:

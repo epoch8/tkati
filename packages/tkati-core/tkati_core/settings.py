@@ -1,8 +1,6 @@
 import os
-from typing import Literal
 
 from loguru import logger
-from pydantic import BaseModel, Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -11,31 +9,6 @@ from pydantic_settings import (
 )
 
 SETTINGS_FILE = os.getenv("SETTINGS_FILE", "settings.toml")
-
-
-class KafkaTopicSettings(BaseModel):
-    broker: str
-    name: str
-    schema: dict[str, str] = Field(default_factory=dict)  # type: ignore
-    format: Literal["json", "arrow-batch"] = "json"
-    key_column: str | None = None
-
-
-class KafkaConsumerSettings(BaseModel):
-    group_id: str
-    batch_size: int = 1000
-    batch_timeout_sec: int = 5
-    auto_offset_reset: str = "latest"
-
-
-class KafkaInputSettings(BaseModel):
-    topic: KafkaTopicSettings
-    consumer: KafkaConsumerSettings
-
-
-class KafkaOutputSettings(BaseModel):
-    topic: KafkaTopicSettings
-
 
 logger.info(f"Using settings file: {os.path.abspath(SETTINGS_FILE)}")
 

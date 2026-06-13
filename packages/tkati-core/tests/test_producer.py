@@ -3,8 +3,8 @@ import time
 import orjson
 import pyarrow as pa
 from confluent_kafka import Consumer
-from tkati_core.producer import KafkaProducer
-from tkati_core.settings import KafkaOutputSettings, KafkaTopicSettings
+from tkati_core.kafka.producer import KafkaProducer
+from tkati_core.kafka.settings import KafkaOutputSettings, KafkaTopicSettings
 
 
 def _consume_all(consumer: Consumer, topic: str, count: int, timeout: float = 10.0) -> list:

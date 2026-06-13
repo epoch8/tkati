@@ -3,7 +3,7 @@ import clickhouse_connect.driver as ch_driver
 import pyarrow as pa
 from loguru import logger
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_fixed
-from tkati_core.producer import KafkaProducer
+from tkati_core.kafka.producer import KafkaProducer
 
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 

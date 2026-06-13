@@ -8,7 +8,7 @@ from confluent_kafka import Producer
 from loguru import logger
 
 if TYPE_CHECKING:
-    from tkati_core.settings import KafkaOutputSettings, KafkaTopicSettings
+    from tkati_core.kafka.settings import KafkaOutputSettings, KafkaTopicSettings
 
 
 class KafkaProducer:
