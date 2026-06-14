@@ -1,6 +1,6 @@
 [project]
 name = "tkati-core"
-version = "0.2.0"
+version = "0.2.0.post1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -18,12 +18,11 @@ dependencies = [
 dev = ["pytest>=9.0.1"]
 
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.11.21,<0.12"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["tkati_core"]
+[tool.uv.build-backend]
+module-root = ""
 
 [tool.uv-workspace-codegen]
 generate = true
