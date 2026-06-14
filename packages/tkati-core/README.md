@@ -1,7 +1,7 @@
 # tkati-core
 
-For now we assume that each node gets one input and produces one output in a
-form of kafka stream.
+`tkati-core` provides the building blocks for streaming data pipeline nodes that
+read from Kafka and write to Kafka or ClickHouse.
 
 ## Settings
 

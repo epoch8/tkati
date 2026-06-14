@@ -1,9 +1,19 @@
 [project]
 name = "tkati-core"
-version = "0.2.0.post1"
-description = "Add your description here"
+version = "0.2.0.post2"
+description = "Core abstractions for Kafka/ClickHouse streaming pipeline nodes"
 readme = "README.md"
 requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+keywords = ["kafka", "clickhouse", "streaming", "pyarrow", "data-pipeline"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+]
 dependencies = [
     "clickhouse-connect>=0.11.0",
     "confluent-kafka>=2.11.0",
