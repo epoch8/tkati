@@ -4,13 +4,13 @@ from collections.abc import Generator
 import pytest
 from confluent_kafka import Consumer, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
-from tkati_core.settings import (
+from tkati_core.kafka.settings import (
     KafkaConsumerSettings,
     KafkaInputSettings,
     KafkaOutputSettings,
     KafkaTopicSettings,
 )
-from tkati_core.testing import kafka_admin_client  # noqa: F401
+from tkati_core.kafka.testing import kafka_admin_client  # noqa: F401
 
 BROKER = "localhost:9092"
 
