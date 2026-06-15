@@ -1,6 +1,6 @@
 [project]
 name = "tkati-core"
-version = "0.2.0.post2"
+version = "0.2.0.post3"
 description = "Core abstractions for Kafka/ClickHouse streaming pipeline nodes"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -23,6 +23,9 @@ dependencies = [
     "pydantic-settings>=2.11.0",
     "tenacity>=9.0.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/epoch8/tkati"
 
 [dependency-groups]
 dev = ["pytest>=9.0.1"]
