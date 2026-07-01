@@ -1,0 +1,53 @@
+services:
+  dev:
+    image: mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+    environment:
+      - UV_LINK_MODE=copy
+    volumes:
+      - ../..:/workspace:cached
+      - ../../../creds:/creds:ro
+      - dev_venv:/workspace/.venv
+      - dev_cache:/home/vscode/.cache
+    command: sleep infinity
+
+  redpanda:
+    image: redpandadata/redpanda:v25.2.1
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://localhost:9092
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9644/v1/status/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    network_mode: service:dev
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=default
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    network_mode: service:dev
+
+volumes:
+  dev_venv:
+  dev_cache:
+  redpanda_data:
+  clickhouse_data:

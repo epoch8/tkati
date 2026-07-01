@@ -419,7 +419,7 @@ dev = [
 
 [[package]]
 name = "tkati-core"
-version = "0.2.0"
+version = "0.2.0.post3"
 source = { editable = "packages/tkati-core" }
 dependencies = [
     { name = "clickhouse-connect" },
