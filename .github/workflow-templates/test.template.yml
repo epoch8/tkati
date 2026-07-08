@@ -1,4 +1,4 @@
-name: Package {{ package.name }}
+name: Test {{ package.name }}
 
 on:
   push:
