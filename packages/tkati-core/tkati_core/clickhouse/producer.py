@@ -3,9 +3,9 @@ import clickhouse_connect.driver as ch_driver
 import pyarrow as pa
 from loguru import logger
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_fixed
-from tkati_core.kafka.producer import KafkaProducer
 
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
+from tkati_core.producer import Producer
 
 
 def log_retry_attempt(retry_state: RetryCallState) -> None:
@@ -35,7 +35,7 @@ def _insert_with_dlq_fallback(
     table: pa.Table,
     ch_client: ch_driver.Client,
     ch_table: str,
-    dlq_producer: KafkaProducer,
+    dlq_producer: Producer,
     split_factor: int,
 ) -> None:
     try:
@@ -55,12 +55,12 @@ def _insert_with_dlq_fallback(
             _insert_with_dlq_fallback(chunk, ch_client, ch_table, dlq_producer, split_factor)
 
 
-class ClickhouseProducer:
+class ClickhouseProducer(Producer):
     def __init__(
         self,
         ch_client: ch_driver.Client,
         table: str,
-        dlq_producer: KafkaProducer | None = None,
+        dlq_producer: Producer | None = None,
         split_factor: int = 10,
     ) -> None:
         self._ch_client = ch_client
@@ -72,7 +72,7 @@ class ClickhouseProducer:
     def from_output_settings(
         cls,
         settings: ClickHouseOutputSettings,
-        dlq_producer: KafkaProducer | None = None,
+        dlq_producer: Producer | None = None,
         split_factor: int = 10,
     ) -> "ClickhouseProducer":
         ch_client = ch.get_client(
@@ -85,21 +85,30 @@ class ClickhouseProducer:
         )
         return cls(ch_client=ch_client, table=settings.table, dlq_producer=dlq_producer, split_factor=split_factor)
 
-    def produce_arrow(self, arrow_table: pa.Table) -> None:
+    def produce_arrow(self, data: pa.Table) -> None:
         try:
-            _insert_with_retry(ch_client=self._ch_client, table=self._table, arrow_table=arrow_table)
+            _insert_with_retry(ch_client=self._ch_client, table=self._table, arrow_table=data)
         except Exception as err:
             if self._dlq_producer is None:
                 raise
             logger.warning(
-                f"Batch of {len(arrow_table)} rows failed ({err}), "
+                f"Batch of {len(data)} rows failed ({err}), "
                 f"switching to recursive fallback with split_factor={self._split_factor}"
             )
             _insert_with_dlq_fallback(
-                table=arrow_table,
+                table=data,
                 ch_client=self._ch_client,
                 ch_table=self._table,
                 dlq_producer=self._dlq_producer,
                 split_factor=self._split_factor,
             )
             self._dlq_producer.flush()
+
+    def produce_pylist(self, rows: list[dict]) -> None:
+        self.produce_arrow(pa.Table.from_pylist(rows))
+
+    def flush(self) -> None:
+        """No-op: ClickHouse inserts are synchronous, nothing to flush."""
+
+    def close(self) -> None:
+        self._ch_client.close()

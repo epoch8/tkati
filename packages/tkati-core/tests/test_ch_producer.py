@@ -164,3 +164,49 @@ def test_ch_producer_failure_without_dlq_raises() -> None:
     with patch("time.sleep"):
         with pytest.raises(Exception, match="CH down"):
             producer.produce_arrow(arrow_table)
+
+
+def test_ch_producer_as_dlq_for_another_ch_producer() -> None:
+    """A ClickhouseProducer can itself be used as the dlq_producer for another ClickhouseProducer."""
+    primary_ch_client = MagicMock()
+    dlq_ch_client = MagicMock()
+    arrow_table = _make_arrow_table(1)
+
+    primary_ch_client.insert_arrow.side_effect = Exception("CH down")
+
+    dlq_producer = ClickhouseProducer(ch_client=dlq_ch_client, table="traffic_event_dlq")
+    producer = ClickhouseProducer(
+        ch_client=primary_ch_client, table="traffic_event", dlq_producer=dlq_producer
+    )
+
+    with patch("time.sleep"):
+        producer.produce_arrow(arrow_table)
+
+    dlq_ch_client.insert_arrow.assert_called_once()
+
+
+def test_ch_producer_flush_is_noop() -> None:
+    """flush() on ClickhouseProducer is a no-op and never touches ch_client."""
+    ch_client = MagicMock()
+    ClickhouseProducer(ch_client=ch_client, table="traffic_event").flush()
+    ch_client.assert_not_called()
+
+
+def test_ch_producer_produce_pylist() -> None:
+    """produce_pylist converts rows to an Arrow table and inserts them."""
+    ch_client = MagicMock()
+    rows = [{"uid": "uid-0", "traffic_in": 100}, {"uid": "uid-1", "traffic_in": 101}]
+
+    producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event")
+    producer.produce_pylist(rows)
+
+    ch_client.insert_arrow.assert_called_once()
+    sent = ch_client.insert_arrow.call_args.kwargs["arrow_table"]
+    assert sent.to_pylist() == rows
+
+
+def test_ch_producer_close() -> None:
+    """close() delegates to the underlying ch_client."""
+    ch_client = MagicMock()
+    ClickhouseProducer(ch_client=ch_client, table="traffic_event").close()
+    ch_client.close.assert_called_once()

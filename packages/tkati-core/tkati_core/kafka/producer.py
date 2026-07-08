@@ -7,11 +7,13 @@ import pyarrow as pa
 from confluent_kafka import Producer
 from loguru import logger
 
+from tkati_core.producer import Producer as ProducerBase
+
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import KafkaOutputSettings, KafkaTopicSettings
 
 
-class KafkaProducer:
+class KafkaProducer(ProducerBase):
     """
     A Kafka producer wrapper that writes data as messages.
 
