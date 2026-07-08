@@ -1,0 +1,32 @@
+[project]
+name = "k2ch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "tkati-core",
+    "loguru>=0.7.0",
+    "pydantic-settings>=2.11.0",
+]
+
+[project.scripts]
+k2ch = "k2ch.main:main"
+
+[dependency-groups]
+dev = ["pytest>=9.0.1", "confluent-kafka>=2.11.0"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["k2ch*"]
+
+[tool.uv]
+package = true
+
+[tool.uv-workspace-codegen]
+generate = true
+template_type = "test"

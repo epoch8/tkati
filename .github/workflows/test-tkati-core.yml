@@ -64,7 +64,12 @@ jobs:
         run: uv sync --package tkati-core
 
       - name: Check formatting
-        run: uv run ruff check packages/tkati-core
+        run: uvx ruff check packages/tkati-core
+
+      - name: Check typing
+        shell: bash
+        run: |
+          uv run mypy -p tkati_core
 
       - name: Run tests
         run: uv run pytest packages/tkati-core
