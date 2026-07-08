@@ -8,3 +8,6 @@ node_modules
 
 .tkati
 build/
+
+uv.lock
+.python-version
