@@ -1,6 +1,6 @@
 [project]
 name = "tkati-core"
-version = "0.3.0"
+version = "0.3.0-alpha.1"
 description = "Core abstractions for Kafka/ClickHouse streaming pipeline nodes"
 readme = "README.md"
 requires-python = ">=3.13"
