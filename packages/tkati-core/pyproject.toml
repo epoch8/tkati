@@ -39,4 +39,4 @@ module-root = ""
 
 [tool.uv-workspace-codegen]
 generate = true
-template_type = "package"
+template_type = ["test", "publish"]
