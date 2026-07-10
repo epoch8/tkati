@@ -1,17 +1,16 @@
 {
-	"name": "soax-data-processing (dev)",
+	"name": "tkati (dev)",
 	"dockerComposeFile": "docker-compose.devcontainer.yml",
 	"service": "dev",
 	"workspaceFolder": "/workspace",
 	"features": {
-		"ghcr.io/devcontainers-extra/features/uv:1": {},
+	    "ghcr.io/epoch8/devcontainer-features/homebrew-packages:0.3.0": {
+			"packages": "uv jj claude-code ktea"
+	    },
+		"ghcr.io/ProxayFox/devcontainer-features/clickhouse-local:1": {},
 		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
 			"packages": "git git-lfs curl ssh make less"
-		},
-		"ghcr.io/devcontainers/features/docker-in-docker:2": {},
-		"ghcr.io/ProxayFox/devcontainer-features/clickhouse-local:1": {},
-		"ghcr.io/devcontainers-extra/features/claude-code:1": {},
-		"ghcr.io/devcontainer-community/devcontainer-features/jj-vcs.dev:1": {}
+		}
 	},
 	"customizations": {
 		"vscode": {
