@@ -106,8 +106,8 @@ class KafkaConsumer(ConsumerBase):
 
     def _consume_batch(
         self,
-        aggregation_interval_seconds: int,
-        max_events_to_aggregate: int,
+        timeout: int,
+        num_messages: int,
     ) -> tuple[list, int]:
         """
         Consume raw messages from Kafka within the given time and count limits.
@@ -117,11 +117,11 @@ class KafkaConsumer(ConsumerBase):
         """
         if self.topic_name:
             logger.info(
-                f"Consuming events from topic(s): {self.topic_name} for up to {aggregation_interval_seconds}s or {max_events_to_aggregate} events"
+                f"Consuming events from topic(s): {self.topic_name} for up to {timeout}s or {num_messages} events"
             )
         else:
             logger.info(
-                f"Consuming events for up to {aggregation_interval_seconds}s or {max_events_to_aggregate} events"
+                f"Consuming events for up to {timeout}s or {num_messages} events"
             )
 
         start_time = time.time()
@@ -129,15 +129,15 @@ class KafkaConsumer(ConsumerBase):
         poll_timeout = 10
         valid_messages = []
 
-        while events_read < max_events_to_aggregate:
+        while events_read < num_messages:
             elapsed = time.time() - start_time
-            remaining_time = aggregation_interval_seconds - elapsed
+            remaining_time = timeout - elapsed
 
             if remaining_time <= 0:
-                logger.info(f"Reached time limit of {aggregation_interval_seconds}s")
+                logger.info(f"Reached time limit of {timeout}s")
                 break
 
-            remaining_messages = max_events_to_aggregate - events_read
+            remaining_messages = num_messages - events_read
             batch_timeout = min(poll_timeout, remaining_time)
             messages = self.consumer.consume(
                 num_messages=min(remaining_messages, 1_000_000),
@@ -162,15 +162,15 @@ class KafkaConsumer(ConsumerBase):
     # want to enhance it to handle individual message errors more gracefully.
     def read_arrow(
         self,
-        aggregation_interval_seconds: int,
-        max_events_to_aggregate: int,
+        timeout: int,
+        num_messages: int,
     ) -> pa.Table | None:
         """
         Read messages from subscribed topics into a PyArrow table.
 
         Args:
-            aggregation_interval_seconds: Maximum time in seconds to consume messages.
-            max_events_to_aggregate: Maximum number of events to consume.
+            timeout: Maximum time in seconds to consume messages.
+            num_messages: Maximum number of events to consume.
 
         Returns:
             A PyArrow Table containing the parsed events, or None if no data was consumed.
@@ -181,9 +181,7 @@ class KafkaConsumer(ConsumerBase):
             - Raises exceptions on JSON parsing errors.
             - Uses permissive parsing that ignores unexpected fields in JSON messages.
         """
-        valid_messages, events_read = self._consume_batch(
-            aggregation_interval_seconds, max_events_to_aggregate
-        )
+        valid_messages, events_read = self._consume_batch(timeout, num_messages)
 
         if events_read == 0:
             logger.info("No data consumed from topic.")
@@ -222,8 +220,8 @@ class KafkaConsumer(ConsumerBase):
 
     def read_pylist(
         self,
-        aggregation_interval_seconds: int,
-        max_events_to_aggregate: int,
+        timeout: int,
+        num_messages: int,
     ) -> list[dict] | None:
         """
         Read messages from subscribed topics into a list of dicts.
@@ -237,9 +235,7 @@ class KafkaConsumer(ConsumerBase):
         Notes:
             - Does NOT commit offsets. The caller is responsible for managing consumer lifecycle.
         """
-        valid_messages, events_read = self._consume_batch(
-            aggregation_interval_seconds, max_events_to_aggregate
-        )
+        valid_messages, events_read = self._consume_batch(timeout, num_messages)
 
         if events_read == 0:
             logger.info("No data consumed from topic.")

@@ -30,8 +30,8 @@ def test_read_arrow_returns_none_on_empty_topic(
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         result = consumer.read_arrow(
-            aggregation_interval_seconds=2,
-            max_events_to_aggregate=10,
+            timeout=2,
+            num_messages=10,
         )
         assert result is None
     finally:
@@ -55,8 +55,8 @@ def test_read_arrow_reads_json_messages(
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         table = consumer.read_arrow(
-            aggregation_interval_seconds=5,
-            max_events_to_aggregate=10,
+            timeout=5,
+            num_messages=10,
         )
     finally:
         consumer.close()
@@ -75,14 +75,16 @@ def test_read_arrow_respects_max_events(
     raw_producer: Producer,
 ):
     for i in range(10):
-        raw_producer.produce(kafka_input_topic, value=orjson.dumps({"id": str(i), "value": i}))
+        raw_producer.produce(
+            kafka_input_topic, value=orjson.dumps({"id": str(i), "value": i})
+        )
     raw_producer.flush()
 
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         table = consumer.read_arrow(
-            aggregation_interval_seconds=5,
-            max_events_to_aggregate=3,
+            timeout=5,
+            num_messages=3,
         )
     finally:
         consumer.close()
@@ -116,18 +118,22 @@ def test_read_arrow_timestamp_casting(
         ),
     )
 
-    raw_producer.produce(kafka_input_topic, value=orjson.dumps({"ts": 1_700_000_000_000}))
+    raw_producer.produce(
+        kafka_input_topic, value=orjson.dumps({"ts": 1_700_000_000_000})
+    )
     raw_producer.flush()
 
     consumer = KafkaConsumer.from_input_settings(settings)
     try:
-        table = consumer.read_arrow(aggregation_interval_seconds=5, max_events_to_aggregate=1)
+        table = consumer.read_arrow(timeout=5, num_messages=1)
     finally:
         consumer.close()
 
     assert table is not None
     assert table.schema.field("ts").type == pa.timestamp("ms")
-    assert table.column("ts")[0].as_py().timestamp() * 1000 == pytest.approx(1_700_000_000_000)
+    assert table.column("ts")[0].as_py().timestamp() * 1000 == pytest.approx(
+        1_700_000_000_000
+    )
 
 
 def test_read_pylist_returns_none_on_empty_topic(
@@ -136,8 +142,8 @@ def test_read_pylist_returns_none_on_empty_topic(
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         result = consumer.read_pylist(
-            aggregation_interval_seconds=2,
-            max_events_to_aggregate=10,
+            timeout=2,
+            num_messages=10,
         )
         assert result is None
     finally:
@@ -161,8 +167,8 @@ def test_read_pylist_reads_json_messages(
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         rows = consumer.read_pylist(
-            aggregation_interval_seconds=5,
-            max_events_to_aggregate=10,
+            timeout=5,
+            num_messages=10,
         )
     finally:
         consumer.close()

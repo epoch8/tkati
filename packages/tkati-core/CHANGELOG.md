@@ -23,6 +23,9 @@
   hardcoding a concrete class
 * `Consumer`, `Producer`, `build_consumer`, and `build_producer` are now re-exported
   from the top-level `tkati_core` package
+* **Breaking:** `Consumer.read_arrow`/`KafkaConsumer.read_arrow`/`read_pylist` params
+  renamed: `aggregation_interval_seconds` → `timeout`, `max_events_to_aggregate` →
+  `num_messages`
 
 # 0.2.0
 

@@ -10,8 +10,8 @@ def run_one_iteration(
     settings: AppSettings,
 ) -> None:
     batch = consumer.read_arrow(
-        max_events_to_aggregate=settings.input.consumer.batch_size,
-        aggregation_interval_seconds=settings.input.consumer.batch_timeout_sec,
+        num_messages=settings.input.consumer.batch_size,
+        timeout=settings.input.consumer.batch_timeout_sec,
     )
     if batch is None:
         return

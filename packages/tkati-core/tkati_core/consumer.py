@@ -11,8 +11,8 @@ class Consumer(ABC):
     @abstractmethod
     def read_arrow(
         self,
-        aggregation_interval_seconds: int,
-        max_events_to_aggregate: int,
+        timeout: int,
+        num_messages: int,
     ) -> pa.Table | None: ...
 
     @abstractmethod
