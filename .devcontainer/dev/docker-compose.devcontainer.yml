@@ -5,7 +5,6 @@ services:
       - UV_LINK_MODE=copy
     volumes:
       - ../..:/workspace:cached
-      - ../../../creds:/creds:ro
       - dev_venv:/workspace/.venv
       - dev_cache:/home/vscode/.cache
     command: sleep infinity
