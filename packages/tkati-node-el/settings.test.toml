@@ -1,3 +1,6 @@
+[input]
+type = "kafka"
+
 [input.topic]
 broker = "redpanda:29092"
 name = "traffic_event"
@@ -18,12 +21,13 @@ traffic_in = "uint32"
 traffic_out = "uint32"
 
 [input.consumer]
-group_id = "k2ch-group"
+group_id = "node-el-group"
 auto_offset_reset = "earliest"
 batch_size = 1000
 batch_timeout_sec = 10
 
 [output]
+type = "clickhouse"
 host = "clickhouse"
 port = 8123
 user = "default"

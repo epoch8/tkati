@@ -10,11 +10,13 @@ from confluent_kafka import Consumer
 from loguru import logger
 from pyarrow import json as pa_json
 
+from tkati_core.consumer import Consumer as ConsumerBase
+
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import KafkaInputSettings
 
 
-class KafkaConsumer:
+class KafkaConsumer(ConsumerBase):
     """
     A Kafka consumer wrapper that reads messages into PyArrow tables or Python lists.
 

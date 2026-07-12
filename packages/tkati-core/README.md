@@ -36,24 +36,33 @@ General form of settings is:
 
 ## Usage
 
+### `Consumer` / `Producer` base classes
+
+`tkati_core.consumer.Consumer` and `tkati_core.producer.Producer` are the abstract
+interfaces a node's input and output are built against. `KafkaConsumer` is the only
+`Consumer` implementation today; `KafkaProducer` and `ClickhouseProducer` both
+implement `Producer`. This is what lets a generic node pick its input/output kind
+from config instead of hardcoding a concrete class.
+
 ### Constructing a consumer from settings
 
-Use `KafkaArrowConsumer.from_input_settings` to construct a consumer directly from
+Use `KafkaConsumer.from_input_settings` to construct a consumer directly from
 `KafkaInputSettings` — no need to manually map fields to Confluent Kafka config keys.
 
 ```python
-from tkati_core.settings import TomlBaseSettings, KafkaInputSettings
-from tkati_core.consumer import KafkaArrowConsumer
+from tkati_core.settings import TomlBaseSettings
+from tkati_core.kafka.settings import KafkaInputSettings
+from tkati_core.kafka.consumer import KafkaConsumer
 
 class AppSettings(TomlBaseSettings):
     input: KafkaInputSettings
     # ...
 
 settings = AppSettings()
-consumer = KafkaArrowConsumer.from_input_settings(settings.input)
+consumer = KafkaConsumer.from_input_settings(settings.input)
 
 # Read a batch
-table = consumer.read_to_pyarrow(
+table = consumer.read_arrow(
     aggregation_interval_seconds=settings.input.consumer.batch_timeout_sec,
     max_events_to_aggregate=settings.input.consumer.batch_size,
 )
@@ -65,26 +74,30 @@ via `consumer.commit()`.
 
 ### Constructing a producer from settings
 
-Use `KafkaArrowProducer.from_output_settings` to construct a producer directly from
+Use `KafkaProducer.from_output_settings` to construct a producer directly from
 `KafkaOutputSettings`. It accepts PyArrow tables or record batches and handles
 serialization according to the topic's `format` setting.
 
 ```python
-from tkati_core.settings import TomlBaseSettings, KafkaOutputSettings
-from tkati_core.producer import KafkaArrowProducer
+from tkati_core.settings import TomlBaseSettings
+from tkati_core.kafka.settings import KafkaOutputSettings
+from tkati_core.kafka.producer import KafkaProducer
 
 class AppSettings(TomlBaseSettings):
     output: KafkaOutputSettings
     # ...
 
 settings = AppSettings()
-producer = KafkaArrowProducer.from_output_settings(settings.output)
+producer = KafkaProducer.from_output_settings(settings.output)
 
 # Produce a PyArrow table (one message per row for "json" format)
-producer.produce(table)
+producer.produce_arrow(table)
 producer.flush()
 producer.close()  # flushes and releases resources
 ```
+
+`ClickhouseProducer.from_output_settings` (in `tkati_core.clickhouse.producer`) works the
+same way against `ClickHouseOutputSettings`.
 
 **Formats** — controlled by `output.topic.format` in `settings.toml`:
 

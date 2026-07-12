@@ -1,7 +1,7 @@
 [project]
-name = "k2ch"
+name = "tkati-node-el"
 version = "0.1.0"
-description = "Add your description here"
+description = "Generic extract/load node: reads from a configurable input and writes to a configurable output"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-k2ch = "k2ch.main:main"
+tkati-node-el = "tkati_node_el.main:main"
 
 [dependency-groups]
 dev = ["pytest>=9.0.1", "confluent-kafka>=2.11.0"]
@@ -22,7 +22,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["k2ch*"]
+include = ["tkati_node_el*"]
 
 [tool.uv]
 package = true

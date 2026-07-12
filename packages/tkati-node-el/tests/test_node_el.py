@@ -5,10 +5,10 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
-from k2ch.main import run_one_iteration
-from k2ch.settings import AppSettings
 from tkati_core.clickhouse.producer import ClickhouseProducer
 from tkati_core.kafka.consumer import KafkaConsumer
+from tkati_node_el.main import run_one_iteration
+from tkati_node_el.settings import AppSettings
 
 
 def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
@@ -28,7 +28,7 @@ def _make_ch_producer(mock_ch_client: MagicMock, mock_dlq_producer: MagicMock, t
     return ClickhouseProducer(ch_client=mock_ch_client, table=table, dlq_producer=mock_dlq_producer)
 
 
-def test_k2ch_valid_flow(
+def test_node_el_valid_flow(
     kafka_producer_and_topic: Producer,
     mock_ch_client: MagicMock,
     mock_dlq_producer: MagicMock,
@@ -77,7 +77,7 @@ def test_k2ch_valid_flow(
     mock_dlq_producer.produce_arrow.assert_not_called()
 
 
-def test_k2ch_malformed_data(
+def test_node_el_malformed_data(
     kafka_producer_and_topic: Producer,
     mock_ch_client: MagicMock,
     mock_dlq_producer: MagicMock,

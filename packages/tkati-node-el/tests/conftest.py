@@ -5,23 +5,22 @@ from unittest.mock import MagicMock
 import pytest
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
-from k2ch.settings import AppSettings, ClickHouseOutputSettings, DLQSettings
 from tkati_core.kafka.settings import (
     KafkaConsumerSettings,
-    KafkaInputSettings,
     KafkaTopicSettings,
 )
 from tkati_core.kafka.testing import kafka_admin_client  # noqa: F401
+from tkati_node_el.settings import AppSettings, ClickHouseOutputConfig, DLQSettings, KafkaInputConfig
 
 
 @pytest.fixture(scope="function")
 def test_settings() -> AppSettings:
     run_id = str(uuid.uuid4())[:8]
     return AppSettings(
-        input=KafkaInputSettings(
+        input=KafkaInputConfig(
             topic=KafkaTopicSettings(
                 broker="localhost:9092",
-                name=f"e2e_k2ch_{run_id}",
+                name=f"e2e_node_el_{run_id}",
                 schema={
                     "uid": "string",
                     "time": "timestamp[ms]",
@@ -39,13 +38,13 @@ def test_settings() -> AppSettings:
                 },
             ),
             consumer=KafkaConsumerSettings(
-                group_id=f"test-k2ch-{run_id}",
+                group_id=f"test-node-el-{run_id}",
                 auto_offset_reset="earliest",
                 batch_size=100,
                 batch_timeout_sec=5,
             ),
         ),
-        output=ClickHouseOutputSettings(
+        output=ClickHouseOutputConfig(
             host="localhost",
             port=8123,
             user="default",
@@ -55,7 +54,7 @@ def test_settings() -> AppSettings:
             secure=False,
         ),
         dlq=DLQSettings(
-            topic=KafkaTopicSettings(broker="localhost:9092", name="k2ch-dlq"),
+            topic=KafkaTopicSettings(broker="localhost:9092", name="node-el-dlq"),
             split_factor=2,
         ),
     )
