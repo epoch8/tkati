@@ -10,7 +10,11 @@ from loguru import logger
 from tkati_core.producer import Producer as ProducerBase
 
 if TYPE_CHECKING:
-    from tkati_core.kafka.settings import KafkaOutputSettings, KafkaTopicSettings
+    from tkati_core.kafka.settings import (
+        KafkaConnectionSettings,
+        KafkaOutputSettings,
+        KafkaTopicSettings,
+    )
 
 
 class KafkaProducer(ProducerBase):
@@ -44,9 +48,11 @@ class KafkaProducer(ProducerBase):
         )
 
     @classmethod
-    def from_topic_settings(cls, topic: "KafkaTopicSettings") -> "KafkaProducer":
+    def from_topic_settings(
+        cls, connection: "KafkaConnectionSettings", topic: "KafkaTopicSettings"
+    ) -> "KafkaProducer":
         return cls(
-            kafka_config={"bootstrap.servers": topic.broker},
+            kafka_config={"bootstrap.servers": connection.broker},
             topic_name=topic.name,
             format=topic.format,
             key_column=topic.key_column,
@@ -54,7 +60,7 @@ class KafkaProducer(ProducerBase):
 
     @classmethod
     def from_output_settings(cls, settings: "KafkaOutputSettings") -> "KafkaProducer":
-        return cls.from_topic_settings(settings.topic)
+        return cls.from_topic_settings(settings.connection, settings.topic)
 
     def produce_arrow(self, data: pa.Table | pa.RecordBatch) -> None:
         """

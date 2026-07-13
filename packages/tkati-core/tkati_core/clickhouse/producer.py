@@ -76,14 +76,14 @@ class ClickhouseProducer(Producer):
         split_factor: int = 10,
     ) -> "ClickhouseProducer":
         ch_client = ch.get_client(
-            host=settings.host,
-            port=settings.port,
-            username=settings.user,
-            password=settings.password,
-            database=settings.database,
-            secure=settings.secure,
+            host=settings.connection.host,
+            port=settings.connection.port,
+            username=settings.connection.user,
+            password=settings.connection.password,
+            database=settings.table.database,
+            secure=settings.connection.secure,
         )
-        return cls(ch_client=ch_client, table=settings.table, dlq_producer=dlq_producer, split_factor=split_factor)
+        return cls(ch_client=ch_client, table=settings.table.name, dlq_producer=dlq_producer, split_factor=split_factor)
 
     def produce_arrow(self, data: pa.Table) -> None:
         try:

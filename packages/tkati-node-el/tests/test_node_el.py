@@ -14,7 +14,7 @@ from tkati_node_el.settings import AppSettings
 def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
     return KafkaConsumer(
         kafka_config={
-            "bootstrap.servers": test_settings.input.topic.broker,
+            "bootstrap.servers": test_settings.input.connection.broker,
             "group.id": test_settings.input.consumer.group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
@@ -59,7 +59,7 @@ def test_node_el_valid_flow(
     consumer = _make_consumer(test_settings)
     ch_producer = ClickhouseProducer(
         ch_client=mock_ch_client,
-        table=test_settings.output.table,
+        table=test_settings.output.table.name,
         dlq_producer=mock_dlq_producer,
     )
     try:
@@ -69,7 +69,7 @@ def test_node_el_valid_flow(
 
     mock_ch_client.insert_arrow.assert_called_once()
     _, kwargs = mock_ch_client.insert_arrow.call_args
-    assert kwargs["table"] == test_settings.output.table
+    assert kwargs["table"] == test_settings.output.table.name
     result_table = kwargs["arrow_table"]
     assert isinstance(result_table, pa.Table)
     assert len(result_table) == 1
@@ -92,7 +92,7 @@ def test_node_el_malformed_data(
     consumer = _make_consumer(test_settings)
     ch_producer = ClickhouseProducer(
         ch_client=mock_ch_client,
-        table=test_settings.output.table,
+        table=test_settings.output.table.name,
         dlq_producer=mock_dlq_producer,
     )
     try:

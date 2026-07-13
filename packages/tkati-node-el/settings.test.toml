@@ -1,8 +1,10 @@
 [input]
 type = "kafka"
 
-[input.topic]
+[input.connection]
 broker = "redpanda:29092"
+
+[input.topic]
 name = "traffic_event"
 
 [input.topic.schema]
@@ -28,10 +30,14 @@ batch_timeout_sec = 10
 
 [output]
 type = "clickhouse"
+
+[output.connection]
 host = "clickhouse"
 port = 8123
 user = "default"
 password = "default"
-database = "default"
-table = "traffic_event"
 secure = false
+
+[output.table]
+database = "default"
+name = "traffic_event"

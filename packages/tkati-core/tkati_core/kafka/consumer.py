@@ -33,7 +33,7 @@ class KafkaConsumer(ConsumerBase):
         Sets enable.auto.commit=False — offsets must be committed explicitly via .commit().
         """
         kafka_config: dict[str, str | bool] = {
-            "bootstrap.servers": settings.topic.broker,
+            "bootstrap.servers": settings.connection.broker,
             "group.id": settings.consumer.group_id,
             "auto.offset.reset": settings.consumer.auto_offset_reset,
             "enable.auto.commit": False,

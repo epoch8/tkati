@@ -4,7 +4,11 @@ import orjson
 import pyarrow as pa
 from confluent_kafka import Consumer
 from tkati_core.kafka.producer import KafkaProducer
-from tkati_core.kafka.settings import KafkaOutputSettings, KafkaTopicSettings
+from tkati_core.kafka.settings import (
+    KafkaConnectionSettings,
+    KafkaOutputSettings,
+    KafkaTopicSettings,
+)
 
 
 def _consume_all(consumer: Consumer, topic: str, count: int, timeout: float = 10.0) -> list:
@@ -75,11 +79,11 @@ def test_produce_json_format_with_key_column(
     run_id: str,
 ):
     settings = KafkaOutputSettings(
+        connection=KafkaConnectionSettings(broker="localhost:9092"),
         topic=KafkaTopicSettings(
-            broker="localhost:9092",
             name=kafka_output_topic,
             key_column="user_id",
-        )
+        ),
     )
     table = pa.table({"user_id": ["u1", "u2"], "value": [100, 200]})
 
@@ -102,11 +106,11 @@ def test_produce_arrow_batch_format(
     run_id: str,
 ):
     settings = KafkaOutputSettings(
+        connection=KafkaConnectionSettings(broker="localhost:9092"),
         topic=KafkaTopicSettings(
-            broker="localhost:9092",
             name=kafka_output_topic,
             format="arrow-batch",
-        )
+        ),
     )
     original = pa.table({"id": ["x", "y", "z"], "n": [1, 2, 3]})
 
@@ -177,11 +181,11 @@ def test_produce_pylist_with_key_column(
     run_id: str,
 ):
     settings = KafkaOutputSettings(
+        connection=KafkaConnectionSettings(broker="localhost:9092"),
         topic=KafkaTopicSettings(
-            broker="localhost:9092",
             name=kafka_output_topic,
             key_column="user_id",
-        )
+        ),
     )
     rows = [{"user_id": "u1", "value": 100}, {"user_id": "u2", "value": 200}]
 

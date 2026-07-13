@@ -1,33 +1,7 @@
 from loguru import logger
-from tkati_core.clickhouse.producer import ClickhouseProducer
-from tkati_core.consumer import Consumer
-from tkati_core.kafka.consumer import KafkaConsumer
-from tkati_core.kafka.producer import KafkaProducer
-from tkati_core.producer import Producer
+from tkati_core import Consumer, Producer, build_consumer, build_producer
 
-from tkati_node_el.settings import AppSettings, InputSettings, OutputSettings
-
-
-def build_consumer(settings: InputSettings) -> Consumer:
-    if settings.type == "kafka":
-        return KafkaConsumer.from_input_settings(settings)
-    raise ValueError(f"Unsupported input type: {settings.type}")
-
-
-def build_producer(
-    settings: OutputSettings,
-    dlq_producer: Producer | None,
-    split_factor: int,
-) -> Producer:
-    if settings.type == "kafka":
-        return KafkaProducer.from_topic_settings(settings.topic)
-    if settings.type == "clickhouse":
-        return ClickhouseProducer.from_output_settings(
-            settings=settings,
-            dlq_producer=dlq_producer,
-            split_factor=split_factor,
-        )
-    raise ValueError(f"Unsupported output type: {settings.type}")
+from tkati_node_el.settings import AppSettings
 
 
 def run_one_iteration(
@@ -51,9 +25,9 @@ def main() -> None:
 
     consumer = build_consumer(settings.input)
 
-    dlq_producer: KafkaProducer | None = None
+    dlq_producer: Producer | None = None
     if settings.dlq is not None:
-        dlq_producer = KafkaProducer.from_topic_settings(settings.dlq.topic)
+        dlq_producer = build_producer(settings.dlq.output)
 
     producer = build_producer(
         settings.output,

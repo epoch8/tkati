@@ -5,6 +5,7 @@ import pytest
 from confluent_kafka import Consumer, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 from tkati_core.kafka.settings import (
+    KafkaConnectionSettings,
     KafkaConsumerSettings,
     KafkaInputSettings,
     KafkaOutputSettings,
@@ -23,8 +24,8 @@ def run_id() -> str:
 @pytest.fixture(scope="function")
 def input_settings(run_id: str) -> KafkaInputSettings:
     return KafkaInputSettings(
+        connection=KafkaConnectionSettings(broker=BROKER),
         topic=KafkaTopicSettings(
-            broker=BROKER,
             name=f"test_consumer_{run_id}",
             schema={"id": "string", "value": "int64"},
         ),
@@ -40,10 +41,10 @@ def input_settings(run_id: str) -> KafkaInputSettings:
 @pytest.fixture(scope="function")
 def output_settings(run_id: str) -> KafkaOutputSettings:
     return KafkaOutputSettings(
+        connection=KafkaConnectionSettings(broker=BROKER),
         topic=KafkaTopicSettings(
-            broker=BROKER,
             name=f"test_producer_{run_id}",
-        )
+        ),
     )
 
 

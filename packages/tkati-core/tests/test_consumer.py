@@ -98,14 +98,15 @@ def test_read_arrow_timestamp_casting(
 ):
     """Verify timestamp[ms] fields are parsed as int64 and cast to pa.timestamp('ms')."""
     from tkati_core.kafka.settings import (
+        KafkaConnectionSettings,
         KafkaConsumerSettings,
         KafkaInputSettings,
         KafkaTopicSettings,
     )
 
     settings = KafkaInputSettings(
+        connection=KafkaConnectionSettings(broker="localhost:9092"),
         topic=KafkaTopicSettings(
-            broker="localhost:9092",
             name=kafka_input_topic,
             schema={"ts": "timestamp[ms]"},
         ),

@@ -2,10 +2,11 @@
 
 Reads batches from a configurable input and writes them to a configurable output. Offsets are committed only after a successful write (at-least-once delivery).
 
-Input and output kinds are selected via the `type` field in each section — pick from whatever `tkati-core` supports:
+Input and output kinds are selected via the `type` field in each section — pick from whatever `tkati-core` supports. Every backend's settings split a **`connection`** tier (server-specific: how to reach the broker/database) from the resource tier (`topic` for Kafka, `table` for ClickHouse) and, where relevant, a tier local to this reader/writer instance (Kafka's `consumer` settings).
 
 - **Input**: `"kafka"` (JSON or Arrow-batch messages from a Kafka/Redpanda topic)
 - **Output**: `"kafka"` or `"clickhouse"` (native Arrow insert)
+- **DLQ**: same `OutputSettings` shape as `output` — a DLQ can be Kafka or ClickHouse too
 
 ## Configuration
 
@@ -15,8 +16,10 @@ Settings are loaded from a TOML file. Set the `SETTINGS_FILE` environment variab
 [input]
 type = "kafka"
 
-[input.topic]
+[input.connection]
 broker = "redpanda:29092"
+
+[input.topic]
 name   = "traffic_event"
 
 [input.topic.schema]
@@ -32,19 +35,28 @@ batch_timeout_sec = 10
 auto_offset_reset = "latest"
 
 [output]
-type     = "clickhouse"
+type = "clickhouse"
+
+[output.connection]
 host     = "clickhouse"
 port     = 9000
 user     = "default"
 password = ""
-database = "default"
-table    = "traffic_event"
 secure   = false
 
+[output.table]
+database = "default"
+name     = "traffic_event"
+
 [dlq]
-topic        = "node-el-dlq"
-# broker defaults to input.topic.broker when omitted
+type         = "kafka"
 split_factor = 10
+
+[dlq.connection]
+broker = "redpanda:29092"
+
+[dlq.topic]
+name = "node-el-dlq"
 ```
 
 A Kafka output instead looks like:
@@ -53,22 +65,42 @@ A Kafka output instead looks like:
 [output]
 type = "kafka"
 
-[output.topic]
+[output.connection]
 broker = "redpanda:29092"
+
+[output.topic]
 name   = "some-other-topic"
 format = "json"        # or "arrow-batch"
 key_column = "uid"     # optional
 ```
 
+A ClickHouse DLQ instead looks like:
+
+```toml
+[dlq]
+type = "clickhouse"
+
+[dlq.connection]
+host     = "clickhouse"
+port     = 9000
+user     = "default"
+password = ""
+secure   = false
+
+[dlq.table]
+database = "default"
+name     = "traffic_event_dlq"
+```
+
 ## DLQ semantics
 
-DLQ is currently only meaningful for the `clickhouse` output kind. When a batch insert fails after all retries, the app switches to a recursive fallback to isolate the problematic rows:
+DLQ *fallback triggering* is currently only implemented for the `clickhouse` output kind — `KafkaProducer` has no retry/split logic of its own. The DLQ *sink* itself (where isolated bad rows end up) can be Kafka or ClickHouse, independent of the primary output. When a batch insert fails after all retries, the app switches to a recursive fallback to isolate the problematic rows:
 
 1. The failing batch is split into `split_factor` equal sub-batches and each is retried independently.
 2. If a sub-batch also fails it is split again — this repeats until individual rows are reached.
-3. A single row that ClickHouse still rejects is written to the DLQ Kafka topic in Arrow IPC (`arrow-batch`) format, preserving the full schema.
+3. A single row that ClickHouse still rejects is written to the DLQ sink, preserving the full schema (Arrow IPC `arrow-batch` format for a Kafka DLQ).
 4. After all rows are handled (inserted or DLQ'd), the input offset is committed and the app resumes normal large-batch processing.
 
 With `split_factor=10` and a 1 000-row batch this takes at most 3 recursive levels (1000 → 100 → 10 → 1).
 
-**Delivery guarantee: at-least-once.** If the process crashes mid-recursion the uncommitted batch is re-read on restart and re-processed from the beginning, which may produce duplicate rows in ClickHouse and duplicate messages in the DLQ topic.
+**Delivery guarantee: at-least-once.** If the process crashes mid-recursion the uncommitted batch is re-read on restart and re-processed from the beginning, which may produce duplicate rows in the output and duplicate messages in the DLQ.

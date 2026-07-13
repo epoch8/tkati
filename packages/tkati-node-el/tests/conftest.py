@@ -5,21 +5,29 @@ from unittest.mock import MagicMock
 import pytest
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
+from tkati_core.clickhouse.settings import (
+    ClickHouseConnectionSettings,
+    ClickHouseOutputSettings,
+    ClickHouseTableSettings,
+)
 from tkati_core.kafka.settings import (
+    KafkaConnectionSettings,
     KafkaConsumerSettings,
+    KafkaInputSettings,
+    KafkaOutputSettings,
     KafkaTopicSettings,
 )
 from tkati_core.kafka.testing import kafka_admin_client  # noqa: F401
-from tkati_node_el.settings import AppSettings, ClickHouseOutputConfig, DLQSettings, KafkaInputConfig
+from tkati_node_el.settings import AppSettings, DLQSettings
 
 
 @pytest.fixture(scope="function")
 def test_settings() -> AppSettings:
     run_id = str(uuid.uuid4())[:8]
     return AppSettings(
-        input=KafkaInputConfig(
+        input=KafkaInputSettings(
+            connection=KafkaConnectionSettings(broker="localhost:9092"),
             topic=KafkaTopicSettings(
-                broker="localhost:9092",
                 name=f"e2e_node_el_{run_id}",
                 schema={
                     "uid": "string",
@@ -44,17 +52,21 @@ def test_settings() -> AppSettings:
                 batch_timeout_sec=5,
             ),
         ),
-        output=ClickHouseOutputConfig(
-            host="localhost",
-            port=8123,
-            user="default",
-            password="",
-            database="default",
-            table="traffic_event",
-            secure=False,
+        output=ClickHouseOutputSettings(
+            connection=ClickHouseConnectionSettings(
+                host="localhost",
+                port=8123,
+                user="default",
+                password="",
+                secure=False,
+            ),
+            table=ClickHouseTableSettings(database="default", name="traffic_event"),
         ),
         dlq=DLQSettings(
-            topic=KafkaTopicSettings(broker="localhost:9092", name="node-el-dlq"),
+            output=KafkaOutputSettings(
+                connection=KafkaConnectionSettings(broker="localhost:9092"),
+                topic=KafkaTopicSettings(name="node-el-dlq"),
+            ),
             split_factor=2,
         ),
     )
@@ -92,4 +104,4 @@ def kafka_producer_and_topic(
         except Exception as e:
             print(f"Failed to create topic {t}: {e}")
 
-    yield Producer({"bootstrap.servers": test_settings.input.topic.broker})
+    yield Producer({"bootstrap.servers": test_settings.input.connection.broker})
