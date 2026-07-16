@@ -22,7 +22,7 @@ services:
       - --kafka-addr PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr PLAINTEXT://localhost:9092
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9644/v1/status/ready"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9644/v1/status/ready" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -39,7 +39,7 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "-O", "-", "http://localhost:8123/ping" ]
       interval: 5s
       timeout: 5s
       retries: 10

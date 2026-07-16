@@ -37,20 +37,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      # clickhouse:
-      #   image: clickhouse/clickhouse-server:latest
-      #   ports:
-      #     - 8123:8123
-      #     - 9000:9000
-      #   env:
-      #     CLICKHOUSE_DB: default
-      #     CLICKHOUSE_USER: default
-      #     CLICKHOUSE_PASSWORD: default
-      #   options: >-
-      #     --health-cmd "curl -f http://localhost:8123/ping"
-      #     --health-interval 5s
-      #     --health-timeout 5s
-      #     --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        ports:
+          - 8123:8123
+          - 9000:9000
+        env:
+          CLICKHOUSE_DB: default
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: default
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 -O - http://localhost:8123/ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout code
@@ -63,7 +63,12 @@ jobs:
         run: uv sync --package {{ package.name }}
 
       - name: Check formatting
-        run: uv run ruff check {{ package.path }}
+        run: uvx ruff check {{ package.path }}
+
+      - name: Check typing
+        shell: bash
+        run: |
+          uv run mypy -p {{ package.package_name }}
 
       - name: Run tests
         run: uv run pytest {{ package.path }}

@@ -1,0 +1,43 @@
+[input]
+type = "kafka"
+
+[input.connection]
+broker = "redpanda:29092"
+
+[input.topic]
+name = "traffic_event"
+
+[input.topic.schema]
+uid = "string"
+time = "timestamp[ms]"
+package_id = "int32"
+user_hash = "string"
+sdk_hash = "string"
+conn_type = "string"
+country = "string"
+local_ip = "string"
+frontend_ip = "string"
+dest_addr = "string"
+client_ip = "string"
+traffic_in = "uint32"
+traffic_out = "uint32"
+
+[input.consumer]
+group_id = "node-el-group"
+auto_offset_reset = "earliest"
+batch_size = 1000
+batch_timeout_sec = 10
+
+[output]
+type = "clickhouse"
+
+[output.connection]
+host = "clickhouse"
+port = 8123
+user = "default"
+password = "default"
+secure = false
+
+[output.table]
+database = "default"
+name = "traffic_event"

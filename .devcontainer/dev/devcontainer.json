@@ -4,9 +4,9 @@
 	"service": "dev",
 	"workspaceFolder": "/workspace",
 	"features": {
-	    "ghcr.io/epoch8/devcontainer-features/homebrew-packages:0.3.0": {
+		"ghcr.io/epoch8/devcontainer-features/homebrew-packages:0.3.0": {
 			"packages": "uv jj claude-code ktea"
-	    },
+		},
 		"ghcr.io/ProxayFox/devcontainer-features/clickhouse-local:1": {},
 		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
 			"packages": "git git-lfs curl ssh make less"
@@ -15,12 +15,15 @@
 	"customizations": {
 		"vscode": {
 			"extensions": [
+				"Anthropic.claude-code",
+				"charliermarsh.ruff",
+				"ms-python.mypy-type-checker",
 				"ms-python.python",
 				"ms-python.vscode-pylance",
-				"charliermarsh.ruff",
+				"mtxr.sqltools",
 				"tamasfe.even-better-toml",
-				"ms-python.mypy-type-checker",
 				"typespec.typespec-vscode",
+				"ultram4rine.sqltools-clickhouse-driver",
 				"visualjj.visualjj"
 			],
 			"settings": {

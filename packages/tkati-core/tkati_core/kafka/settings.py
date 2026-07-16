@@ -3,8 +3,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-class KafkaTopicSettings(BaseModel):
+class KafkaConnectionSettings(BaseModel):
     broker: str
+
+
+class KafkaTopicSettings(BaseModel):
     name: str
     schema: dict[str, str] = Field(default_factory=dict)  # type: ignore
     format: Literal["json", "arrow-batch"] = "json"
@@ -19,9 +22,13 @@ class KafkaConsumerSettings(BaseModel):
 
 
 class KafkaInputSettings(BaseModel):
+    type: Literal["kafka"] = "kafka"
+    connection: KafkaConnectionSettings
     topic: KafkaTopicSettings
     consumer: KafkaConsumerSettings
 
 
 class KafkaOutputSettings(BaseModel):
+    type: Literal["kafka"] = "kafka"
+    connection: KafkaConnectionSettings
     topic: KafkaTopicSettings

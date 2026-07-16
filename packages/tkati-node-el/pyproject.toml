@@ -1,0 +1,32 @@
+[project]
+name = "tkati-node-el"
+version = "0.3.0-alpha.2"
+description = "Generic extract/load node: reads from a configurable input and writes to a configurable output"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "tkati-core==0.3.0-alpha.2",
+    "loguru>=0.7.0",
+    "pydantic-settings>=2.11.0",
+]
+
+[project.scripts]
+tkati-node-el = "tkati_node_el.main:main"
+
+[dependency-groups]
+dev = ["pytest>=9.0.1", "confluent-kafka>=2.11.0", "clickhouse-connect>=0.11.0"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tkati_node_el*"]
+
+[tool.uv]
+package = true
+
+[tool.uv-workspace-codegen]
+generate = true
+template_type = "test"
