@@ -35,7 +35,8 @@ batch_timeout_sec = 10
 auto_offset_reset = "latest"
 
 [output]
-type = "clickhouse"
+type             = "clickhouse"
+dlq_split_factor = 10
 
 [output.connection]
 host     = "clickhouse"
@@ -49,8 +50,7 @@ database = "default"
 name     = "traffic_event"
 
 [dlq]
-type         = "kafka"
-split_factor = 10
+type = "kafka"
 
 [dlq.connection]
 broker = "redpanda:29092"
@@ -96,11 +96,11 @@ name     = "traffic_event_dlq"
 
 DLQ *fallback triggering* is currently only implemented for the `clickhouse` output kind — `KafkaProducer` has no retry/split logic of its own. The DLQ *sink* itself (where isolated bad rows end up) can be Kafka or ClickHouse, independent of the primary output. When a batch insert fails after all retries, the app switches to a recursive fallback to isolate the problematic rows:
 
-1. The failing batch is split into `split_factor` equal sub-batches and each is retried independently.
+1. The failing batch is split into `dlq_split_factor` equal sub-batches and each is retried independently.
 2. If a sub-batch also fails it is split again — this repeats until individual rows are reached.
 3. A single row that ClickHouse still rejects is written to the DLQ sink, preserving the full schema (Arrow IPC `arrow-batch` format for a Kafka DLQ).
 4. After all rows are handled (inserted or DLQ'd), the input offset is committed and the app resumes normal large-batch processing.
 
-With `split_factor=10` and a 1 000-row batch this takes at most 3 recursive levels (1000 → 100 → 10 → 1).
+`dlq_split_factor` is a setting on the `clickhouse` `[output]` block (see above), not on `[dlq]` — it describes how the primary output retries, independent of where the DLQ sink sends isolated rows. With `dlq_split_factor=10` and a 1 000-row batch this takes at most 3 recursive levels (1000 → 100 → 10 → 1).
 
 **Delivery guarantee: at-least-once.** If the process crashes mid-recursion the uncommitted batch is re-read on restart and re-processed from the beginning, which may produce duplicate rows in the output and duplicate messages in the DLQ.

@@ -29,14 +29,14 @@ def build_consumer(settings: InputSettings) -> Consumer:
 def build_producer(
     settings: OutputSettings,
     dlq_producer: Producer | None = None,
-    split_factor: int = 10,
 ) -> Producer:
     match settings:
         case KafkaOutputSettings():
             return KafkaProducer.from_output_settings(settings)
         case ClickHouseOutputSettings():
             return ClickhouseProducer.from_output_settings(
-                settings=settings, dlq_producer=dlq_producer, split_factor=split_factor
+                settings=settings,
+                dlq_producer=dlq_producer,
             )
         case _:
             raise ValueError(f"Unsupported output settings: {type(settings).__name__}")

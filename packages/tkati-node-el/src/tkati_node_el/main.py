@@ -27,13 +27,9 @@ def main() -> None:
 
     dlq_producer: Producer | None = None
     if settings.dlq is not None:
-        dlq_producer = build_producer(settings.dlq.output)
+        dlq_producer = build_producer(settings.dlq)
 
-    producer = build_producer(
-        settings.output,
-        dlq_producer=dlq_producer,
-        split_factor=settings.dlq.split_factor if settings.dlq else 10,
-    )
+    producer = build_producer(settings.output, dlq_producer=dlq_producer)
 
     try:
         while True:

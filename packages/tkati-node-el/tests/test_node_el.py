@@ -6,6 +6,7 @@ import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
 from tkati_core.clickhouse.producer import ClickhouseProducer
+from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_node_el.main import run_one_iteration
 from tkati_node_el.settings import AppSettings
@@ -24,8 +25,14 @@ def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
     )
 
 
-def _make_ch_producer(mock_ch_client: MagicMock, mock_dlq_producer: MagicMock, table: str = "traffic_event") -> ClickhouseProducer:
-    return ClickhouseProducer(ch_client=mock_ch_client, table=table, dlq_producer=mock_dlq_producer)
+def _make_ch_producer(
+    mock_ch_client: MagicMock,
+    mock_dlq_producer: MagicMock,
+    table: str = "traffic_event",
+) -> ClickhouseProducer:
+    return ClickhouseProducer(
+        ch_client=mock_ch_client, table=table, dlq_producer=mock_dlq_producer
+    )
 
 
 def test_node_el_valid_flow(
@@ -55,6 +62,8 @@ def test_node_el_valid_flow(
         test_settings.input.topic.name, value=orjson.dumps(event)
     )
     kafka_producer_and_topic.flush()
+
+    assert isinstance(test_settings.output, ClickHouseOutputSettings)
 
     consumer = _make_consumer(test_settings)
     ch_producer = ClickhouseProducer(
@@ -88,6 +97,8 @@ def test_node_el_malformed_data(
         test_settings.input.topic.name, value=b"not a json object"
     )
     kafka_producer_and_topic.flush()
+
+    assert isinstance(test_settings.output, ClickHouseOutputSettings)
 
     consumer = _make_consumer(test_settings)
     ch_producer = ClickhouseProducer(

@@ -83,9 +83,11 @@ consumer = build_consumer(settings.input)
 producer = build_producer(settings.output)
 ```
 
-`build_producer` also takes optional `dlq_producer`/`split_factor` kwargs, forwarded to
+`build_producer` also takes an optional `dlq_producer` kwarg, forwarded to
 `ClickhouseProducer.from_output_settings` when `settings.type == "clickhouse"` (a no-op
-for the `"kafka"` output kind, which has no DLQ-fallback logic of its own).
+for the `"kafka"` output kind, which has no DLQ-fallback logic of its own). The
+recursive-split batch size for that fallback comes from `settings.dlq_split_factor`
+(a field on `ClickHouseOutputSettings` itself), not from a separate parameter.
 
 ### Constructing a consumer from settings
 

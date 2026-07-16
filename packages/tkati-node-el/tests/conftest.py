@@ -18,7 +18,7 @@ from tkati_core.kafka.settings import (
     KafkaTopicSettings,
 )
 from tkati_core.kafka.testing import kafka_admin_client  # noqa: F401
-from tkati_node_el.settings import AppSettings, DLQSettings
+from tkati_node_el.settings import AppSettings
 
 
 @pytest.fixture(scope="function")
@@ -61,13 +61,11 @@ def test_settings() -> AppSettings:
                 secure=False,
             ),
             table=ClickHouseTableSettings(database="default", name="traffic_event"),
+            dlq_split_factor=2,
         ),
-        dlq=DLQSettings(
-            output=KafkaOutputSettings(
-                connection=KafkaConnectionSettings(broker="localhost:9092"),
-                topic=KafkaTopicSettings(name="node-el-dlq"),
-            ),
-            split_factor=2,
+        dlq=KafkaOutputSettings(
+            connection=KafkaConnectionSettings(broker="localhost:9092"),
+            topic=KafkaTopicSettings(name="node-el-dlq"),
         ),
     )
 

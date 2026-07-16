@@ -20,3 +20,4 @@ class ClickHouseOutputSettings(BaseModel):
     type: Literal["clickhouse"] = "clickhouse"
     connection: ClickHouseConnectionSettings
     table: ClickHouseTableSettings
+    dlq_split_factor: int = 10

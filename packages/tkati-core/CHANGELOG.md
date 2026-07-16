@@ -26,6 +26,9 @@
 * **Breaking:** `Consumer.read_arrow`/`KafkaConsumer.read_arrow`/`read_pylist` params
   renamed: `aggregation_interval_seconds` → `timeout`, `max_events_to_aggregate` →
   `num_messages`
+* **Breaking:** `ClickHouseOutputSettings` gains a `dlq_split_factor: int = 10` field;
+  `build_producer` no longer takes a `split_factor` kwarg — it derives the value from
+  `settings.dlq_split_factor` when `settings` is a `ClickHouseOutputSettings`
 
 # 0.2.0
 
