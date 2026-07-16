@@ -2,6 +2,8 @@ import uuid
 from collections.abc import Generator
 from unittest.mock import MagicMock
 
+import clickhouse_connect as ch
+import clickhouse_connect.driver as ch_driver
 import pytest
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
@@ -22,8 +24,12 @@ from tkati_node_el.settings import AppSettings
 
 
 @pytest.fixture(scope="function")
-def test_settings() -> AppSettings:
-    run_id = str(uuid.uuid4())[:8]
+def run_id() -> str:
+    return str(uuid.uuid4())[:8]
+
+
+@pytest.fixture(scope="function")
+def test_settings(run_id: str) -> AppSettings:
     return AppSettings(
         input=KafkaInputSettings(
             connection=KafkaConnectionSettings(broker="localhost:9092"),
@@ -57,10 +63,13 @@ def test_settings() -> AppSettings:
                 host="localhost",
                 port=8123,
                 user="default",
-                password="",
+                password="default",
                 secure=False,
             ),
-            table=ClickHouseTableSettings(database="default", name="traffic_event"),
+            table=ClickHouseTableSettings(
+                database="default",
+                name=f"traffic_event_{run_id}",
+            ),
             dlq_split_factor=2,
         ),
         dlq=KafkaOutputSettings(
@@ -71,11 +80,49 @@ def test_settings() -> AppSettings:
 
 
 @pytest.fixture(scope="function")
-def mock_ch_client() -> MagicMock:
-    """Mock for clickhouse_connect client. insert_arrow is the only called method."""
-    client = MagicMock()
-    client.insert_arrow = MagicMock()
-    return client
+def ch_client(test_settings: AppSettings) -> Generator[ch_driver.Client, None, None]:
+    """A real clickhouse_connect client, for table setup/teardown and result verification."""
+    assert isinstance(test_settings.output, ClickHouseOutputSettings)
+    connection = test_settings.output.connection
+    client = ch.get_client(
+        host=connection.host,
+        port=connection.port,
+        username=connection.user,
+        password=connection.password,
+        database=test_settings.output.table.database,
+        secure=connection.secure,
+    )
+    yield client
+    client.close()
+
+
+@pytest.fixture(scope="function")
+def ch_table(
+    test_settings: AppSettings, ch_client: ch_driver.Client
+) -> Generator[str, None, None]:
+    """Creates the output table against the real ClickHouse instance and drops it afterward."""
+    assert isinstance(test_settings.output, ClickHouseOutputSettings)
+    table_settings = test_settings.output.table
+    table = f"{table_settings.database}.{table_settings.name}"
+    ch_client.command(f"""
+        CREATE TABLE {table} (
+            uid String,
+            time DateTime64(3),
+            package_id Int32,
+            user_hash String,
+            sdk_hash String,
+            conn_type String,
+            country String,
+            local_ip String,
+            frontend_ip String,
+            dest_addr String,
+            client_ip String,
+            traffic_in UInt32,
+            traffic_out UInt32
+        ) ENGINE = MergeTree ORDER BY uid
+    """)
+    yield table_settings.name
+    ch_client.command(f"DROP TABLE {table}")
 
 
 @pytest.fixture(scope="function")

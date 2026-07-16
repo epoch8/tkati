@@ -7,9 +7,6 @@
 		"ghcr.io/epoch8/devcontainer-features/homebrew-packages:0.3.0": {
 			"packages": "uv jj claude-code ktea"
 		},
-		"ghcr.io/devcontainers/features/node": {
-			"version": "24"
-		},
 		"ghcr.io/ProxayFox/devcontainer-features/clickhouse-local:1": {},
 		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
 			"packages": "git git-lfs curl ssh make less"

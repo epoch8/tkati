@@ -11,7 +11,12 @@ from tkati_core.kafka.settings import (
 )
 
 
-def _consume_all(consumer: Consumer, topic: str, count: int, timeout: float = 10.0) -> list:
+def _consume_all(
+    consumer: Consumer,
+    topic: str,
+    count: int,
+    timeout: float = 10.0,
+) -> list:
     """Consume exactly `count` messages from `topic`, returning raw confluent Message objects."""
     consumer.subscribe([topic])
     messages = []  # type: ignore

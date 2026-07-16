@@ -14,7 +14,7 @@ dependencies = [
 tkati-node-el = "tkati_node_el.main:main"
 
 [dependency-groups]
-dev = ["pytest>=9.0.1", "confluent-kafka>=2.11.0"]
+dev = ["pytest>=9.0.1", "confluent-kafka>=2.11.0", "clickhouse-connect>=0.11.0"]
 
 [build-system]
 requires = ["setuptools", "wheel"]

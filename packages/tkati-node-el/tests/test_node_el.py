@@ -1,8 +1,8 @@
 import time
 from unittest.mock import MagicMock
 
+import clickhouse_connect.driver as ch_driver
 import orjson
-import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
 from tkati_core.clickhouse.producer import ClickhouseProducer
@@ -25,23 +25,14 @@ def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
     )
 
 
-def _make_ch_producer(
-    mock_ch_client: MagicMock,
-    mock_dlq_producer: MagicMock,
-    table: str = "traffic_event",
-) -> ClickhouseProducer:
-    return ClickhouseProducer(
-        ch_client=mock_ch_client, table=table, dlq_producer=mock_dlq_producer
-    )
-
-
 def test_node_el_valid_flow(
     kafka_producer_and_topic: Producer,
-    mock_ch_client: MagicMock,
+    ch_client: ch_driver.Client,
+    ch_table: str,
     mock_dlq_producer: MagicMock,
     test_settings: AppSettings,
 ) -> None:
-    """Produce a valid event to Kafka, run one iteration, verify CH insert was called."""
+    """Produce a valid event to Kafka, run one iteration, verify the row lands in ClickHouse."""
     event = {
         "uid": "abc123",
         "time": int(time.time() * 1000),
@@ -67,8 +58,8 @@ def test_node_el_valid_flow(
 
     consumer = _make_consumer(test_settings)
     ch_producer = ClickhouseProducer(
-        ch_client=mock_ch_client,
-        table=test_settings.output.table.name,
+        ch_client=ch_client,
+        table=ch_table,
         dlq_producer=mock_dlq_producer,
     )
     try:
@@ -76,19 +67,15 @@ def test_node_el_valid_flow(
     finally:
         consumer.close()
 
-    mock_ch_client.insert_arrow.assert_called_once()
-    _, kwargs = mock_ch_client.insert_arrow.call_args
-    assert kwargs["table"] == test_settings.output.table.name
-    result_table = kwargs["arrow_table"]
-    assert isinstance(result_table, pa.Table)
-    assert len(result_table) == 1
-    assert result_table.column("uid")[0].as_py() == "abc123"
+    result = ch_client.query(f"SELECT uid, traffic_in, traffic_out FROM {ch_table}")
+    assert result.result_rows == [("abc123", 100, 200)]
     mock_dlq_producer.produce_arrow.assert_not_called()
 
 
 def test_node_el_malformed_data(
     kafka_producer_and_topic: Producer,
-    mock_ch_client: MagicMock,
+    ch_client: ch_driver.Client,
+    ch_table: str,
     mock_dlq_producer: MagicMock,
     test_settings: AppSettings,
 ) -> None:
@@ -102,8 +89,8 @@ def test_node_el_malformed_data(
 
     consumer = _make_consumer(test_settings)
     ch_producer = ClickhouseProducer(
-        ch_client=mock_ch_client,
-        table=test_settings.output.table.name,
+        ch_client=ch_client,
+        table=ch_table,
         dlq_producer=mock_dlq_producer,
     )
     try:
@@ -112,4 +99,5 @@ def test_node_el_malformed_data(
     finally:
         consumer.close()
 
-    mock_ch_client.insert_arrow.assert_not_called()
+    result = ch_client.query(f"SELECT count() FROM {ch_table}")
+    assert result.result_rows[0][0] == 0
