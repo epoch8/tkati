@@ -59,19 +59,15 @@ interfaces a node's input and output are built against. `KafkaConsumer` is the o
 implement `Producer`. This is what lets a generic node pick its input/output kind
 from config instead of hardcoding a concrete class.
 
-### `tkati_core.node` — generic node settings and factories
+### `tkati_core.settings` — generic node settings aliases
 
-`tkati_core.node` is the recommended entry point for a generic extract/load node: it
-defines `InputSettings`/`OutputSettings` (discriminated unions over every input/output
-kind `tkati-core` implements) and `build_consumer`/`build_producer` factories that pick
-the right concrete class from a settings object's `type` field, instead of the caller
-hardcoding `KafkaConsumer`/`KafkaProducer`/`ClickhouseProducer` directly. `Consumer`,
-`Producer`, `build_consumer`, and `build_producer` are also re-exported from the
-top-level `tkati_core` package for convenience.
+`tkati_core.settings` defines `InputSettings`/`OutputSettings` (discriminated unions
+over every input/output kind `tkati-core` implements). Use those aliases with the
+factory helpers in `tkati_core.consumer` and `tkati_core.producer`, or import the
+helpers from the top-level `tkati_core` package for convenience.
 
 ```python
-from tkati_core import build_consumer, build_producer
-from tkati_core.node import InputSettings, OutputSettings
+from tkati_core import InputSettings, OutputSettings, build_consumer, build_producer
 from tkati_core.settings import TomlBaseSettings
 
 class AppSettings(TomlBaseSettings):

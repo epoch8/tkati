@@ -17,12 +17,13 @@
     concrete type
   * `KafkaProducer.from_topic_settings` now takes `(connection, topic)` instead of
     just `(topic)`
-* Add `tkati_core.node` module: `InputSettings`/`OutputSettings` discriminated unions
-  plus `build_consumer`/`build_producer` factories, so a generic node picks its
-  input/output implementation from a settings object's `type` field without
-  hardcoding a concrete class
-* `Consumer`, `Producer`, `build_consumer`, and `build_producer` are now re-exported
-  from the top-level `tkati_core` package
+* Add `InputSettings`/`OutputSettings` discriminated unions to `tkati_core.settings`,
+  plus `build_consumer` (in `tkati_core.consumer`) and `build_producer` (in
+  `tkati_core.producer`) factories, so a generic node picks its input/output
+  implementation from a settings object's `type` field without hardcoding a
+  concrete class
+* `Consumer`, `Producer`, `InputSettings`, `OutputSettings`, `build_consumer`, and
+  `build_producer` are now re-exported from the top-level `tkati_core` package
 * **Breaking:** `Consumer.read_arrow`/`KafkaConsumer.read_arrow`/`read_pylist` params
   renamed: `aggregation_interval_seconds` → `timeout`, `max_events_to_aggregate` →
   `num_messages`

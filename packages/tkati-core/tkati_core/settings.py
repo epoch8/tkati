@@ -1,12 +1,17 @@
 import os
+from typing import Annotated
 
 from loguru import logger
+from pydantic import Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
+
+from tkati_core.clickhouse.settings import ClickHouseOutputSettings
+from tkati_core.kafka.settings import KafkaInputSettings, KafkaOutputSettings
 
 SETTINGS_FILE = os.getenv("SETTINGS_FILE", "settings.toml")
 
@@ -37,3 +42,9 @@ class TomlBaseSettings(BaseSettings):
             file_secret_settings,
             TomlConfigSettingsSource(settings_cls),
         )
+
+
+InputSettings = KafkaInputSettings
+OutputSettings = Annotated[
+    KafkaOutputSettings | ClickHouseOutputSettings, Field(discriminator="type")
+]

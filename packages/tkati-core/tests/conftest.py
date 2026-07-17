@@ -64,6 +64,11 @@ def kafka_input_topic(
         except Exception as e:
             print(f"Failed to create topic {t}: {e}")
     yield topic
+    for f in kafka_admin_client.delete_topics([topic]).values():
+        try:
+            f.result()
+        except Exception as e:
+            print(f"Failed to delete topic {topic}: {e}")
 
 
 @pytest.fixture(scope="function")
@@ -82,6 +87,11 @@ def kafka_output_topic(
         except Exception as e:
             print(f"Failed to create topic {t}: {e}")
     yield topic
+    for f in kafka_admin_client.delete_topics([topic]).values():
+        try:
+            f.result()
+        except Exception as e:
+            print(f"Failed to delete topic {topic}: {e}")
 
 
 @pytest.fixture(scope="function")
