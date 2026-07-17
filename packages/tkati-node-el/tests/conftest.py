@@ -150,3 +150,9 @@ def kafka_producer_and_topic(
             print(f"Failed to create topic {t}: {e}")
 
     yield Producer({"bootstrap.servers": test_settings.input.connection.broker})
+
+    for f in kafka_admin_client.delete_topics([topic]).values():
+        try:
+            f.result()
+        except Exception as e:
+            print(f"Failed to delete topic {topic}: {e}")

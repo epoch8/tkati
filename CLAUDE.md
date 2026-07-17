@@ -10,3 +10,7 @@ This repo uses **Jujutsu (`jj`)**, not plain `git` workflows, even though it's g
 ## Python workspace (uv)
 
 Use `uv sync --all-packages` when you want the environment to reflect changes across the workspace (e.g. after editing a package's `pyproject.toml` or touching multiple packages). Syncing a single `--package` swaps the active env to just that package's deps and can uninstall tools (`ruff`, `mypy`) needed by other packages.
+
+### Versioning
+
+All packages in this workspace share one version number. When bumping the version of one package's `pyproject.toml`, bump it in every package to match, including any exact-pinned inter-package dependencies (e.g. `tkati-core==X.Y.Z` in `tkati-node-el`'s `dependencies`). Run `uv sync --all-packages` afterward to update `uv.lock`.
