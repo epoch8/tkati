@@ -5,7 +5,7 @@
 	"workspaceFolder": "/workspace",
 	"features": {
 		"ghcr.io/epoch8/devcontainer-features/homebrew-packages:0.3.0": {
-			"packages": "uv jj claude-code ktea"
+			"packages": "gh uv jj claude-code ktea"
 		},
 		"ghcr.io/ProxayFox/devcontainer-features/clickhouse-local:1": {},
 		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
