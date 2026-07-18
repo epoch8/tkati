@@ -9,7 +9,7 @@ class KafkaConnectionSettings(BaseModel):
 
 class KafkaTopicSettings(BaseModel):
     name: str
-    schema: dict[str, str] = Field(default_factory=dict)  # type: ignore
+    schema: dict[str, str] = Field(default_factory=dict)
     format: Literal["json", "arrow-batch"] = "json"
     key_column: str | None = None
 
