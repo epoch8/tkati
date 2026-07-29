@@ -30,6 +30,9 @@
 * **Breaking:** `ClickHouseOutputSettings` gains a `dlq_split_factor: int = 10` field;
   `build_producer` no longer takes a `split_factor` kwarg — it derives the value from
   `settings.dlq_split_factor` when `settings` is a `ClickHouseOutputSettings`
+* DLQ sinks now receive rejected rows using the DLQ schema
+  `producer`/`data`/`err_message`/`time`; `producer` contains the source
+  ClickHouse URL, database, and table as JSON
 
 # 0.2.0
 

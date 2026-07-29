@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -11,6 +12,30 @@ from tkati_core.clickhouse.producer import (
 
 def _make_arrow_table(n: int = 1) -> pa.Table:
     return pa.table({"uid": [f"uid-{i}" for i in range(n)], "traffic_in": [100 + i for i in range(n)]})
+
+
+def _set_ch_client_metadata(ch_client: MagicMock) -> None:
+    ch_client.uri = "http://clickhouse:8123"
+    ch_client.database = "default"
+
+
+def _assert_dlq_row(
+    sent: pa.Table,
+    *,
+    ch_table: str = "traffic_event",
+    err_message: str,
+    data: dict,
+) -> None:
+    assert len(sent) == 1
+    assert sent.column_names == ["producer", "data", "err_message", "time"]
+    row = sent.to_pylist()[0]
+    producer_info = json.loads(row["producer"])
+    assert producer_info["ch_table"] == ch_table
+    assert producer_info["ch_database"] == "default"
+    assert producer_info["ch_url"] == "http://clickhouse:8123"
+    assert json.loads(row["data"]) == data
+    assert row["err_message"] == err_message
+    assert row["time"] is not None
 
 
 def test_insert_retry_on_failure() -> None:
@@ -68,6 +93,7 @@ def test_fallback_all_succeed() -> None:
 def test_dlq_single_bad_row() -> None:
     """A single bad row always rejected by CH → written to DLQ once."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
 
     bad_row = _make_arrow_table(1)
@@ -84,7 +110,7 @@ def test_dlq_single_bad_row() -> None:
 
     dlq_producer.produce_arrow.assert_called_once()
     sent = dlq_producer.produce_arrow.call_args[0][0]
-    assert len(sent) == 1
+    _assert_dlq_row(sent, err_message="bad row", data={"uid": "uid-0", "traffic_in": 100})
 
 
 def test_no_dlq_raises_on_failure() -> None:
@@ -101,6 +127,7 @@ def test_no_dlq_raises_on_failure() -> None:
 def test_recursive_descent() -> None:
     """4-row batch fails; with split_factor=2, recursion finds and DLQs exactly the one bad row."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
 
     def insert_side_effect(table, arrow_table):
@@ -122,8 +149,11 @@ def test_recursive_descent() -> None:
 
     dlq_producer.produce_arrow.assert_called_once()
     sent = dlq_producer.produce_arrow.call_args[0][0]
-    assert len(sent) == 1
-    assert sent.column("uid")[0].as_py() == "uid-2"
+    _assert_dlq_row(
+        sent,
+        err_message="batch contains bad row uid-2",
+        data={"uid": "uid-2", "traffic_in": 102},
+    )
 
 
 def test_ch_producer_success_no_dlq_call() -> None:
@@ -143,6 +173,7 @@ def test_ch_producer_success_no_dlq_call() -> None:
 def test_ch_producer_failure_with_dlq() -> None:
     """produce_arrow fails: recursive fallback runs and DLQ is flushed."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
     arrow_table = _make_arrow_table(1)
     ch_client.insert_arrow.side_effect = Exception("CH down")
@@ -169,22 +200,27 @@ def test_ch_producer_failure_without_dlq_raises() -> None:
 
 
 def test_ch_producer_as_dlq_for_another_ch_producer() -> None:
-    """A ClickhouseProducer can itself be used as the dlq_producer for another ClickhouseProducer."""
+    """A ClickhouseProducer used as DLQ receives a ClickHouse DLQ row."""
     primary_ch_client = MagicMock()
     dlq_ch_client = MagicMock()
     arrow_table = _make_arrow_table(1)
 
+    _set_ch_client_metadata(primary_ch_client)
     primary_ch_client.insert_arrow.side_effect = Exception("CH down")
 
     dlq_producer = ClickhouseProducer(ch_client=dlq_ch_client, table="traffic_event_dlq")
     producer = ClickhouseProducer(
-        ch_client=primary_ch_client, table="traffic_event", dlq_producer=dlq_producer
+        ch_client=primary_ch_client,
+        table="traffic_event",
+        dlq_producer=dlq_producer,
     )
 
     with patch("time.sleep"):
         producer.produce_arrow(arrow_table)
 
     dlq_ch_client.insert_arrow.assert_called_once()
+    sent = dlq_ch_client.insert_arrow.call_args.kwargs["arrow_table"]
+    _assert_dlq_row(sent, err_message="CH down", data={"uid": "uid-0", "traffic_in": 100})
 
 
 def test_ch_producer_flush_is_noop() -> None:
