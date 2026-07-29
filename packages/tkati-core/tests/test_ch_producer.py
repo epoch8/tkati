@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import clickhouse_connect.driver.exceptions as ch_exc
@@ -72,6 +73,30 @@ def test_a_data_error_is_not_retried() -> None:
     sleep.assert_not_called()
 
 
+def _set_ch_client_metadata(ch_client: MagicMock) -> None:
+    ch_client.uri = "http://clickhouse:8123"
+    ch_client.database = "default"
+
+
+def _assert_dlq_row(
+    sent: pa.Table,
+    *,
+    ch_table: str = "traffic_event",
+    err_message: str,
+    data: dict,
+) -> None:
+    assert len(sent) == 1
+    assert sent.column_names == ["producer", "data", "err_message", "time"]
+    row = sent.to_pylist()[0]
+    producer_info = json.loads(row["producer"])
+    assert producer_info["ch_table"] == ch_table
+    assert producer_info["ch_database"] == "default"
+    assert producer_info["ch_url"] == "http://clickhouse:8123"
+    assert json.loads(row["data"]) == data
+    assert row["err_message"] == err_message
+    assert row["time"] is not None
+
+
 def test_insert_retry_on_non_data_error() -> None:
     """CH unreachable twice then back: insert_arrow called 3x."""
     ch_client = MagicMock()
@@ -131,6 +156,7 @@ def test_fallback_all_succeed() -> None:
 def test_dlq_single_bad_row() -> None:
     """A single row CH always rejects → written to DLQ once, without retries."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
 
     bad_row = _make_arrow_table(1)
@@ -149,7 +175,7 @@ def test_dlq_single_bad_row() -> None:
     sleep.assert_not_called()
     dlq_producer.produce_arrow.assert_called_once()
     sent = dlq_producer.produce_arrow.call_args[0][0]
-    assert len(sent) == 1
+    _assert_dlq_row(sent, err_message=str(_ch_data_error()), data={"uid": "uid-0", "traffic_in": 100})
 
 
 def test_data_error_without_dlq_raises() -> None:
@@ -167,6 +193,7 @@ def test_recursive_descent() -> None:
     """4-row batch rejected; with split_factor=2, recursion finds and DLQs exactly
     the one bad row, and the three good rows still reach ClickHouse."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
 
     def insert_side_effect(table, arrow_table):
@@ -188,8 +215,11 @@ def test_recursive_descent() -> None:
 
     dlq_producer.produce_arrow.assert_called_once()
     sent = dlq_producer.produce_arrow.call_args[0][0]
-    assert len(sent) == 1
-    assert sent.column("uid")[0].as_py() == "uid-2"
+    _assert_dlq_row(
+        sent,
+        err_message=str(_ch_data_error()),
+        data={"uid": "uid-2", "traffic_in": 102},
+    )
 
     inserted = set()
     for call in ch_client.insert_arrow.call_args_list:
@@ -203,6 +233,7 @@ def test_data_error_splits_without_sleeping() -> None:
     """Regression test for audit F3: isolating a bad row used to cost 2s of sleep
     at every level of the descent. It must now cost round-trips only."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
 
     def insert_side_effect(table, arrow_table):
@@ -220,7 +251,11 @@ def test_data_error_splits_without_sleeping() -> None:
 
     sleep.assert_not_called()
     dlq_producer.produce_arrow.assert_called_once()
-    assert dlq_producer.produce_arrow.call_args[0][0].column("uid")[0].as_py() == "uid-7"
+    _assert_dlq_row(
+        dlq_producer.produce_arrow.call_args[0][0],
+        err_message=str(_ch_data_error()),
+        data={"uid": "uid-7", "traffic_in": 107},
+    )
     dlq_producer.flush.assert_called_once()
 
 
@@ -271,6 +306,7 @@ def test_non_data_error_mid_descent_aborts_the_whole_descent() -> None:
     the DLQ stay sent, and are sent again once the rewound batch is re-read —
     the DLQ is at-least-once, like the output."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
 
     def insert_side_effect(table, arrow_table):
@@ -292,7 +328,11 @@ def test_non_data_error_mid_descent_aborts_the_whole_descent() -> None:
     # uid-0 was isolated and filed before CH went away; uid-2 and uid-3 were
     # never reached as singles.
     assert dlq_producer.produce_arrow.call_count == 1
-    assert dlq_producer.produce_arrow.call_args[0][0].column("uid")[0].as_py() == "uid-0"
+    _assert_dlq_row(
+        dlq_producer.produce_arrow.call_args[0][0],
+        err_message=str(_ch_data_error()),
+        data={"uid": "uid-0", "traffic_in": 100},
+    )
     dlq_producer.flush.assert_not_called()
 
     # uid-1 still gets its 3 attempts at that node: a blip mid-descent may pass,
@@ -322,6 +362,7 @@ def test_ch_producer_success_no_dlq_call() -> None:
 def test_ch_producer_failure_with_dlq() -> None:
     """produce_arrow hits a bad row: recursive fallback runs and DLQ is flushed."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     dlq_producer = MagicMock()
     arrow_table = _make_arrow_table(1)
     ch_client.insert_arrow.side_effect = _ch_data_error()
@@ -347,21 +388,26 @@ def test_ch_producer_failure_without_dlq_raises() -> None:
 
 
 def test_ch_producer_as_dlq_for_another_ch_producer() -> None:
-    """A ClickhouseProducer can itself be used as the dlq_producer for another ClickhouseProducer."""
+    """A ClickhouseProducer used as DLQ receives a ClickHouse DLQ row."""
     primary_ch_client = MagicMock()
     dlq_ch_client = MagicMock()
     arrow_table = _make_arrow_table(1)
 
+    _set_ch_client_metadata(primary_ch_client)
     primary_ch_client.insert_arrow.side_effect = _ch_data_error()
 
     dlq_producer = ClickhouseProducer(ch_client=dlq_ch_client, table="traffic_event_dlq")
     producer = ClickhouseProducer(
-        ch_client=primary_ch_client, table="traffic_event", dlq_producer=dlq_producer
+        ch_client=primary_ch_client,
+        table="traffic_event",
+        dlq_producer=dlq_producer,
     )
 
     producer.produce_arrow(arrow_table)
 
     dlq_ch_client.insert_arrow.assert_called_once()
+    sent = dlq_ch_client.insert_arrow.call_args.kwargs["arrow_table"]
+    _assert_dlq_row(sent, err_message=str(_ch_data_error()), data={"uid": "uid-0", "traffic_in": 100})
 
 
 def test_ch_producer_flush_is_noop() -> None:
@@ -418,6 +464,7 @@ def test_ch_producer_does_not_pass_stats_to_its_dlq() -> None:
     """The DLQ fallback runs inside the primary's deliver block. Handing the
     DLQ the same stats would count that time twice."""
     ch_client = MagicMock()
+    _set_ch_client_metadata(ch_client)
     ch_client.insert_arrow.side_effect = _ch_data_error()
     dlq_producer = MagicMock()
     stats = LoopStats(phases=PRODUCER_PHASES)
