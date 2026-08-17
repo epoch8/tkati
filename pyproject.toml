@@ -19,6 +19,7 @@ dev = ["pytest>=9.0.3", "ruff>=0.15.17", "ty>=0.0.69"]
 [tool.ruff.lint]
 preview = true
 ignore = ["blind-except", "multiple-with-statements", "raise-vanilla-class"]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pyright]
 reportPrivateImportUsage = "none"
