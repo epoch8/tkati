@@ -19,7 +19,7 @@ def _consume_all(
 ) -> list:
     """Consume exactly `count` messages from `topic`, returning raw confluent Message objects."""
     consumer.subscribe([topic])
-    messages = []  # type: ignore
+    messages = []
     deadline = time.time() + timeout
     while len(messages) < count and time.time() < deadline:
         batch = consumer.consume(num_messages=count - len(messages), timeout=1.0)

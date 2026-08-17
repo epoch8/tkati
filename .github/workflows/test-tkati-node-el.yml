@@ -7,6 +7,7 @@ name: Test tkati-node-el
 on:
   push:
     paths:
+      - ".github/workflows/test-tkati-node-el.yml"
       - "packages/tkati-node-el/**"
       - "packages/tkati-core/**"
 
@@ -70,7 +71,7 @@ jobs:
       - name: Check typing
         shell: bash
         run: |
-          uv run mypy -p tkati_node_el
+          uv run ty check packages/tkati-node-el
 
       - name: Run tests
         run: uv run pytest packages/tkati-node-el

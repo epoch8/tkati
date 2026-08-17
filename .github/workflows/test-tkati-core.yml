@@ -7,6 +7,7 @@ name: Test tkati-core
 on:
   push:
     paths:
+      - ".github/workflows/test-tkati-core.yml"
       - "packages/tkati-core/**"
 
 jobs:
@@ -69,7 +70,7 @@ jobs:
       - name: Check typing
         shell: bash
         run: |
-          uv run mypy -p tkati_core
+          uv run ty check packages/tkati-core
 
       - name: Run tests
         run: uv run pytest packages/tkati-core

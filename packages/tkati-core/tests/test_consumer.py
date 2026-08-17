@@ -65,8 +65,8 @@ def test_read_arrow_reads_json_messages(
     assert len(table) == 3
     assert table.schema.field("id").type == pa.string()
     assert table.schema.field("value").type == pa.int64()
-    assert sorted(table.column("id").to_pylist()) == ["a", "b", "c"]  # type: ignore
-    assert sorted(table.column("value").to_pylist()) == [1, 2, 3]  # type: ignore
+    assert sorted(table.column("id").to_pylist()) == ["a", "b", "c"]
+    assert sorted(table.column("value").to_pylist()) == [1, 2, 3]
 
 
 def test_read_arrow_respects_max_events(

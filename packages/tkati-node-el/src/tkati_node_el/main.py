@@ -21,7 +21,7 @@ def run_one_iteration(
 
 
 def main() -> None:
-    settings = AppSettings()  # type: ignore
+    settings = AppSettings()
 
     consumer = build_consumer(settings.input)
 

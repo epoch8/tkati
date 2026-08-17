@@ -3,6 +3,7 @@ name: Test {{ package.name }}
 on:
   push:
     paths:
+      - ".github/workflows/test-{{ package.name }}.yml"
       - "{{ package.path }}/**"
       {%- for dependency in package.workspace_dependencies %}
       - "{{ dependency.path }}/**"
@@ -68,7 +69,7 @@ jobs:
       - name: Check typing
         shell: bash
         run: |
-          uv run mypy -p {{ package.package_name }}
+          uv run ty check {{ package.path }}
 
       - name: Run tests
         run: uv run pytest {{ package.path }}

@@ -9,11 +9,9 @@ from tkati_core.producer import Producer
 
 
 def log_retry_attempt(retry_state: RetryCallState) -> None:
-    fn_name = retry_state.fn.__name__ if retry_state.fn is not None else "unknown"
     exc = retry_state.outcome.exception() if retry_state.outcome is not None else None
     logger.warning(
-        f"Retrying {fn_name} after {exc}, "
-        f"attempt {retry_state.attempt_number}/3"
+        f"Retrying {retry_state.fn} after {exc}, attempt {retry_state.attempt_number}/3"
     )
 
 
@@ -23,7 +21,9 @@ def log_retry_attempt(retry_state: RetryCallState) -> None:
     before_sleep=log_retry_attempt,
     reraise=True,
 )
-def _insert_with_retry(ch_client: ch_driver.Client, table: str, arrow_table: pa.Table) -> None:
+def _insert_with_retry(
+    ch_client: ch_driver.Client, table: str, arrow_table: pa.Table
+) -> None:
     ch_client.insert_arrow(table=table, arrow_table=arrow_table)
 
 
@@ -52,7 +52,9 @@ def _insert_with_dlq_fallback(
             f"splitting into chunks of {chunk_size} rows"
         )
         for chunk in _table_slices(table, chunk_size):
-            _insert_with_dlq_fallback(chunk, ch_client, ch_table, dlq_producer, split_factor)
+            _insert_with_dlq_fallback(
+                chunk, ch_client, ch_table, dlq_producer, split_factor
+            )
 
 
 class ClickhouseProducer(Producer):
@@ -91,7 +93,9 @@ class ClickhouseProducer(Producer):
 
     def produce_arrow(self, data: pa.Table) -> None:
         try:
-            _insert_with_retry(ch_client=self._ch_client, table=self._table, arrow_table=data)
+            _insert_with_retry(
+                ch_client=self._ch_client, table=self._table, arrow_table=data
+            )
         except Exception as err:
             if self._dlq_producer is None:
                 raise
