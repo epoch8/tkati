@@ -13,12 +13,16 @@ members = ["packages/*"]
 tkati-core = { workspace = true }
 tkati-node-el = { workspace = true }
 
+[dependency-groups]
+dev = ["pytest>=9.0.3", "ruff>=0.15.17", "ty>=0.0.69"]
+
+[tool.ruff.lint]
+preview = true
+ignore = ["blind-except", "multiple-with-statements", "raise-vanilla-class"]
+
 [tool.pyright]
 reportPrivateImportUsage = "none"
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*"]
 ignore_missing_imports = true
-
-[dependency-groups]
-dev = ["pytest>=9.0.3", "ruff>=0.15.17", "ty>=0.0.69"]

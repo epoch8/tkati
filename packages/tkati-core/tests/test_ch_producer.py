@@ -2,7 +2,11 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
-from tkati_core.clickhouse.producer import ClickhouseProducer, _insert_with_dlq_fallback, _insert_with_retry
+from tkati_core.clickhouse.producer import (
+    ClickhouseProducer,
+    _insert_with_dlq_fallback,
+    _insert_with_retry,
+)
 
 
 def _make_arrow_table(n: int = 1) -> pa.Table:
@@ -90,9 +94,8 @@ def test_no_dlq_raises_on_failure() -> None:
 
     ch_producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event", dlq_producer=None)
 
-    with patch("time.sleep"):
-        with pytest.raises(Exception, match="CH down"):
-            ch_producer.produce_arrow(_make_arrow_table(2))
+    with patch("time.sleep"), pytest.raises(Exception, match="CH down"):
+        ch_producer.produce_arrow(_make_arrow_table(2))
 
 
 def test_recursive_descent() -> None:
@@ -161,9 +164,8 @@ def test_ch_producer_failure_without_dlq_raises() -> None:
 
     producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event", dlq_producer=None)
 
-    with patch("time.sleep"):
-        with pytest.raises(Exception, match="CH down"):
-            producer.produce_arrow(arrow_table)
+    with patch("time.sleep"), pytest.raises(Exception, match="CH down"):
+        producer.produce_arrow(arrow_table)
 
 
 def test_ch_producer_as_dlq_for_another_ch_producer() -> None:

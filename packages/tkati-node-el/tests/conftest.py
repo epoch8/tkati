@@ -80,7 +80,7 @@ def test_settings(run_id: str) -> AppSettings:
 
 
 @pytest.fixture(scope="function")
-def ch_client(test_settings: AppSettings) -> Generator[ch_driver.Client, None, None]:
+def ch_client(test_settings: AppSettings) -> Generator[ch_driver.Client]:
     """A real clickhouse_connect client, for table setup/teardown and result verification."""
     assert isinstance(test_settings.output, ClickHouseOutputSettings)
     connection = test_settings.output.connection
@@ -99,7 +99,7 @@ def ch_client(test_settings: AppSettings) -> Generator[ch_driver.Client, None, N
 @pytest.fixture(scope="function")
 def ch_table(
     test_settings: AppSettings, ch_client: ch_driver.Client
-) -> Generator[str, None, None]:
+) -> Generator[str]:
     """Creates the output table against the real ClickHouse instance and drops it afterward."""
     assert isinstance(test_settings.output, ClickHouseOutputSettings)
     table_settings = test_settings.output.table
@@ -137,7 +137,7 @@ def mock_dlq_producer() -> MagicMock:
 def kafka_producer_and_topic(
     test_settings: AppSettings,
     kafka_admin_client: AdminClient,  # noqa: F811
-) -> Generator[Producer, None, None]:
+) -> Generator[Producer]:
     """Creates the input topic and yields a Producer for it."""
     topic = test_settings.input.topic.name
     fs = kafka_admin_client.create_topics(

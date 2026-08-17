@@ -52,7 +52,7 @@ def output_settings(run_id: str) -> KafkaOutputSettings:
 def kafka_input_topic(
     input_settings: KafkaInputSettings,
     kafka_admin_client: AdminClient,  # noqa: F811
-) -> Generator[str, None, None]:
+) -> Generator[str]:
     """Creates the input topic and yields its name."""
     topic = input_settings.topic.name
     fs = kafka_admin_client.create_topics(
@@ -75,7 +75,7 @@ def kafka_input_topic(
 def kafka_output_topic(
     output_settings: KafkaOutputSettings,
     kafka_admin_client: AdminClient,  # noqa: F811
-) -> Generator[str, None, None]:
+) -> Generator[str]:
     """Creates the output topic and yields its name."""
     topic = output_settings.topic.name
     fs = kafka_admin_client.create_topics(
@@ -95,7 +95,7 @@ def kafka_output_topic(
 
 
 @pytest.fixture(scope="function")
-def raw_producer() -> Generator[Producer, None, None]:
+def raw_producer() -> Generator[Producer]:
     """A raw confluent Producer for seeding test messages."""
     p = Producer({"bootstrap.servers": BROKER})
     yield p
@@ -103,7 +103,7 @@ def raw_producer() -> Generator[Producer, None, None]:
 
 
 @pytest.fixture(scope="function")
-def raw_consumer(run_id: str) -> Generator[Consumer, None, None]:
+def raw_consumer(run_id: str) -> Generator[Consumer]:
     """A raw confluent Consumer for verifying produced messages."""
     c = Consumer(
         {

@@ -1,5 +1,4 @@
-from tkati_core.settings import TomlBaseSettings
-from tkati_core.settings import InputSettings, OutputSettings
+from tkati_core.settings import InputSettings, OutputSettings, TomlBaseSettings
 
 
 class AppSettings(TomlBaseSettings):
