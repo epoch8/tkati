@@ -1,0 +1,33 @@
+[input]
+type = "kafka"
+
+[input.connection]
+broker = "redpanda:29092"
+
+[input.topic]
+name = "raw_event"
+
+[input.topic.schema]
+uid = "string"
+time = "timestamp[ms]"
+
+[input.consumer]
+group_id = "node-dedup-group"
+auto_offset_reset = "earliest"
+batch_size = 1000
+batch_timeout_sec = 10
+
+[output]
+type = "kafka"
+
+[output.connection]
+broker = "redpanda:29092"
+
+[output.topic]
+name = "raw_event_deduped"
+
+[dedup]
+field = "uid"
+window_hours = 3
+bucket_hours = 1
+store_dir = "./dedup_store"
