@@ -1,4 +1,4 @@
-# WIP 0.3.0
+# 0.3.0
 
 * Initial implementation of `tkati-node-dedup`: a Kafka-to-Kafka node that
   deduplicates events by a configurable field within a rolling

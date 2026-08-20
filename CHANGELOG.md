@@ -6,6 +6,9 @@ up). Newest first.
 
 ## 0.3.0
 
+Upgrading from v0.2.0? See [MIGRATION.md](MIGRATION.md) for the full guide
+(settings restructuring, renamed parameters, and the two new node packages).
+
 ### twqstomm — Add tkati-node-dedup: Kafka-to-Kafka streaming dedup node
 
 - New package `tkati-node-dedup`: reads a Kafka topic and republishes it

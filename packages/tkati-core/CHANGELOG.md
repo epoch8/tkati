@@ -1,4 +1,4 @@
-# WIP 0.3.0
+# 0.3.0
 
 * Add shared `Producer` base class implemented by `KafkaProducer` and `ClickhouseProducer`
 * `ClickhouseProducer` now supports `produce_pylist`, `flush`, and `close`, and

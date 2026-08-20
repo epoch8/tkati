@@ -1,4 +1,4 @@
-# WIP 0.3.0
+# 0.3.0
 
 * Initial implementation of `tkati-node-el`: a generic extract/load node that reads
   batches from a configurable input and writes them to a configurable output, picking
