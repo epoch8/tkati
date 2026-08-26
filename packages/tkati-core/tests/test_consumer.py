@@ -18,8 +18,8 @@ def test_from_input_settings_sets_attributes(input_settings: KafkaInputSettings)
 def test_from_input_settings_builds_arrow_schemas(input_settings: KafkaInputSettings):
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
-        assert consumer.parse_schema.field("id").type == pa.string()
-        assert consumer.cast_schema.field("value").type == pa.int64()
+        assert consumer.wire_schema.field("id").type == pa.string()
+        assert consumer.internal_schema.field("value").type == pa.int64()
     finally:
         consumer.close()
 

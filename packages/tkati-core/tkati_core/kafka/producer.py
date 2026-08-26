@@ -8,6 +8,7 @@ from confluent_kafka import Producer
 from loguru import logger
 
 from tkati_core.producer import Producer as ProducerBase
+from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import (
@@ -15,6 +16,22 @@ if TYPE_CHECKING:
         KafkaOutputSettings,
         KafkaTopicSettings,
     )
+
+
+def _to_wire_table(
+    data: pa.Table | pa.RecordBatch, wire_type_overrides: dict[str, pa.DataType]
+) -> pa.Table | pa.RecordBatch:
+    """Cast columns with a declared wire type override — e.g. timestamp[ms] -> int64 epoch —
+    so the JSON round trip is symmetric with how the consumer parsed them in, instead of
+    guessed from the in-memory pyarrow type."""
+    if not wire_type_overrides:
+        return data
+    new_schema = pa.schema(
+        [pa.field(f.name, wire_type_overrides.get(f.name, f.type)) for f in data.schema]
+    )
+    if new_schema.equals(data.schema):
+        return data
+    return data.cast(new_schema)
 
 
 class KafkaProducer(ProducerBase):
@@ -38,11 +55,22 @@ class KafkaProducer(ProducerBase):
         topic_name: str,
         format: Literal["json", "arrow-batch"] = "json",
         key_column: str | None = None,
+        output_schema: dict[str, str] | None = None,
     ) -> None:
         self.producer = Producer(kafka_config)
         self.topic_name = topic_name
         self.format = format
         self.key_column = key_column
+
+        self.wire_type_overrides: dict[str, pa.DataType] = {}
+        for field_name, field_type in (output_schema or {}).items():
+            mapping = TYPE_MAPPING.get(field_type)
+            if mapping is None:
+                raise ValueError(
+                    f"Unsupported field type '{field_type}' for field '{field_name}'"
+                )
+            self.wire_type_overrides[field_name] = mapping.wire_type
+
         logger.info(
             f"Initialized KafkaProducer with topic: {topic_name}, format: {format}"
         )
@@ -56,6 +84,7 @@ class KafkaProducer(ProducerBase):
             topic_name=topic.name,
             format=topic.format,
             key_column=topic.key_column,
+            output_schema=topic.schema,
         )
 
     @classmethod
@@ -73,7 +102,7 @@ class KafkaProducer(ProducerBase):
         Arrow IPC stream message.
         """
         if self.format == "json":
-            self.produce_pylist(data.to_pylist())
+            self.produce_pylist(_to_wire_table(data, self.wire_type_overrides).to_pylist())
         elif self.format == "arrow-batch":
             table = (
                 data if isinstance(data, pa.Table) else pa.Table.from_batches([data])

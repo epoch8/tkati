@@ -26,6 +26,10 @@ broker = "redpanda:29092"
 [output.topic]
 name = "raw_event_deduped"
 
+[output.topic.schema]
+uid = "string"
+time = "timestamp[ms]"
+
 [dedup]
 field = "uid"
 window_hours = 3

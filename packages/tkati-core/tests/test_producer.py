@@ -60,6 +60,33 @@ def test_produce_json_format(
     assert scores == {10, 20}
 
 
+def test_produce_json_format_preserves_timestamp(
+    kafka_output_topic: str,
+    raw_consumer: Consumer,
+    run_id: str,
+):
+    """A timestamp[ms] output schema must cast the column back to its raw epoch-ms int
+    before JSON serialization, instead of orjson emitting an ISO-8601 string."""
+    settings = KafkaOutputSettings(
+        connection=KafkaConnectionSettings(broker="localhost:9092"),
+        topic=KafkaTopicSettings(name=kafka_output_topic, schema={"ts": "timestamp[ms]"}),
+    )
+    table = pa.table({"ts": pa.array([1_700_000_000_000], type=pa.int64())}).cast(
+        pa.schema([pa.field("ts", pa.timestamp("ms"))])
+    )
+
+    producer = KafkaProducer.from_output_settings(settings)
+    try:
+        producer.produce_arrow(table)
+        producer.flush()
+    finally:
+        producer.close()
+
+    messages = _consume_all(raw_consumer, kafka_output_topic, count=1)
+    parsed = orjson.loads(messages[0].value())
+    assert parsed["ts"] == 1_700_000_000_000
+
+
 def test_produce_json_format_no_message_key_by_default(
     output_settings: KafkaOutputSettings,
     kafka_output_topic: str,

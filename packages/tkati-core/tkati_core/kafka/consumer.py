@@ -11,6 +11,7 @@ from loguru import logger
 from pyarrow import json as pa_json
 
 from tkati_core.consumer import Consumer as ConsumerBase
+from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import KafkaInputSettings
@@ -67,38 +68,21 @@ class KafkaConsumer(ConsumerBase):
 
         self.consumer.subscribe([self.topic_name])
 
-        # Create PyArrow schema based on input_schema
-        # type -> (parse_type, cast_type)
-        type_mapping: dict[str, tuple[pa.DataType, pa.DataType]] = {
-            "string": (pa.string(), pa.string()),
-            "int32": (pa.int32(), pa.int32()),
-            "int64": (pa.int64(), pa.int64()),
-            "uint32": (pa.uint32(), pa.uint32()),
-            "uint64": (pa.uint64(), pa.uint64()),
-            "uint8": (pa.uint8(), pa.uint8()),
-            "int": (pa.int32(), pa.int32()),
-            "timestamp[ms]": (pa.int64(), pa.timestamp("ms")),
-        }
-
-        parse_schema_fields = []
-        cast_schema_fields = []
+        # Create PyArrow schemas based on input_schema
+        wire_schema_fields = []
+        internal_schema_fields = []
 
         for field_name, field_type in input_schema.items():
-            types = type_mapping.get(field_type)
-
-            if types is not None:
-                parse_type, cast_type = types
-            else:
-                logger.warning(
-                    f"Unsupported field type '{field_type}' for field '{field_name}'. Defaulting to string."
+            mapping = TYPE_MAPPING.get(field_type)
+            if mapping is None:
+                raise ValueError(
+                    f"Unsupported field type '{field_type}' for field '{field_name}'"
                 )
-                parse_type, cast_type = (pa.string(), pa.string())
+            wire_schema_fields.append(pa.field(field_name, mapping.wire_type))
+            internal_schema_fields.append(pa.field(field_name, mapping.internal_type))
 
-            parse_schema_fields.append(pa.field(field_name, parse_type))
-            cast_schema_fields.append(pa.field(field_name, cast_type))
-
-        self.parse_schema = pa.schema(parse_schema_fields)
-        self.cast_schema = pa.schema(cast_schema_fields)
+        self.wire_schema = pa.schema(wire_schema_fields)
+        self.internal_schema = pa.schema(internal_schema_fields)
 
         logger.info(
             f"Initialized KafkaConsumer with config: {kafka_config} and topic: {topic_name}"
@@ -194,13 +178,13 @@ class KafkaConsumer(ConsumerBase):
         buffer.seek(0)
 
         parse_options = pa_json.ParseOptions(
-            explicit_schema=self.parse_schema,
+            explicit_schema=self.wire_schema,
             unexpected_field_behavior="ignore",
         )
 
         try:
             table = pa_json.read_json(buffer, parse_options=parse_options)
-            table = table.cast(self.cast_schema)
+            table = table.cast(self.internal_schema)
             actual_rows = len(table)
 
             if actual_rows != events_read:

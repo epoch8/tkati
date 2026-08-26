@@ -38,7 +38,10 @@ def test_settings(run_id: str, tmp_path) -> AppSettings:
         ),
         output=KafkaOutputSettings(
             connection=KafkaConnectionSettings(broker="localhost:9092"),
-            topic=KafkaTopicSettings(name=f"dedup_out_{run_id}"),
+            topic=KafkaTopicSettings(
+                name=f"dedup_out_{run_id}",
+                schema={"uid": "string", "time": "timestamp[ms]", "val": "int64"},
+            ),
         ),
         dedup=DedupSettings(
             field="uid",
