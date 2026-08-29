@@ -1,0 +1,371 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>tkati-dashboard</title>
+    <link rel="stylesheet" href="https://esm.sh/reactflow@11/dist/style.css" />
+    <style>
+      html, body, #root { height: 100%; margin: 0; }
+      body { font-family: system-ui, sans-serif; }
+      #error {
+        position: absolute; top: 1rem; left: 1rem; right: 1rem;
+        padding: 0.75rem 1rem; background: #fee2e2; color: #7f1d1d;
+        border: 1px solid #fca5a5; border-radius: 6px; font-family: monospace;
+        white-space: pre-wrap; display: none; z-index: 10;
+      }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      td, th {
+        text-align: left; padding: 3px 6px; border-bottom: 1px solid #e5e7eb;
+        vertical-align: top; word-break: break-word;
+      }
+      th { color: #6b7280; font-weight: 600; position: sticky; top: 0; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="error"></div>
+    <div id="root"></div>
+    <script type="module">
+      import React from "https://esm.sh/react@18";
+      import { createRoot } from "https://esm.sh/react-dom@18/client";
+      import ReactFlow, {
+        Background,
+        Controls,
+        MiniMap,
+        Position,
+      } from "https://esm.sh/reactflow@11?deps=react@18,react-dom@18";
+
+      const h = React.createElement;
+
+      const GROUP_COLORS = {
+        "source-sink": { background: "#dbeafe", border: "#3b82f6" },
+        "processing-node": { background: "#dcfce7", border: "#22c55e" },
+      };
+
+      // Type-specific connection details worth surfacing on the node itself.
+      function nodeLabel(n) {
+        const lines = [n.label, `(${n.type})`];
+        if (n.type === "kafka-topic" && n.connection) {
+          if (n.connection.broker) lines.push(`broker: ${n.connection.broker}`);
+          if (n.connection.topic) lines.push(`topic: ${n.connection.topic}`);
+        }
+        return lines.join("\n");
+      }
+
+      // Identifies an edge's consumer for looking up its fetched lag, independent of array index.
+      function edgeKey(e) {
+        return `${e.from}->${e.to}->${e.consumer?.group_id ?? ""}`;
+      }
+
+      function edgeLabel(e, lagState) {
+        const groupId = e.consumer?.group_id;
+        if (!groupId) return e.kind;
+        let lagText = "";
+        if (lagState?.status === "ready") lagText = ` · lag: ${lagState.total_lag}`;
+        else if (lagState?.status === "error") lagText = " · lag: n/a";
+        return `${e.kind} · group: ${groupId}${lagText}`;
+      }
+
+      // Assigns each node a y = topological rank (BFS distance from a root), x = index
+      // within that rank, so the graph reads top-to-bottom as a pipeline.
+      function layout(nodes, edges) {
+        const outgoing = new Map(nodes.map((n) => [n.id, []]));
+        const incomingCount = new Map(nodes.map((n) => [n.id, 0]));
+        for (const e of edges) {
+          outgoing.get(e.from)?.push(e.to);
+          incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
+        }
+
+        const rank = new Map();
+        let frontier = nodes.filter((n) => incomingCount.get(n.id) === 0).map((n) => n.id);
+        if (frontier.length === 0 && nodes.length > 0) frontier = [nodes[0].id];
+        for (const id of frontier) rank.set(id, 0);
+
+        while (frontier.length > 0) {
+          const next = [];
+          for (const id of frontier) {
+            for (const target of outgoing.get(id) ?? []) {
+              const candidate = rank.get(id) + 1;
+              if (!rank.has(target) || candidate > rank.get(target)) {
+                rank.set(target, candidate);
+                next.push(target);
+              }
+            }
+          }
+          frontier = next;
+        }
+        for (const n of nodes) if (!rank.has(n.id)) rank.set(n.id, 0);
+
+        const rowCounts = new Map();
+        const positioned = nodes.map((n) => {
+          const r = rank.get(n.id);
+          const x = rowCounts.get(r) ?? 0;
+          rowCounts.set(r, x + 1);
+          const colors = GROUP_COLORS[n.group] ?? { background: "#e5e7eb", border: "#6b7280" };
+          return {
+            id: n.id,
+            position: { x: x * 240, y: r * 160 },
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            data: { label: nodeLabel(n) },
+            style: {
+              background: colors.background,
+              border: `1px solid ${colors.border}`,
+              borderRadius: 8,
+              padding: 8,
+              minWidth: 170,
+              whiteSpace: "pre-line",
+              fontSize: 12,
+              cursor: "pointer",
+            },
+          };
+        });
+        return positioned;
+      }
+
+      function Section({ title, children }) {
+        return h(
+          "div",
+          { style: { marginBottom: 16 } },
+          h(
+            "div",
+            { style: { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", marginBottom: 6, letterSpacing: 0.4 } },
+            title,
+          ),
+          children,
+        );
+      }
+
+      function formatCell(v) {
+        if (v === undefined || v === null) return "";
+        if (typeof v === "object") return JSON.stringify(v);
+        return String(v);
+      }
+
+      function KVTable({ rows }) {
+        return h(
+          "table",
+          null,
+          h(
+            "tbody",
+            null,
+            rows.map(([k, v]) =>
+              h(
+                "tr",
+                { key: k },
+                h("td", { style: { color: "#6b7280", width: "40%" } }, k),
+                h("td", null, formatCell(v)),
+              ),
+            ),
+          ),
+        );
+      }
+
+      // Fetches /api/nodes/{id}/snapshot for a selected kafka-topic node and renders the
+      // result as a small events table, independent of the rest of the panel.
+      function EventSnapshot({ nodeId, schema }) {
+        const [state, setState] = React.useState({ status: "loading" });
+
+        React.useEffect(() => {
+          setState({ status: "loading" });
+          fetch(`/api/nodes/${encodeURIComponent(nodeId)}/snapshot`)
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((body) => setState({ status: "ready", events: body.events }))
+            .catch((e) => setState({ status: "error", message: e.message }));
+        }, [nodeId]);
+
+        if (state.status === "loading") {
+          return h("div", { style: { color: "#6b7280" } }, "Loading…");
+        }
+        if (state.status === "error") {
+          return h(
+            "div",
+            { style: { color: "#b91c1c", fontFamily: "monospace", whiteSpace: "pre-wrap" } },
+            state.message,
+          );
+        }
+        if (state.events.length === 0) {
+          return h("div", { style: { color: "#6b7280" } }, "No recent events found.");
+        }
+
+        const columns = schema
+          ? Object.keys(schema)
+          : [...new Set(state.events.flatMap((e) => Object.keys(e)))];
+
+        return h(
+          "div",
+          { style: { maxHeight: 260, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 6 } },
+          h(
+            "table",
+            null,
+            h(
+              "thead",
+              null,
+              h("tr", null, columns.map((c) => h("th", { key: c }, c))),
+            ),
+            h(
+              "tbody",
+              null,
+              state.events.map((event, i) =>
+                h(
+                  "tr",
+                  { key: i },
+                  columns.map((c) => h("td", { key: c }, formatCell(event[c]))),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      function NodePanel({ node, onClose }) {
+        const connectionRows = node.connection ? Object.entries(node.connection) : [];
+        const configRows = node.config ? Object.entries(node.config) : [];
+        const schemaRows = node.schema ? Object.entries(node.schema) : [];
+
+        return h(
+          "div",
+          {
+            style: {
+              width: 340,
+              flexShrink: 0,
+              borderLeft: "1px solid #e5e7eb",
+              background: "#fff",
+              padding: 16,
+              overflowY: "auto",
+              boxShadow: "-2px 0 8px rgba(0,0,0,0.04)",
+            },
+          },
+          h(
+            "div",
+            { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 } },
+            h("div", { style: { fontSize: 15, fontWeight: 700 } }, node.label),
+            h(
+              "button",
+              {
+                onClick: onClose,
+                style: { border: "none", background: "none", fontSize: 18, cursor: "pointer", color: "#6b7280", lineHeight: 1 },
+              },
+              "×",
+            ),
+          ),
+          h("div", { style: { color: "#6b7280", fontSize: 12, marginBottom: 16 } }, node.type),
+          connectionRows.length > 0 &&
+            h(Section, { title: "Connection" }, h(KVTable, { rows: connectionRows })),
+          configRows.length > 0 &&
+            h(Section, { title: "Config" }, h(KVTable, { rows: configRows })),
+          schemaRows.length > 0 &&
+            h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
+          node.type === "kafka-topic" &&
+            h(Section, { title: "Latest events" }, h(EventSnapshot, { nodeId: node.id, schema: node.schema })),
+        );
+      }
+
+      function App() {
+        const [graph, setGraph] = React.useState(null);
+        const [error, setError] = React.useState(null);
+        const [selectedNodeId, setSelectedNodeId] = React.useState(null);
+        const [lagByEdge, setLagByEdge] = React.useState({});
+
+        React.useEffect(() => {
+          fetch("/api/graph")
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then(setGraph)
+            .catch((e) => setError(e.message));
+        }, []);
+
+        // Once the graph is in, fetch live consumer lag for every stream edge whose source is
+        // a kafka-topic and which names a consumer group — best-effort, per edge, independent
+        // of the rest of the page.
+        React.useEffect(() => {
+          if (!graph) return;
+          const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+          for (const e of graph.edges) {
+            const groupId = e.consumer?.group_id;
+            if (!groupId || nodesById.get(e.from)?.type !== "kafka-topic") continue;
+            const key = edgeKey(e);
+            setLagByEdge((prev) => ({ ...prev, [key]: { status: "loading" } }));
+            fetch(
+              `/api/nodes/${encodeURIComponent(e.from)}/consumer-lag?group_id=${encodeURIComponent(groupId)}`,
+            )
+              .then(async (res) => {
+                if (!res.ok) {
+                  const body = await res.json().catch(() => ({}));
+                  throw new Error(body.detail || `HTTP ${res.status}`);
+                }
+                return res.json();
+              })
+              .then((body) =>
+                setLagByEdge((prev) => ({
+                  ...prev,
+                  [key]: { status: "ready", total_lag: body.total_lag },
+                })),
+              )
+              .catch((err) =>
+                setLagByEdge((prev) => ({
+                  ...prev,
+                  [key]: { status: "error", message: err.message },
+                })),
+              );
+          }
+        }, [graph]);
+
+        if (error) {
+          const el = document.getElementById("error");
+          el.textContent = "Failed to load dataflow: " + error;
+          el.style.display = "block";
+          return null;
+        }
+        if (!graph) return null;
+
+        const nodes = layout(graph.nodes, graph.edges);
+        const edges = graph.edges.map((e, i) => ({
+          id: `${e.from}-${e.to}-${i}`,
+          source: e.from,
+          target: e.to,
+          label: edgeLabel(e, lagByEdge[edgeKey(e)]),
+          animated: e.kind === "stream",
+          markerEnd: { type: "arrowclosed" },
+        }));
+
+        const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
+
+        return h(
+          "div",
+          { style: { display: "flex", height: "100%" } },
+          h(
+            "div",
+            { style: { flex: 1, minWidth: 0 } },
+            h(
+              ReactFlow,
+              {
+                nodes,
+                edges,
+                fitView: true,
+                onNodeClick: (_event, node) => setSelectedNodeId(node.id),
+                onPaneClick: () => setSelectedNodeId(null),
+              },
+              h(Background, null),
+              h(Controls, null),
+              h(MiniMap, null),
+            ),
+          ),
+          selectedNode && h(NodePanel, { node: selectedNode, onClose: () => setSelectedNodeId(null) }),
+        );
+      }
+
+      createRoot(document.getElementById("root")).render(h(App));
+    </script>
+  </body>
+</html>

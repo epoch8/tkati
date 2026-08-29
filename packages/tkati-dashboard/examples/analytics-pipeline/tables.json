@@ -1,0 +1,35 @@
+{
+  "nodes": {
+    "events-table": {
+      "type": "clickhouse-table",
+      "name": "events (ClickHouse)",
+      "schema": {
+        "session_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "event_type": "string",
+        "amount": "int64"
+      },
+      "connection": {
+        "host": "localhost",
+        "port": 8123,
+        "database": "default"
+      }
+    },
+    "purchases-table": {
+      "type": "clickhouse-table",
+      "name": "purchases (ClickHouse)",
+      "schema": {
+        "order_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "amount": "int64"
+      },
+      "connection": {
+        "host": "localhost",
+        "port": 8123,
+        "database": "default"
+      }
+    }
+  }
+}

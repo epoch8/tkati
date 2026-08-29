@@ -1,6 +1,6 @@
 [project]
 name = "tkati"
-version = "0.3.1"
+version = "0.4.0a1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -13,13 +13,19 @@ members = ["packages/*"]
 tkati-core = { workspace = true }
 tkati-node-el = { workspace = true }
 tkati-node-dedup = { workspace = true }
+tkati-dashboard = { workspace = true }
 
 [dependency-groups]
 dev = ["pytest>=9.0.3", "ruff>=0.15.17", "ty>=0.0.69"]
 
 [tool.ruff.lint]
 preview = true
-ignore = ["blind-except", "multiple-with-statements", "raise-vanilla-class"]
+ignore = [
+    "FURB",
+    "blind-except",
+    "multiple-with-statements",
+    "raise-vanilla-class",
+]
 
 [tool.pyright]
 reportPrivateImportUsage = "none"

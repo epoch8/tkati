@@ -1,0 +1,10 @@
+{
+  "nodes": {
+    "a": {
+      "type": "processing-node"
+    }
+  },
+  "edges": [
+    {"from": "a", "to": "does-not-exist", "kind": "stream"}
+  ]
+}

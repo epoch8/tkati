@@ -1,0 +1,17 @@
+{
+  "edges": [
+    {
+      "from": "raw-events",
+      "to": "dedup",
+      "kind": "stream",
+      "consumer": {
+        "group_id": "dedup-raw-events"
+      }
+    },
+    {
+      "from": "dedup",
+      "to": "deduped-events",
+      "kind": "stream"
+    }
+  ]
+}

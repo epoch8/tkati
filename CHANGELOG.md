@@ -4,6 +4,47 @@ One entry per jj change, keyed by its change identifier (stable across
 `jj describe`/`jj squash`/rebases — use `jj log -r <change-id>` to look one
 up). Newest first.
 
+## 0.4.0a1
+
+### zpwmtxrn — Add tkati-dashboard: dataflow graph viewer
+
+- New package `tkati-dashboard`: a local web server that reads a serialized
+  tkati dataflow directory — a directory of JSON fragments, no manifest
+  required; every `*.json` file directly inside it is merged into the graph
+  (per [docs/dataflow-serialization.md](docs/dataflow-serialization.md)) —
+  and renders it as a top-to-bottom graph in the browser (React Flow), the
+  doc's stated visualization-dashboard use case.
+- `tkati_dashboard.dataflow.load_dataflow` merges fragments and enforces the
+  doc's validation rules: the directory has at least one fragment,
+  unique-or-identical node ids across fragments, edges referencing existing
+  nodes, and source/sink schema field types validated against the existing
+  `tkati_core.type_mapping` vocabulary. A dataflow's name is its directory's
+  own name.
+- `GET /api/graph` re-reads the directory on every request, so editing the
+  dataflow and refreshing the page picks up the change without restarting
+  the server. Nodes show `broker`/`topic` (for `kafka-topic`) and edges show
+  their consumer `group_id` when set.
+- Clicking a node opens a side panel with its full `connection`, `config`,
+  and `schema`. For a `kafka-topic` node, the panel also fetches
+  `GET /api/nodes/{id}/snapshot` (`tkati_dashboard.snapshot`), which connects
+  live to the topic's broker and shows its most recent messages using a
+  throwaway consumer group that never commits offsets.
+- Every stream edge with a `consumer.group_id` whose source is a
+  `kafka-topic` fetches and shows its live consumer lag in the edge label
+  (`stream · group: orders-dedup · lag: 4`), via
+  `GET /api/nodes/{id}/consumer-lag` and `tkati_dashboard.lag`, which reads
+  committed offsets with `Consumer.committed()` — it never subscribes or
+  polls as that group, so it can't join it or trigger a rebalance.
+  `_kafka_metadata.resolve_partitions` is shared between `snapshot.py` and
+  `lag.py`. Both live-broker lookups degrade to an inline error (or
+  `lag: n/a`) instead of breaking the page when the broker or topic is
+  unreachable.
+- New `examples/simple-pipeline` (two Kafka topics either side of a
+  `tkati-node-dedup` node) with a `seed_kafka.py` script that populates it
+  with sample events, including intentional duplicates to make the dedup
+  node's purpose visible; and a bigger `examples/analytics-pipeline`
+  exercising fragment merging across four files.
+
 ## 0.3.1
 
 ### xwxxmoms — Preserve timestamp[ms] through Kafka JSON round trip

@@ -1,0 +1,40 @@
+{
+  "nodes": {
+    "dedup-clicks": {
+      "type": "processing-node",
+      "name": "Dedup clicks",
+      "implementation": "tkati-node-dedup",
+      "config": {
+        "field": "session_id",
+        "window_hours": 1
+      }
+    },
+    "dedup-purchases": {
+      "type": "processing-node",
+      "name": "Dedup purchases",
+      "implementation": "tkati-node-dedup",
+      "config": {
+        "field": "order_id",
+        "window_hours": 3
+      }
+    },
+    "sessionize": {
+      "type": "processing-node",
+      "name": "Sessionize + enrich",
+      "implementation": "tkati-node-sessionize",
+      "config": {
+        "session_gap_minutes": 30
+      }
+    },
+    "load-events": {
+      "type": "processing-node",
+      "name": "Load events",
+      "implementation": "tkati-node-el"
+    },
+    "load-purchases": {
+      "type": "processing-node",
+      "name": "Load purchases",
+      "implementation": "tkati-node-el"
+    }
+  }
+}
