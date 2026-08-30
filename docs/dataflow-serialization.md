@@ -118,7 +118,7 @@ At the serialized level, every node needs the following minimal metadata:
 - `id`: stable node identifier
 - `type`: node category, such as `kafka-topic`, `clickhouse-table`, or `processing-node`
 - `name`: optional human-facing label
-- `schema`: required for source/sink nodes; optional for processing nodes depending on behavior
+- `schema`: recommended for source/sink nodes, since it's what lets tooling validate wiring and render columns; optional everywhere, since it may not always be on hand (e.g. a node fragment written by hand, or discovered from a live cluster without introspecting its columns)
 - `connection`: backend-specific connection settings
 - `config`: node-specific runtime configuration
 - optional `tags` or `metadata`: UI/tooling-friendly annotations, but not graph wiring
@@ -191,7 +191,7 @@ The serialized form should be easy to validate with a JSON schema or a lightweig
 - node identifiers are unique
 - repeated node or edge definitions across fragments must agree; otherwise validation fails
 - edge references point to existing nodes
-- source/sink node schemas are valid JSON objects
+- a node's `schema`, when present, is a valid JSON object whose field types are recognized
 - processing node configuration is structurally valid for that node type
 
 This ensures the asset is useful not only to humans but also to other tooling.

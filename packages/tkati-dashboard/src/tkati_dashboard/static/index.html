@@ -141,6 +141,42 @@
         return String(v);
       }
 
+      function formatDuration(msString) {
+        const ms = Number(msString);
+        if (ms < 0) return "unbounded";
+        const units = [
+          ["d", 86400000],
+          ["h", 3600000],
+          ["m", 60000],
+          ["s", 1000],
+        ];
+        for (const [suffix, unitMs] of units) {
+          if (ms >= unitMs) return `${(ms / unitMs).toFixed(1)}${suffix}`;
+        }
+        return `${ms}ms`;
+      }
+
+      function formatBytes(byteString) {
+        const bytes = Number(byteString);
+        if (bytes < 0) return "unbounded";
+        const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let value = bytes;
+        let i = 0;
+        while (value >= 1024 && i < units.length - 1) {
+          value /= 1024;
+          i++;
+        }
+        return `${value.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+      }
+
+      const BYTE_CONFIGS = new Set(["retention.bytes", "segment.bytes", "max.message.bytes"]);
+
+      function formatConfigValue(name, value) {
+        if (name === "retention.ms") return formatDuration(value);
+        if (BYTE_CONFIGS.has(name)) return formatBytes(value);
+        return value;
+      }
+
       function KVTable({ rows }) {
         return h(
           "table",
@@ -223,6 +259,104 @@
         );
       }
 
+      // Fetches /api/nodes/{id}/topic-stats for a selected kafka-topic node: partitioning,
+      // replication, and topic-level config (retention, cleanup policy, ...).
+      function TopicStats({ nodeId }) {
+        const [state, setState] = React.useState({ status: "loading" });
+
+        React.useEffect(() => {
+          setState({ status: "loading" });
+          fetch(`/api/nodes/${encodeURIComponent(nodeId)}/topic-stats`)
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((body) => setState({ status: "ready", stats: body }))
+            .catch((e) => setState({ status: "error", message: e.message }));
+        }, [nodeId]);
+
+        if (state.status === "loading") {
+          return h("div", { style: { color: "#6b7280" } }, "Loading…");
+        }
+        if (state.status === "error") {
+          return h(
+            "div",
+            { style: { color: "#b91c1c", fontFamily: "monospace", whiteSpace: "pre-wrap" } },
+            state.message,
+          );
+        }
+
+        const { partition_count, replication_factor, partitions, config } = state.stats;
+        const underReplicated = partitions.some((p) => p.under_replicated);
+        // A "*" flags a config value that differs from the broker default, i.e. was
+        // deliberately set on this topic rather than inherited.
+        const configRows = Object.entries(config).map(([name, entry]) => [
+          entry.is_default ? name : `${name} *`,
+          formatConfigValue(name, entry.value),
+        ]);
+
+        return h(
+          "div",
+          null,
+          h(
+            "div",
+            { style: { fontSize: 12, marginBottom: 8 } },
+            `${partition_count} partition${partition_count === 1 ? "" : "s"}, replication factor ${replication_factor}`,
+          ),
+          underReplicated &&
+            h(
+              "div",
+              { style: { color: "#b91c1c", fontSize: 12, marginBottom: 8 } },
+              "⚠ under-replicated partition(s)",
+            ),
+          h(
+            "div",
+            {
+              style: {
+                maxHeight: 160,
+                overflow: "auto",
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
+                marginBottom: 12,
+              },
+            },
+            h(
+              "table",
+              null,
+              h(
+                "thead",
+                null,
+                h(
+                  "tr",
+                  null,
+                  ["partition", "leader", "replicas", "isrs"].map((c) => h("th", { key: c }, c)),
+                ),
+              ),
+              h(
+                "tbody",
+                null,
+                partitions.map((p) =>
+                  h(
+                    "tr",
+                    { key: p.partition, style: p.under_replicated ? { background: "#fef2f2" } : undefined },
+                    h("td", null, p.partition),
+                    h("td", null, p.leader),
+                    h("td", null, p.replicas.join(", ")),
+                    h("td", null, p.isrs.join(", ")),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          configRows.length > 0 && h(KVTable, { rows: configRows }),
+          configRows.some(([name]) => name.endsWith(" *")) &&
+            h("div", { style: { fontSize: 11, color: "#6b7280", marginTop: 4 } }, "* differs from broker default"),
+        );
+      }
+
       function NodePanel({ node, onClose }) {
         const connectionRows = node.connection ? Object.entries(node.connection) : [];
         const configRows = node.config ? Object.entries(node.config) : [];
@@ -261,6 +395,8 @@
             h(Section, { title: "Config" }, h(KVTable, { rows: configRows })),
           schemaRows.length > 0 &&
             h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
+          node.type === "kafka-topic" &&
+            h(Section, { title: "Topic stats" }, h(TopicStats, { nodeId: node.id })),
           node.type === "kafka-topic" &&
             h(Section, { title: "Latest events" }, h(EventSnapshot, { nodeId: node.id, schema: node.schema })),
         );

@@ -57,11 +57,10 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _validate_node(node_id: str, node: NodeDef) -> None:
-    if node.type in SOURCE_SINK_TYPES:
-        if node.schema is None:
-            raise DataflowValidationError(
-                f"Node {node_id!r} of type {node.type!r} needs a schema"
-            )
+    # `schema` is optional even for source/sink nodes: a real-world fragment (e.g. one written
+    # by hand, or discovered from a live cluster without introspecting its columns) may not
+    # have one on hand. When it is present, its field types are still checked.
+    if node.schema is not None:
         for field_name, field_type in node.schema.items():
             if field_type not in TYPE_MAPPING:
                 raise DataflowValidationError(

@@ -1,4 +1,4 @@
-# 0.4.0a1
+# 0.4.0a2
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -18,3 +18,9 @@
 * Added `examples/simple-pipeline` (two topics, one dedup node) with a `seed_kafka.py` script
   that populates it with sample events, including intentional duplicates, and a bigger
   `examples/analytics-pipeline` exercising fragment merging across four files
+* The node panel's `kafka-topic` section now also shows topic stats: per-partition
+  leader/replicas/in-sync-replicas (flagging under-replication) and topic config
+  (`retention.ms`, `cleanup.policy`, etc., each flagged when it differs from the broker
+  default), via `GET /api/nodes/{id}/topic-stats` and `tkati_dashboard.topic_stats`
+* `schema` is optional for every node type (previously required for `kafka-topic`/
+  `clickhouse-table`), since it isn't always on hand for a real-world node

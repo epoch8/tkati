@@ -50,20 +50,29 @@ refreshing the browser picks up the change without restarting the server.
 ## Node panel
 
 Clicking a node opens a side panel with its full metadata: connection settings, `config`, and
-`schema` (field → type). For a `kafka-topic` node, the panel also fetches
-`GET /api/nodes/{id}/snapshot`, which connects live to `connection.broker`/`connection.topic` and
-shows the most recent messages on that topic (newest last), parsed as JSON. This is one of two
-places `tkati-dashboard` talks to a live broker rather than just the serialized directory — it's a
-best-effort convenience for the panel, not something the graph view itself depends on: a broker
-that's unreachable, or a topic that doesn't exist, shows an inline error in that section instead of
-breaking the page. It uses a throwaway consumer group and never commits offsets, so it never
-interferes with a real pipeline's consumers.
+`schema` (field → type). For a `kafka-topic` node, the panel also fetches two more, live views:
+
+- `GET /api/nodes/{id}/snapshot` connects to `connection.broker`/`connection.topic` and shows the
+  most recent messages on that topic (newest last), parsed as JSON, using a throwaway consumer
+  group that never commits offsets.
+- `GET /api/nodes/{id}/topic-stats` shows the topic's partitioning and replication (per-partition
+  leader/replicas/in-sync-replicas, flagging any under-replicated partition) and its topic-level
+  config — `retention.ms`, `retention.bytes`, `cleanup.policy`, `segment.bytes`,
+  `compression.type`, `max.message.bytes` — via `tkati_dashboard.topic_stats`, marking each value
+  that differs from the broker default. Partition/replica info comes from the same topic metadata
+  lookup as the snapshot/lag features (`_kafka_metadata.py`); the config comes from a separate
+  read-only `AdminClient.describe_configs()` call.
+
+These are two of the places `tkati-dashboard` talks to a live broker rather than just the
+serialized directory — best-effort conveniences for the panel, not something the graph view itself
+depends on: a broker that's unreachable, or a topic that doesn't exist, shows an inline error in
+that section instead of breaking the page.
 
 ## Consumer lag
 
 For every stream edge whose `consumer.group_id` is set and whose source is a `kafka-topic`, the
 page also fetches `GET /api/nodes/{topic_id}/consumer-lag?group_id=...` and appends the result to
-the edge's label (e.g. `stream · group: orders-dedup · lag: 4`). This is the other place
+the edge's label (e.g. `stream · group: orders-dedup · lag: 4`). This is another place
 `tkati-dashboard` talks to a live broker: it looks up `group_id`'s committed offset with
 `Consumer.committed()` and compares it to the topic's high watermark — it never subscribes or
 polls as that group, so it can't join it, trigger a rebalance, or otherwise disturb a real
@@ -75,6 +84,7 @@ the page.
 
 `tkati_dashboard.dataflow.load_dataflow` enforces the rules from the serialization doc: the
 directory must contain at least one `*.json` fragment, node ids must be unique (or identically
-redefined) across fragments, edges must reference existing nodes, and source/sink schemas must use
-field types known to `tkati_core.type_mapping`. A validation failure surfaces as an HTTP 422 with
-the error message, shown inline on the page instead of a blank graph.
+redefined) across fragments, edges must reference existing nodes, and a node's `schema`, when
+present, must use field types known to `tkati_core.type_mapping` — `schema` itself is always
+optional, since it isn't always on hand for a real-world node. A validation failure surfaces as
+an HTTP 422 with the error message, shown inline on the page instead of a blank graph.

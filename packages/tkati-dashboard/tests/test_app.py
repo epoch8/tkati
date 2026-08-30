@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from tkati_dashboard import lag, snapshot
+from tkati_dashboard import lag, snapshot, topic_stats
 from tkati_dashboard.app import create_app
 
 
@@ -150,3 +150,50 @@ def test_consumer_lag_endpoint_502_on_fetch_error(
 
     assert response.status_code == 502
     assert response.json()["detail"] == "group not found"
+
+
+def test_topic_stats_endpoint_returns_stats(
+    sample_dataflow_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def _fetch(broker: str, topic: str, **kw: object) -> dict:
+        calls.append((broker, topic))
+        return {
+            "partition_count": 1,
+            "replication_factor": 1,
+            "partitions": [],
+            "config": {},
+        }
+
+    monkeypatch.setattr(topic_stats, "fetch_topic_stats", _fetch)
+    client = TestClient(create_app(sample_dataflow_dir))
+
+    response = client.get("/api/nodes/raw-orders/topic-stats")
+
+    assert response.status_code == 200
+    assert response.json()["partition_count"] == 1
+    assert calls == [("redpanda:29092", "raw_orders")]
+
+
+def test_topic_stats_endpoint_404_for_non_kafka_node(sample_dataflow_dir: Path) -> None:
+    client = TestClient(create_app(sample_dataflow_dir))
+
+    response = client.get("/api/nodes/dedup/topic-stats")
+
+    assert response.status_code == 404
+
+
+def test_topic_stats_endpoint_502_on_fetch_error(
+    sample_dataflow_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _raise(broker: str, topic: str, **kw: object) -> dict:
+        raise topic_stats.TopicStatsError("broker unreachable")
+
+    monkeypatch.setattr(topic_stats, "fetch_topic_stats", _raise)
+    client = TestClient(create_app(sample_dataflow_dir))
+
+    response = client.get("/api/nodes/raw-orders/topic-stats")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "broker unreachable"

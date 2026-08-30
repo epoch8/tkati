@@ -4,7 +4,32 @@ One entry per jj change, keyed by its change identifier (stable across
 `jj describe`/`jj squash`/rebases — use `jj log -r <change-id>` to look one
 up). Newest first.
 
-## 0.4.0a1
+## 0.4.0a2
+
+### ykrrxmkz — tkati-dashboard: topic stats in the node panel, optional schema
+
+- New `tkati_dashboard.topic_stats.fetch_topic_stats` and `GET
+  /api/nodes/{id}/topic-stats`: per-partition leader/replicas/in-sync-replicas
+  (flagging any under-replicated partition) from the same topic metadata
+  lookup as `snapshot.py`/`lag.py`, plus topic-level config
+  (`retention.ms`, `retention.bytes`, `cleanup.policy`, `segment.bytes`,
+  `compression.type`, `max.message.bytes`) via a separate read-only
+  `AdminClient.describe_configs()` call, each entry flagged if it differs
+  from the broker default.
+- The node panel shows this as a new "Topic stats" section for
+  `kafka-topic` nodes, alongside "Latest events"; degrades to an inline
+  error, like the other live lookups, if the broker is unreachable.
+- `_kafka_metadata.py`: extracted `resolve_topic_metadata` (full
+  partition metadata) with `resolve_partitions` now built on top of it.
+- Fixed `load_dataflow` rejecting a real-world fragment (e.g. a
+  `clickhouse-table` node hand-written or discovered from a live cluster
+  without introspecting its columns) whose source/sink node has no
+  `schema` — `Node '...' of type '...' needs a schema`. `schema` is now
+  optional for every node type; when present, its field types are still
+  validated against `tkati_core.type_mapping`. Updated
+  [docs/dataflow-serialization.md](docs/dataflow-serialization.md)'s node
+  model and validation sections to match: `schema` is recommended, not
+  required.
 
 ### zpwmtxrn — Add tkati-dashboard: dataflow graph viewer
 

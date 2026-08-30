@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from tkati_dashboard import lag, snapshot
+from tkati_dashboard import lag, snapshot, topic_stats
 from tkati_dashboard.dataflow import (
     SOURCE_SINK_TYPES,
     DataflowValidationError,
@@ -112,6 +112,19 @@ def create_app(dataflow_dir: Path) -> FastAPI:
         try:
             return lag.fetch_consumer_lag(broker, topic, group_id)
         except lag.LagError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+    @app.get("/api/nodes/{node_id}/topic-stats")
+    def node_topic_stats(node_id: str) -> dict[str, Any]:
+        try:
+            node = _get_node(dataflow_dir, node_id)
+        except DataflowValidationError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        broker, topic = _require_kafka_connection(node_id, node, "topic stats")
+
+        try:
+            return topic_stats.fetch_topic_stats(broker, topic)
+        except topic_stats.TopicStatsError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
 
     return app
