@@ -17,13 +17,18 @@ Then open `http://127.0.0.1:8000/` in a browser. The page fetches `/api/graph` a
 each node's real measured box (from its label text, via canvas measurement — no DOM mount needed)
 rather than a flat grid, so a node with a long `broker`/`topic` string pushes its neighbors aside
 instead of overlapping them. A toggle in the top-left corner of the canvas switches the layout
-between left-to-right (the default) and top-to-bottom, remembered across reloads. Source/sink
-nodes (`kafka-topic`, `clickhouse-table`) and processing nodes are colored differently, and stream
-edges are labeled by `kind` on its own line plus, for a Kafka consumer edge, `group:` and `lag:`
-on their own lines below it. Click a node to fill the always-visible inspector panel on the right
-— its border highlights blue while selected — with its full connection/config/schema details,
-plus every stream edge touching it and that edge's live consumer lag; drag the panel's left edge
-to resize it (the width is remembered across reloads).
+between left-to-right (the default) and top-to-bottom, remembered across reloads.
+
+A node consuming a stream with a consumer group doesn't get that edge's `group`/`lag` as a
+floating label — it gets its own stacked row inside the *consuming* node instead, right below the
+node's own header, one row per such input (so a fan-in node like a sessionizer joining two topics
+shows two rows, each fed by its own arrow landing directly on its row). An edge with nothing extra
+to show beyond its `kind` (no consumer group) stays a plain, unlabeled-beyond-`kind` line into the
+node's header. Source/sink nodes (`kafka-topic`, `clickhouse-table`) and processing nodes are
+colored differently. Click a node to fill the always-visible inspector panel on the right — the
+whole node box glows blue while selected — with its full connection/config/schema details, plus
+every stream edge touching it and that edge's live consumer lag; drag the panel's left edge to
+resize it (the width is remembered across reloads).
 
 ### Try it with the bundled example
 
@@ -88,16 +93,16 @@ that section instead of breaking the page.
 ## Consumer lag
 
 For every stream edge whose `consumer.group_id` is set and whose source is a `kafka-topic`, the
-page also fetches `GET /api/nodes/{topic_id}/consumer-lag?group_id=...` and shows the result both
-on the edge itself (a `group:`/`lag:` line under the edge's `kind`) and, for either node that edge
-touches, in the inspector panel's "Consumer lag" section (`← other-node (group_id)` for an edge
-consumed by the selected node, `→ other-node (group_id)` for one where it's the topic being
-consumed). This is another place `tkati-dashboard` talks to a live broker: it looks up
-`group_id`'s committed offset with `Consumer.committed()` and compares it to the topic's high
-watermark — it never subscribes or polls as that group, so it can't join it, trigger a rebalance,
-or otherwise disturb a real pipeline's consumer. A group that has never committed an offset is
-reported as fully behind (lag = the topic's full size); an unreachable broker shows `lag: n/a`
-instead of failing the page.
+page also fetches `GET /api/nodes/{topic_id}/consumer-lag?group_id=...` and shows the result in
+two places: the `group`/`lag` lines in that edge's stacked row inside the consuming node (see
+above), and, for either node that edge touches, the inspector panel's "Consumer lag" section
+(`← other-node (group_id)` for an edge consumed by the selected node, `→ other-node (group_id)`
+for one where it's the topic being consumed). This is another place `tkati-dashboard` talks to a
+live broker: it looks up `group_id`'s committed offset with `Consumer.committed()` and compares
+it to the topic's high watermark — it never subscribes or polls as that group, so it can't join
+it, trigger a rebalance, or otherwise disturb a real pipeline's consumer. A group that has never
+committed an offset is reported as fully behind (lag = the topic's full size); an unreachable
+broker shows `lag: n/a` instead of failing the page.
 
 ## Validation
 

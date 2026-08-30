@@ -33,18 +33,40 @@
         BaseEdge,
         Controls,
         EdgeLabelRenderer,
+        Handle,
         MiniMap,
         Panel,
         Position,
+        ReactFlowProvider,
         getBezierPath,
+        useUpdateNodeInternals,
       } from "https://esm.sh/reactflow@11?deps=react@18,react-dom@18";
       import dagre from "https://esm.sh/@dagrejs/dagre@3.1.1";
 
       const h = React.createElement;
 
+      // rowBackground/rowText are a deeper shade of the same hue as background/border — used by
+      // a node's stacked consumer rows, so they read as part of the same node rather than an
+      // unrelated color.
       const GROUP_COLORS = {
-        "source-sink": { background: "#dbeafe", border: "#3b82f6" },
-        "processing-node": { background: "#dcfce7", border: "#22c55e" },
+        "source-sink": {
+          background: "#dbeafe",
+          border: "#3b82f6",
+          rowBackground: "#bfdbfe",
+          rowText: "#1e40af",
+        },
+        "processing-node": {
+          background: "#dcfce7",
+          border: "#22c55e",
+          rowBackground: "#bbf7d0",
+          rowText: "#166534",
+        },
+      };
+      const FALLBACK_COLORS = {
+        background: "#e5e7eb",
+        border: "#6b7280",
+        rowBackground: "#d1d5db",
+        rowText: "#1f2937",
       };
 
       // Type-specific connection details worth surfacing on the node itself.
@@ -98,15 +120,25 @@
         return `${e.from}->${e.to}->${e.consumer?.group_id ?? ""}`;
       }
 
+      function lagStatusText(lagState) {
+        if (!lagState) return "…";
+        if (lagState.status === "ready") return String(lagState.total_lag);
+        if (lagState.status === "error") return "n/a";
+        return "loading…";
+      }
+
       // One field per line rather than a single "·"-joined line — cramped side by side, and
-      // the group_id/lag are only relevant to stream edges that name a consumer anyway.
+      // the group_id/lag are only relevant to stream edges that name a consumer anyway. The lag
+      // line is reserved as soon as there's a group (showing a placeholder until it resolves)
+      // rather than appearing later, so this text's line count — and therefore the box a
+      // consuming node's row/an edge's floating label needs — doesn't change shape once the
+      // fetch completes.
       function edgeLabel(e, lagState) {
         const lines = [e.kind];
         const groupId = e.consumer?.group_id;
         if (groupId) {
           lines.push(`group: ${groupId}`);
-          if (lagState?.status === "ready") lines.push(`lag: ${lagState.total_lag}`);
-          else if (lagState?.status === "error") lines.push("lag: n/a");
+          lines.push(`lag: ${lagStatusText(lagState)}`);
         }
         return lines.join("\n");
       }
@@ -194,17 +226,43 @@
       // reduce crossings — both beyond what a hand-rolled rank/column assignment would attempt.
       // dagre also handles rank assignment (including any accidental cycle, e.g. a
       // DLQ/reprocessing edge) without the manual root-finding a from-scratch BFS needs.
-      function layout(nodes, edges, direction) {
+      // An incoming edge earns its own stacked row inside the consuming node's box when there's
+      // something to show beyond its bare kind (today: a consumer group, and therefore lag) —
+      // moving what used to float on the edge into the node it actually describes. An edge
+      // without extra info stays a plain, unlabeled-beyond-kind line into a shared handle (see
+      // LabeledEdge/edgeLabel).
+      function isRowEdge(e) {
+        return Boolean(e.consumer?.group_id);
+      }
+
+      const DEFAULT_TARGET_HANDLE = "__default__";
+
+      function layout(nodes, edges, direction, lagByEdge) {
         const g = new dagre.graphlib.Graph();
         g.setGraph({ rankdir: direction === "LR" ? "LR" : "TB", nodesep: 40, ranksep: 60 });
         g.setDefaultEdgeLabel(() => ({}));
 
+        const incomingByTarget = new Map();
+        for (const e of edges) {
+          if (!incomingByTarget.has(e.to)) incomingByTarget.set(e.to, []);
+          incomingByTarget.get(e.to).push(e);
+        }
+
+        // Per node: its header box (own label, as before) plus one measured box per row-worthy
+        // incoming edge, stacked below it. The combined box — what dagre actually spaces and
+        // positions — is as wide as the widest of those, and as tall as all of them summed.
         const boxes = new Map();
         for (const n of nodes) {
-          const box = measureNodeBox(nodeLabel(n));
-          boxes.set(n.id, box);
-          g.setNode(n.id, box);
+          const headerBox = measureNodeBox(nodeLabel(n));
+          const rows = (incomingByTarget.get(n.id) ?? []).filter(isRowEdge).map((e) => {
+            const text = edgeLabel(e, lagByEdge[edgeKey(e)]);
+            return { id: edgeKey(e), text, box: measureNodeBox(text) };
+          });
+          const width = Math.max(headerBox.width, ...rows.map((r) => r.box.width));
+          const height = headerBox.height + rows.reduce((sum, r) => sum + r.box.height, 0);
+          boxes.set(n.id, { headerBox, rows, width, height });
         }
+        for (const n of nodes) g.setNode(n.id, boxes.get(n.id));
         for (const e of edges) {
           if (boxes.has(e.from) && boxes.has(e.to)) g.setEdge(e.from, e.to);
         }
@@ -215,31 +273,124 @@
         const targetPosition = direction === "LR" ? Position.Left : Position.Top;
 
         return nodes.map((n) => {
-          const box = boxes.get(n.id);
+          const info = boxes.get(n.id);
           const { x, y } = g.node(n.id); // dagre's (x, y) is the box's center
-          const colors = GROUP_COLORS[n.group] ?? { background: "#e5e7eb", border: "#6b7280" };
+          const colors = GROUP_COLORS[n.group] ?? FALLBACK_COLORS;
           return {
             id: n.id,
-            position: { x: x - box.width / 2, y: y - box.height / 2 },
-            sourcePosition,
-            targetPosition,
-            data: { label: nodeLabel(n) },
-            style: {
-              background: colors.background,
-              border: `1px solid ${colors.border}`,
-              borderRadius: 8,
-              padding: NODE_PADDING,
-              boxSizing: "border-box",
-              width: box.width,
-              height: box.height,
-              lineHeight: NODE_LINE_HEIGHT,
-              whiteSpace: "pre-line",
-              fontSize: NODE_FONT_SIZE,
-              cursor: "pointer",
+            type: "stacked",
+            position: { x: x - info.width / 2, y: y - info.height / 2 },
+            data: {
+              label: nodeLabel(n),
+              rows: info.rows,
+              headerHeight: info.headerBox.height,
+              colors,
+              sourcePosition,
+              targetPosition,
+              direction,
             },
+            style: { width: info.width, height: info.height },
           };
         });
       }
+
+      // Renders a node as a header (its own label, styled by GROUP_COLORS as before) with zero
+      // or more rows stacked below it, one per incoming edge that has a consumer group. Each row
+      // gets its own named target Handle, so that edge's arrow visibly lands on its row instead
+      // of the node's header — plus one shared DEFAULT_TARGET_HANDLE for edges with nothing
+      // extra to show (see isRowEdge/LabeledEdge).
+      function StackedNode({ data }) {
+        const { label, rows, headerHeight, colors, sourcePosition, targetPosition, direction, isSelected } = data;
+        const handleCount = 1 + rows.length;
+
+        // Index 0 is the header's own DEFAULT_TARGET_HANDLE; indices 1..N are the rows, in the
+        // same top-to-bottom order they're rendered in.
+        function handleStyle(index) {
+          if (direction === "LR") {
+            // DEFAULT_TARGET_HANDLE (index 0) is rendered directly in the outer wrapper, so its
+            // `top` is relative to the whole node — but each row's own Handle is rendered
+            // *inside* that row's own `position: relative` div, so its `top` needs to be
+            // relative to just that row's height, not the whole node's, or it lands far past
+            // the row's actual bounds (visibly outside the node).
+            const centerY = index === 0 ? headerHeight / 2 : rows[index - 1].box.height / 2;
+            return { top: centerY, transform: "translateY(-50%)" };
+          }
+          // Rows always stack vertically inside the node regardless of the overall graph
+          // direction, so there's no natural horizontal position for a row along a top/bottom
+          // target side — spreading handles evenly at least keeps every row individually
+          // addressable, even if the visual order along that edge doesn't match row order.
+          return { left: `${((index + 1) / (handleCount + 1)) * 100}%` };
+        }
+
+        return h(
+          "div",
+          {
+            style: {
+              width: "100%",
+              height: "100%",
+              position: "relative",
+              borderRadius: 8,
+              overflow: "hidden",
+              boxShadow: isSelected ? "0 0 0 3px rgba(29, 78, 216, 0.35)" : undefined,
+              cursor: "pointer",
+            },
+          },
+          h(Handle, { type: "source", position: sourcePosition }),
+          h(Handle, {
+            type: "target",
+            id: DEFAULT_TARGET_HANDLE,
+            position: targetPosition,
+            style: handleStyle(0),
+          }),
+          h(
+            "div",
+            {
+              style: {
+                height: headerHeight,
+                boxSizing: "border-box",
+                background: colors.background,
+                border: `1px solid ${colors.border}`,
+                // Matches the outer wrapper's rounding on whichever corners are actually its
+                // own (top corners always; bottom too if there are no rows below it) — a plain
+                // rectangular border relies on the parent's overflow:hidden to clip its square
+                // corners into the curve, which visibly chops them instead of following it.
+                borderRadius: rows.length > 0 ? "8px 8px 0 0" : 8,
+                padding: NODE_PADDING,
+                whiteSpace: "pre-line",
+                lineHeight: NODE_LINE_HEIGHT,
+                fontSize: NODE_FONT_SIZE,
+              },
+            },
+            label,
+          ),
+          rows.map((row, i) =>
+            h(
+              "div",
+              {
+                key: row.id,
+                style: {
+                  position: "relative",
+                  height: row.box.height,
+                  boxSizing: "border-box",
+                  background: colors.rowBackground,
+                  border: `1px solid ${colors.border}`,
+                  borderTop: "none",
+                  borderRadius: i === rows.length - 1 ? "0 0 8px 8px" : 0,
+                  padding: NODE_PADDING,
+                  whiteSpace: "pre-line",
+                  lineHeight: NODE_LINE_HEIGHT,
+                  fontSize: NODE_FONT_SIZE,
+                  color: colors.rowText,
+                },
+              },
+              row.text,
+              h(Handle, { type: "target", id: row.id, position: targetPosition, style: handleStyle(i + 1) }),
+            ),
+          ),
+        );
+      }
+
+      const NODE_TYPES = { stacked: StackedNode };
 
       // Collapsible panel section. `children` stays mounted (just hidden) while collapsed, so a
       // live-fetching section like EventSnapshot/TopicStats doesn't re-fetch every time it's
@@ -662,13 +813,6 @@
         );
       }
 
-      function lagStatusText(lagState) {
-        if (!lagState) return "…";
-        if (lagState.status === "ready") return String(lagState.total_lag);
-        if (lagState.status === "error") return "n/a";
-        return "loading…";
-      }
-
       // Every stream edge touching this node (either direction) that names a consumer group —
       // the same lag already shown on the edge in the graph, surfaced here too since a node's
       // own edges aren't otherwise visible while it's the one filling the panel.
@@ -808,6 +952,7 @@
           800,
         );
         const [direction, setDirection] = usePersistedState("tkati-dashboard-direction", "LR");
+        const updateNodeInternals = useUpdateNodeInternals();
 
         React.useEffect(() => {
           fetch("/api/graph")
@@ -863,29 +1008,16 @@
         // every mousemove, doesn't re-run it dozens of times a second. That churn was fighting
         // ReactFlow's own resize-driven viewport recalculation and made every node vanish
         // mid-drag.
+        // lagByEdge is a dependency here too: a row's content (and so its measured size) grows
+        // once that edge's lag resolves — see edgeLabel — so the graph needs to relayout when
+        // that happens, not just on initial load.
         const nodes = React.useMemo(() => {
           if (!graph) return [];
-          return layout(graph.nodes, graph.edges, direction).map((n) =>
-            n.id === selectedNodeId
-              ? {
-                  ...n,
-                  style: {
-                    ...n.style,
-                    // Only the border *color* changes here, not its width: measureNodeBox()
-                    // sized this box assuming a constant NODE_BORDER (1px), and the node uses
-                    // boxSizing: border-box, so widening the border on selection would shrink
-                    // the content area without the box growing to match — enough to tip a
-                    // label whose longest line was right at that edge into wrapping an extra
-                    // line, which then overflowed past the (height-limited) bottom edge.
-                    // boxShadow is purely decorative and never affects layout, so it's what
-                    // carries the actual "selected" emphasis.
-                    border: "1px solid #1d4ed8",
-                    boxShadow: "0 0 0 3px rgba(29, 78, 216, 0.35)",
-                  },
-                }
-              : n,
-          );
-        }, [graph, direction, selectedNodeId]);
+          return layout(graph.nodes, graph.edges, direction, lagByEdge).map((n) => ({
+            ...n,
+            data: { ...n.data, isSelected: n.id === selectedNodeId },
+          }));
+        }, [graph, direction, selectedNodeId, lagByEdge]);
 
         const flowEdges = React.useMemo(() => {
           if (!graph) return [];
@@ -893,12 +1025,25 @@
             id: `${e.from}-${e.to}-${i}`,
             source: e.from,
             target: e.to,
+            targetHandle: isRowEdge(e) ? edgeKey(e) : DEFAULT_TARGET_HANDLE,
             type: "labeled",
-            data: { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
+            // A row-worthy edge's info now lives in its row inside the target node instead of
+            // floating on the edge (see layout()/StackedNode) — so it gets no label here.
+            data: isRowEdge(e) ? {} : { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
             animated: e.kind === "stream",
             markerEnd: { type: "arrowclosed" },
           }));
         }, [graph, lagByEdge]);
+
+        // Each node's set of Handles (one per row, plus the default) is only known once its
+        // rows are computed — different nodes have different counts. ReactFlow measures a
+        // node's handle positions once and doesn't notice on its own when that set changes
+        // ("dynamic handles" in their docs), so without this, an edge targeting a row's handle
+        // can resolve to a stale/default position instead of that row — e.g. rendering with no
+        // visible arrowhead. Re-running this whenever `nodes` changes keeps it in sync.
+        React.useEffect(() => {
+          for (const n of nodes) updateNodeInternals(n.id);
+        }, [nodes, updateNodeInternals]);
 
         if (error) {
           const el = document.getElementById("error");
@@ -922,13 +1067,14 @@
                 nodes,
                 edges: flowEdges,
                 edgeTypes: EDGE_TYPES,
+                nodeTypes: NODE_TYPES,
                 fitView: true,
                 onNodeClick: (_event, node) => setSelectedNodeId(node.id),
                 onPaneClick: () => setSelectedNodeId(null),
               },
               h(Background, null),
               h(Controls, null),
-              h(MiniMap, null),
+              h(MiniMap, { nodeColor: (n) => n.data?.colors?.background ?? FALLBACK_COLORS.background }),
               h(LayoutDirectionToggle, { direction, onChange: setDirection }),
             ),
           ),
@@ -943,7 +1089,9 @@
         );
       }
 
-      createRoot(document.getElementById("root")).render(h(App));
+      // useUpdateNodeInternals (see App) requires being inside a ReactFlowProvider, which the
+      // top-level <ReactFlow> element itself only provides to its own children, not its parent.
+      createRoot(document.getElementById("root")).render(h(ReactFlowProvider, null, h(App)));
     </script>
   </body>
 </html>

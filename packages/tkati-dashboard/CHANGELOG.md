@@ -1,4 +1,4 @@
-# 0.4.0a9
+# 0.4.0a10
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -57,3 +57,14 @@
 * Fixed a selected node's text overflowing past its bottom border (visible with a label line
   close to the box's measured width) — the selection highlight now only changes the border's
   color, not its width, since the box's size assumes a constant border width
+* An incoming edge with a consumer group now shows its `group`/`lag` as a stacked row inside
+  the consuming node instead of a floating edge label, with the arrow landing directly on that
+  row (a new `StackedNode` custom node type); an edge with nothing extra to show keeps a plain
+  `kind`-only edge label
+* Fixed the header/row sections' own square-cornered borders getting chopped instead of
+  following the node's rounded outer corners
+* Fixed a row-targeting edge's arrow landing in empty space past the node instead of on its
+  row: a ReactFlow "dynamic handles" gotcha (fixed via `useUpdateNodeInternals`) plus a row
+  Handle's position being computed relative to the wrong parent (the whole node instead of
+  just that row's own div, which is what it's actually rendered inside)
+* A row's color is now a deeper shade of its own node's color instead of a fixed indigo

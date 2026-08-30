@@ -6,6 +6,54 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### ntsxvmtt — tkati-dashboard: fold consumer-edge info into the consuming node as stacked rows
+
+- An incoming edge with a consumer group (i.e. something to show beyond its bare `kind`) no
+  longer floats its `group`/`lag` as a label on the edge line — it gets its own row stacked
+  below the consuming node's header instead (`isRowEdge`/`layout()` in `static/index.html`), one
+  row per such input. A fan-in node consuming two topics (e.g. a sessionizer joining
+  deduped-clicks and deduped-purchases) now shows two rows, each with its own `Handle` so that
+  edge's arrow visibly lands on *its* row, not the header — `DEFAULT_TARGET_HANDLE` is the
+  fallback target for edges with nothing extra to show, which keep today's plain one-word `kind`
+  label.
+- New custom ReactFlow node type (`StackedNode`, registered via `NODE_TYPES`) renders the
+  header + rows and owns the selected-node glow (moved from a top-level `style` override into
+  `data.isSelected`, now that individual node markup lives in this component rather than a
+  single styled `<div>`).
+- `layout()` now groups edges by target before measuring, since a node's box height is
+  `header height + Σ(row heights)` and width is the widest of those — dagre still only ever
+  sees one final box per node, unchanged otherwise. `edgeLabel()` reserves the `lag` line as
+  soon as there's a consumer group (a "…" placeholder before the fetch resolves) instead of
+  growing by a line once it does, so a row/edge label's box doesn't change shape underneath
+  dagre's already-computed layout moments after load.
+- `<MiniMap>` now takes an explicit `nodeColor` reading `data.colors` — it previously read the
+  now-removed top-level `style.background`.
+- Verified with the same headless dagre harness used for the original size-aware layout change:
+  re-derived real `/api/graph` output for both bundled examples, confirming `sessionize` (two
+  consumer inputs) grows two rows, single-input nodes grow one, topic nodes stay row-less, and
+  zero box overlaps in both LR and TD across all 12 analytics-pipeline nodes, with every
+  row-worthy edge resolving to the exact row `layout()` produced for it.
+- Fixed the header's and each row's own square-cornered border being abruptly clipped by the
+  outer wrapper's rounded corners (relying purely on `overflow: hidden` to cut a plain
+  rectangle into a rounded one looks chopped, not curved) — the header now carries the top
+  radius (or all four corners if it has no rows) and only the last row carries the bottom
+  radius, so each section's own border follows the curve instead of being sheared off by it.
+- Fixed a row-targeting edge's arrow landing in empty space past the node instead of on its
+  row. First pass: ReactFlow measures a node's Handle positions once, and different nodes here
+  have different handle counts (one per row plus a default) — a documented "dynamic handles"
+  gotcha where it doesn't notice that set changing on its own. Added `useUpdateNodeInternals`,
+  called for every node whenever `nodes` changes, and wrapped the app in `ReactFlowProvider`
+  (required for that hook, and not otherwise provided to a component sitting above
+  `<ReactFlow>` rather than inside it). That alone wasn't the whole fix: a row's own Handle is
+  rendered *inside* that row's own `position: relative` div, so `handleStyle()`'s `top` needs
+  to be relative to just that row's height — it was computing an offset relative to the whole
+  node instead (header height + every preceding row), landing well past the row's actual
+  bounds once the browser resolved it against the wrong parent.
+- A row's color is now a deeper shade of its node's own `GROUP_COLORS` (a new
+  `rowBackground`/`rowText` pair per group, plus a `FALLBACK_COLORS` object for an unrecognized
+  group) instead of a fixed indigo — so a row reads as part of its node's own color, not an
+  unrelated accent.
+
 ### urwupwnw — tkati-dashboard: fix nodes vanishing on resize and garbling on selection
 
 - `layout()` (canvas text measurement + a full dagre run for every node) was recomputed on
