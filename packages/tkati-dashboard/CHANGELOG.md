@@ -1,4 +1,4 @@
-# 0.4.0a5
+# 0.4.0a6
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -36,3 +36,11 @@
   narrow panel
 * Every panel section (Connection, Config, Schema, Topic stats, Latest events) is now
   collapsible, without unmounting/re-fetching a live-fetching section when reopened
+* "Latest events" is now fetched on demand via a "Load latest events" button, with a
+  "↻ Refresh" button once loaded, rather than automatically on node selection
+* Each event returned by `fetch_kafka_snapshot`/`GET /api/nodes/{id}/snapshot` now carries its
+  Kafka `partition`, `offset`, and `timestamp` alongside the parsed message body (`value`),
+  shown as a small header above each message in the panel
+* Fixed "↻ Refresh" resetting the inspector panel's scroll position — the previous events now
+  stay rendered while a refresh is in flight instead of being replaced by a "Loading…" that
+  briefly shrinks the scrollable panel

@@ -17,6 +17,10 @@ from tkati_dashboard._kafka_metadata import resolve_partitions
 DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT_SEC = 5.0
 
+# confluent_kafka.Message.timestamp()'s first element, per librdkafka's
+# rd_kafka_timestamp_type_t.
+TIMESTAMP_TYPES = {0: "unavailable", 1: "create", 2: "log_append"}
+
 
 class SnapshotError(RuntimeError):
     """A live topic snapshot could not be fetched."""
@@ -29,6 +33,11 @@ def fetch_kafka_snapshot(
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
 ) -> list[dict[str, Any]]:
     """Read up to `limit` of the most recent messages from `topic`, oldest first.
+
+    Each returned dict is `{partition, offset, timestamp, timestamp_type, value}` — Kafka-level
+    metadata alongside the message's own JSON-parsed body (`value`), since the two aren't
+    otherwise distinguishable once decoded. `timestamp` is epoch milliseconds, or `None` if the
+    broker didn't record one (`timestamp_type` is then `"unavailable"`).
 
     Uses a throwaway consumer group and explicit offset seeking to each partition's tail,
     rather than joining any real pipeline's consumer group — this never affects committed
@@ -78,12 +87,25 @@ def fetch_kafka_snapshot(
         for msg in messages[-limit:]:
             value = msg.value()
             if value is None:
-                events.append({"_raw": None})  # tombstone (null-value) message
-                continue
-            try:
-                events.append(orjson.loads(value))
-            except Exception:
-                events.append({"_raw": value.decode("utf-8", "replace")})
+                parsed: Any = {"_raw": None}  # tombstone (null-value) message
+            else:
+                try:
+                    parsed = orjson.loads(value)
+                except Exception:
+                    parsed = {"_raw": value.decode("utf-8", "replace")}
+
+            timestamp_type, timestamp_ms = msg.timestamp()
+            events.append(
+                {
+                    "partition": msg.partition(),
+                    "offset": msg.offset(),
+                    "timestamp": timestamp_ms if timestamp_ms >= 0 else None,
+                    "timestamp_type": TIMESTAMP_TYPES.get(
+                        timestamp_type, "unavailable"
+                    ),
+                    "value": parsed,
+                }
+            )
         return events
     finally:
         consumer.close()

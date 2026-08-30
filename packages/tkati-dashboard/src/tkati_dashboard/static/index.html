@@ -246,11 +246,35 @@
       // Fetches /api/nodes/{id}/snapshot for a selected kafka-topic node and renders each
       // message as its own pretty-printed JSON block — a table falls apart once a message has
       // more than a handful of fields, so this shows one whole record at a time instead.
-      function EventSnapshot({ nodeId, schema }) {
-        const [state, setState] = React.useState({ status: "loading" });
+      function formatKafkaTimestamp(ms) {
+        if (ms === null || ms === undefined) return "no timestamp";
+        return new Date(ms).toISOString();
+      }
 
-        React.useEffect(() => {
-          setState({ status: "loading" });
+      const BUTTON_STYLE = {
+        border: "1px solid #d1d5db",
+        background: "#fff",
+        borderRadius: 6,
+        padding: "4px 10px",
+        fontSize: 12,
+        cursor: "pointer",
+        color: "#374151",
+      };
+
+      // Fetches messages only on demand — a message-heavy topic isn't something to hit every
+      // time its node happens to be selected — and lets the user pull a fresh batch afterward.
+      function EventSnapshot({ nodeId, schema }) {
+        // `events` (the last successfully loaded batch) is tracked separately from `phase`, so
+        // a refresh keeps rendering the same event list underneath rather than replacing it
+        // with a bare "Loading…" — swapping the whole panel content out and back in mid-fetch
+        // shrinks the scrollable container and makes the browser clamp/reset its scroll
+        // position, which is exactly what a refresh shouldn't do.
+        const [events, setEvents] = React.useState(null);
+        const [phase, setPhase] = React.useState("idle"); // "idle" | "loading" | "error"
+        const [errorMessage, setErrorMessage] = React.useState(null);
+
+        const load = React.useCallback(() => {
+          setPhase("loading");
           fetch(`/api/nodes/${encodeURIComponent(nodeId)}/snapshot`)
             .then(async (res) => {
               if (!res.ok) {
@@ -259,47 +283,113 @@
               }
               return res.json();
             })
-            .then((body) => setState({ status: "ready", events: body.events }))
-            .catch((e) => setState({ status: "error", message: e.message }));
+            .then((body) => {
+              setEvents(body.events);
+              setPhase("idle");
+            })
+            .catch((e) => {
+              setErrorMessage(e.message);
+              setPhase("error");
+            });
         }, [nodeId]);
 
-        if (state.status === "loading") {
-          return h("div", { style: { color: "#6b7280" } }, "Loading…");
-        }
-        if (state.status === "error") {
+        // A different node was selected — drop any previously loaded batch rather than show
+        // stale events under a "Refresh" button that would otherwise silently apply to the
+        // wrong topic.
+        React.useEffect(() => {
+          setEvents(null);
+          setPhase("idle");
+          setErrorMessage(null);
+        }, [nodeId]);
+
+        if (events === null) {
+          if (phase === "idle") {
+            return h("button", { onClick: load, style: BUTTON_STYLE }, "Load latest events");
+          }
+          if (phase === "loading") {
+            return h("div", { style: { color: "#6b7280" } }, "Loading…");
+          }
           return h(
             "div",
-            { style: { color: "#b91c1c", fontFamily: "monospace", whiteSpace: "pre-wrap" } },
-            state.message,
+            null,
+            h(
+              "div",
+              {
+                style: {
+                  color: "#b91c1c",
+                  fontFamily: "monospace",
+                  whiteSpace: "pre-wrap",
+                  marginBottom: 8,
+                },
+              },
+              errorMessage,
+            ),
+            h("button", { onClick: load, style: BUTTON_STYLE }, "Retry"),
           );
-        }
-        if (state.events.length === 0) {
-          return h("div", { style: { color: "#6b7280" } }, "No recent events found.");
         }
 
         return h(
           "div",
-          { style: { display: "flex", flexDirection: "column", gap: 8 } },
-          state.events.map((event, i) =>
+          null,
+          h(
+            "div",
+            { style: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 8 } },
+            phase === "error" &&
+              h("span", { style: { color: "#b91c1c", fontSize: 11 } }, `Refresh failed: ${errorMessage}`),
             h(
-              "pre",
-              {
-                key: i,
-                style: {
-                  margin: 0,
-                  padding: 8,
-                  background: "#f9fafb",
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 6,
-                  fontSize: 11,
-                  lineHeight: 1.5,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                },
-              },
-              JSON.stringify(orderBySchema(event, schema), null, 2),
+              "button",
+              { onClick: load, disabled: phase === "loading", style: BUTTON_STYLE },
+              phase === "loading" ? "Refreshing…" : "↻ Refresh",
             ),
           ),
+          events.length === 0
+            ? h("div", { style: { color: "#6b7280" } }, "No recent events found.")
+            : h(
+                "div",
+                { style: { display: "flex", flexDirection: "column", gap: 8 } },
+                events.map((event, i) =>
+                  h(
+                    "div",
+                    {
+                      key: i,
+                      style: { border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" },
+                    },
+                    h(
+                      "div",
+                      {
+                        style: {
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: 8,
+                          padding: "4px 8px",
+                          background: "#eef2ff",
+                          color: "#4338ca",
+                          fontSize: 10,
+                          fontFamily: "monospace",
+                        },
+                      },
+                      h("span", null, `partition ${event.partition}`),
+                      h("span", null, `offset ${event.offset}`),
+                      h("span", null, formatKafkaTimestamp(event.timestamp)),
+                    ),
+                    h(
+                      "pre",
+                      {
+                        style: {
+                          margin: 0,
+                          padding: 8,
+                          background: "#f9fafb",
+                          fontSize: 11,
+                          lineHeight: 1.5,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                        },
+                      },
+                      JSON.stringify(orderBySchema(event.value, schema), null, 2),
+                    ),
+                  ),
+                ),
+              ),
         );
       }
 

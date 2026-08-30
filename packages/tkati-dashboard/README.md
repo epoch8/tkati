@@ -30,8 +30,8 @@ uv run python packages/tkati-dashboard/examples/simple-pipeline/seed_kafka.py
 uv run tkati-dashboard packages/tkati-dashboard/examples/simple-pipeline
 ```
 
-Then open <http://127.0.0.1:8000/> and click the `raw-events` or `deduped-events` node — the
-"Latest events" section in the side panel shows the real messages the seed script just produced
+Then open <http://127.0.0.1:8000/>, click the `raw-events` or `deduped-events` node, and click
+"Load latest events" in the side panel to see the real messages the seed script just produced
 (`raw-events` includes two intentional duplicate `event_id`s so you can see what the `dedup` node
 in between is for).
 
@@ -60,9 +60,12 @@ re-fetch. For a `kafka-topic` node, the panel also fetches two more, live views:
 
 - `GET /api/nodes/{id}/snapshot` connects to `connection.broker`/`connection.topic` and shows the
   most recent messages on that topic (newest last), parsed as JSON, using a throwaway consumer
-  group that never commits offsets. Each message renders as its own pretty-printed JSON block
-  (fields reordered to match `schema`, when there is one) rather than a table — real messages
-  commonly carry 5-20 fields, too many to lay out sensibly as table columns in a side panel.
+  group that never commits offsets. It only fetches on demand — click "Load latest events" — and
+  a "↻ Refresh" button afterward pulls a fresh batch on request rather than automatically. Each
+  message renders as its own pretty-printed JSON block (fields reordered to match `schema`, when
+  there is one) rather than a table — real messages commonly carry 5-20 fields, too many to lay
+  out sensibly as table columns in a side panel — with a small header showing that message's
+  Kafka-level `partition`, `offset`, and timestamp, alongside its parsed body.
 - `GET /api/nodes/{id}/topic-stats` shows the topic's partitioning and replication (per-partition
   leader/replicas/in-sync-replicas, flagging any under-replicated partition) and its topic-level
   config — `retention.ms`, `retention.bytes`, `cleanup.policy`, `segment.bytes`,

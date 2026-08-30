@@ -6,6 +6,26 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### nlmmssxp — tkati-dashboard: lazy-load latest events, with Kafka offset/timestamp metadata
+
+- `tkati_dashboard.snapshot.fetch_kafka_snapshot` now returns
+  `{partition, offset, timestamp, timestamp_type, value}` per message instead of just the
+  parsed `value` — Kafka-level metadata alongside the message body, since the two aren't
+  otherwise distinguishable once decoded. `timestamp` is `None` (`timestamp_type`
+  `"unavailable"`) when the broker didn't record one.
+- "Latest events" no longer fetches automatically when a `kafka-topic` node is selected — it
+  shows a "Load latest events" button instead, plus a "↻ Refresh" button once loaded, so
+  selecting a node doesn't unconditionally hit the broker. Switching to a different node drops
+  any previously loaded batch back to the button rather than leaving stale events up under a
+  "Refresh" that would silently apply to the wrong topic.
+- Each message now shows a small header with its `partition`, `offset`, and timestamp above
+  its pretty-printed JSON body.
+- Fixed pressing "↻ Refresh" resetting the inspector panel's scroll position: the previous
+  event list was replaced with a bare "Loading…" while the refresh was in flight, which
+  shrank the scrollable panel and made the browser clamp its scroll offset. The last loaded
+  batch now stays rendered (with the button relabeled "Refreshing…" and disabled) until the
+  new one lands, so the panel's height — and scroll position — never collapses mid-refresh.
+
 ### suonpnzk — tkati-dashboard: always-visible resizable inspector, message-oriented events
 
 - The node side panel is now an always-visible inspector rather than a popup: it shows a

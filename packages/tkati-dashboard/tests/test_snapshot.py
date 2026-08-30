@@ -26,7 +26,12 @@ def test_fetch_kafka_snapshot_returns_latest_events(kafka_topic: str) -> None:
 
     result = fetch_kafka_snapshot(BROKER, kafka_topic, limit=3)
 
-    assert [e["id"] for e in result] == ["2", "3", "4"]
+    assert [e["value"]["id"] for e in result] == ["2", "3", "4"]
+    # Kafka-level metadata alongside the parsed value.
+    assert [e["offset"] for e in result] == [2, 3, 4]
+    assert all(e["partition"] == 0 for e in result)
+    assert all(isinstance(e["timestamp"], int) for e in result)
+    assert all(e["timestamp_type"] in ("create", "log_append") for e in result)
 
 
 def test_fetch_kafka_snapshot_empty_topic(kafka_topic: str) -> None:
