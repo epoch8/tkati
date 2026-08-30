@@ -1,4 +1,4 @@
-# 0.4.0a8
+# 0.4.0a9
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -52,3 +52,8 @@
   instead of a single `·`-joined line
 * The inspector panel has a new "Consumer lag" section listing every stream edge touching the
   selected node and its live lag
+* Fixed all graph nodes vanishing while dragging the inspector panel's resize handle — the
+  graph layout is now memoized instead of being recomputed on every resize-driven re-render
+* Fixed a selected node's text overflowing past its bottom border (visible with a label line
+  close to the box's measured width) — the selection highlight now only changes the border's
+  color, not its width, since the box's size assumes a constant border width

@@ -858,6 +858,48 @@
           }
         }, [graph]);
 
+        // `layout()` does real work (canvas text measurement + a full dagre run) — memoized so
+        // dragging the inspector panel's resize handle, which re-renders this component on
+        // every mousemove, doesn't re-run it dozens of times a second. That churn was fighting
+        // ReactFlow's own resize-driven viewport recalculation and made every node vanish
+        // mid-drag.
+        const nodes = React.useMemo(() => {
+          if (!graph) return [];
+          return layout(graph.nodes, graph.edges, direction).map((n) =>
+            n.id === selectedNodeId
+              ? {
+                  ...n,
+                  style: {
+                    ...n.style,
+                    // Only the border *color* changes here, not its width: measureNodeBox()
+                    // sized this box assuming a constant NODE_BORDER (1px), and the node uses
+                    // boxSizing: border-box, so widening the border on selection would shrink
+                    // the content area without the box growing to match — enough to tip a
+                    // label whose longest line was right at that edge into wrapping an extra
+                    // line, which then overflowed past the (height-limited) bottom edge.
+                    // boxShadow is purely decorative and never affects layout, so it's what
+                    // carries the actual "selected" emphasis.
+                    border: "1px solid #1d4ed8",
+                    boxShadow: "0 0 0 3px rgba(29, 78, 216, 0.35)",
+                  },
+                }
+              : n,
+          );
+        }, [graph, direction, selectedNodeId]);
+
+        const flowEdges = React.useMemo(() => {
+          if (!graph) return [];
+          return graph.edges.map((e, i) => ({
+            id: `${e.from}-${e.to}-${i}`,
+            source: e.from,
+            target: e.to,
+            type: "labeled",
+            data: { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
+            animated: e.kind === "stream",
+            markerEnd: { type: "arrowclosed" },
+          }));
+        }, [graph, lagByEdge]);
+
         if (error) {
           const el = document.getElementById("error");
           el.textContent = "Failed to load dataflow: " + error;
@@ -865,28 +907,6 @@
           return null;
         }
         if (!graph) return null;
-
-        const nodes = layout(graph.nodes, graph.edges, direction).map((n) =>
-          n.id === selectedNodeId
-            ? {
-                ...n,
-                style: {
-                  ...n.style,
-                  border: "2px solid #1d4ed8",
-                  boxShadow: "0 0 0 2px rgba(29, 78, 216, 0.25)",
-                },
-              }
-            : n,
-        );
-        const flowEdges = graph.edges.map((e, i) => ({
-          id: `${e.from}-${e.to}-${i}`,
-          source: e.from,
-          target: e.to,
-          type: "labeled",
-          data: { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
-          animated: e.kind === "stream",
-          markerEnd: { type: "arrowclosed" },
-        }));
 
         const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
 

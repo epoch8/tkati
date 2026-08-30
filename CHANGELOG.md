@@ -6,6 +6,25 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### urwupwnw — tkati-dashboard: fix nodes vanishing on resize and garbling on selection
+
+- `layout()` (canvas text measurement + a full dagre run for every node) was recomputed on
+  every render of `App`, including the dozens of `mousemove`-driven re-renders per second while
+  dragging the inspector panel's resize handle — that churn raced ReactFlow's own resize-driven
+  viewport recalculation and made every node disappear mid-drag.
+- Wrapped the node/edge computation in `React.useMemo`, keyed on `[graph, direction,
+  selectedNodeId]` / `[graph, lagByEdge]` respectively, so panel-resize state (`panelWidth`,
+  `resizing`) no longer triggers a relayout at all — moved above `App`'s early returns to keep
+  hook call order unconditional, per the Rules of Hooks.
+- Fixed a node's text overflowing past its bottom border when selected (visible on a node with
+  a label line close to the box's measured width, e.g. a multi-broker comma-separated
+  `connection.broker`). The selection highlight changed `border` from `1px` to `2px solid`;
+  since nodes use `boxSizing: border-box` with a fixed width/height computed by
+  `measureNodeBox()` assuming a constant 1px border, the wider border shrank the content area
+  just enough to wrap an extra line, which then overflowed the (still 1-line-shorter) box
+  height. Selection now only changes the border's *color*, leaving its width — and thus the
+  content area — unchanged; `boxShadow`, which never affects layout, carries the emphasis.
+
 ### ukyykwzq — tkati-dashboard: LR/TD toggle, selection highlight, multi-line edges, lag in panel
 
 - Added an LR/TD layout toggle (`LayoutDirectionToggle`, a `Panel` in the graph's top-left

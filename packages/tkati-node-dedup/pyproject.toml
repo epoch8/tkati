@@ -1,11 +1,11 @@
 [project]
 name = "tkati-node-dedup"
-version = "0.4.0a8"
+version = "0.4.0a9"
 description = "Kafka-to-Kafka streaming node that deduplicates events by a configurable field within a rolling processing-time window"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "tkati-core==0.4.0a8",
+    "tkati-core==0.4.0a9",
     "loguru>=0.7.0",
     "pydantic-settings>=2.11.0",
     "pyarrow>=21.0.0",
