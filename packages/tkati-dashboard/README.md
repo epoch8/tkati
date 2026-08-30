@@ -15,8 +15,9 @@ tkati-dashboard path/to/dataflow-dir
 Then open `http://127.0.0.1:8000/` in a browser. The page fetches `/api/graph` and renders it
 top-to-bottom with [React Flow](https://reactflow.dev); source/sink nodes (`kafka-topic`,
 `clickhouse-table`) and processing nodes are colored differently, and stream edges are labeled by
-`kind` plus, for a Kafka consumer edge, its `group_id` and live lag. Click a node to open a side
-panel with its full connection/config/schema details.
+`kind` plus, for a Kafka consumer edge, its `group_id` and live lag. Click a node to fill the
+always-visible inspector panel on the right with its full connection/config/schema details; drag
+its left edge to resize it (the width is remembered across reloads).
 
 ### Try it with the bundled example
 
@@ -50,12 +51,18 @@ refreshing the browser picks up the change without restarting the server.
 
 ## Node panel
 
-Clicking a node opens a side panel with its full metadata: connection settings, `config`, and
-`schema` (field → type). For a `kafka-topic` node, the panel also fetches two more, live views:
+The panel on the right is always there, like an inspector rather than a popup — it shows a
+placeholder until you click a node, then shows that node's full metadata: connection settings,
+`config`, and `schema` (field → type). Clicking empty canvas clears the selection back to the
+placeholder. Every section has a clickable header to collapse/expand it — a collapsed section
+stays mounted, just hidden, so collapsing a live-fetching section and reopening it doesn't
+re-fetch. For a `kafka-topic` node, the panel also fetches two more, live views:
 
 - `GET /api/nodes/{id}/snapshot` connects to `connection.broker`/`connection.topic` and shows the
   most recent messages on that topic (newest last), parsed as JSON, using a throwaway consumer
-  group that never commits offsets.
+  group that never commits offsets. Each message renders as its own pretty-printed JSON block
+  (fields reordered to match `schema`, when there is one) rather than a table — real messages
+  commonly carry 5-20 fields, too many to lay out sensibly as table columns in a side panel.
 - `GET /api/nodes/{id}/topic-stats` shows the topic's partitioning and replication (per-partition
   leader/replicas/in-sync-replicas, flagging any under-replicated partition) and its topic-level
   config — `retention.ms`, `retention.bytes`, `cleanup.policy`, `segment.bytes`,

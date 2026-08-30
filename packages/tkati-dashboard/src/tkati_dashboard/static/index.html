@@ -19,6 +19,7 @@
         vertical-align: top; word-break: break-word;
       }
       th { color: #6b7280; font-weight: 600; position: sticky; top: 0; background: #fff; }
+      .resize-handle:hover { background: #93c5fd; }
     </style>
   </head>
   <body>
@@ -122,16 +123,47 @@
         return positioned;
       }
 
-      function Section({ title, children }) {
+      // Collapsible panel section. `children` stays mounted (just hidden) while collapsed, so a
+      // live-fetching section like EventSnapshot/TopicStats doesn't re-fetch every time it's
+      // toggled back open.
+      function Section({ title, children, defaultOpen = true }) {
+        const [open, setOpen] = React.useState(defaultOpen);
         return h(
           "div",
           { style: { marginBottom: 16 } },
           h(
             "div",
-            { style: { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", marginBottom: 6, letterSpacing: 0.4 } },
+            {
+              onClick: () => setOpen((o) => !o),
+              style: {
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                cursor: "pointer",
+                userSelect: "none",
+                fontSize: 11,
+                fontWeight: 700,
+                color: "#6b7280",
+                textTransform: "uppercase",
+                marginBottom: 6,
+                letterSpacing: 0.4,
+              },
+            },
+            h(
+              "span",
+              {
+                style: {
+                  display: "inline-block",
+                  fontSize: 9,
+                  transform: open ? "rotate(90deg)" : "none",
+                  transition: "transform 0.1s",
+                },
+              },
+              "▶",
+            ),
             title,
           ),
-          children,
+          h("div", { style: { display: open ? "block" : "none" } }, children),
         );
       }
 
@@ -196,8 +228,24 @@
         );
       }
 
-      // Fetches /api/nodes/{id}/snapshot for a selected kafka-topic node and renders the
-      // result as a small events table, independent of the rest of the panel.
+      // Reorders an event's keys to match the schema's field order (schema fields first, then
+      // any extras), purely so related fields read together — a message can have 5-20 fields,
+      // which a wide table has no good way to show in a narrow side panel.
+      function orderBySchema(event, schema) {
+        if (!schema) return event;
+        const ordered = {};
+        for (const key of Object.keys(schema)) {
+          if (key in event) ordered[key] = event[key];
+        }
+        for (const key of Object.keys(event)) {
+          if (!(key in ordered)) ordered[key] = event[key];
+        }
+        return ordered;
+      }
+
+      // Fetches /api/nodes/{id}/snapshot for a selected kafka-topic node and renders each
+      // message as its own pretty-printed JSON block — a table falls apart once a message has
+      // more than a handful of fields, so this shows one whole record at a time instead.
       function EventSnapshot({ nodeId, schema }) {
         const [state, setState] = React.useState({ status: "loading" });
 
@@ -229,31 +277,27 @@
           return h("div", { style: { color: "#6b7280" } }, "No recent events found.");
         }
 
-        const columns = schema
-          ? Object.keys(schema)
-          : [...new Set(state.events.flatMap((e) => Object.keys(e)))];
-
         return h(
           "div",
-          { style: { maxHeight: 260, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 6 } },
-          h(
-            "table",
-            null,
+          { style: { display: "flex", flexDirection: "column", gap: 8 } },
+          state.events.map((event, i) =>
             h(
-              "thead",
-              null,
-              h("tr", null, columns.map((c) => h("th", { key: c }, c))),
-            ),
-            h(
-              "tbody",
-              null,
-              state.events.map((event, i) =>
-                h(
-                  "tr",
-                  { key: i },
-                  columns.map((c) => h("td", { key: c }, formatCell(event[c]))),
-                ),
-              ),
+              "pre",
+              {
+                key: i,
+                style: {
+                  margin: 0,
+                  padding: 8,
+                  background: "#f9fafb",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  lineHeight: 1.5,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                },
+              },
+              JSON.stringify(orderBySchema(event, schema), null, 2),
             ),
           ),
         );
@@ -357,37 +401,15 @@
         );
       }
 
-      function NodePanel({ node, onClose }) {
+      function NodeDetails({ node }) {
         const connectionRows = node.connection ? Object.entries(node.connection) : [];
         const configRows = node.config ? Object.entries(node.config) : [];
         const schemaRows = node.schema ? Object.entries(node.schema) : [];
 
         return h(
           "div",
-          {
-            style: {
-              width: 340,
-              flexShrink: 0,
-              borderLeft: "1px solid #e5e7eb",
-              background: "#fff",
-              padding: 16,
-              overflowY: "auto",
-              boxShadow: "-2px 0 8px rgba(0,0,0,0.04)",
-            },
-          },
-          h(
-            "div",
-            { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 } },
-            h("div", { style: { fontSize: 15, fontWeight: 700 } }, node.label),
-            h(
-              "button",
-              {
-                onClick: onClose,
-                style: { border: "none", background: "none", fontSize: 18, cursor: "pointer", color: "#6b7280", lineHeight: 1 },
-              },
-              "×",
-            ),
-          ),
+          null,
+          h("div", { style: { fontSize: 15, fontWeight: 700, marginBottom: 4 } }, node.label),
           h("div", { style: { color: "#6b7280", fontSize: 12, marginBottom: 16 } }, node.type),
           connectionRows.length > 0 &&
             h(Section, { title: "Connection" }, h(KVTable, { rows: connectionRows })),
@@ -402,11 +424,102 @@
         );
       }
 
+      // Persists a resizable panel width across reloads, tracking a drag on a handle rendered
+      // separately (see the returned `resizing` flag / `startResizing` callback).
+      function useResizablePanelWidth(storageKey, defaultWidth, min, max) {
+        const [width, setWidth] = React.useState(() => {
+          try {
+            const stored = Number(localStorage.getItem(storageKey));
+            if (Number.isFinite(stored) && stored >= min && stored <= max) return stored;
+          } catch {
+            // localStorage unavailable (private mode, etc.) — fall back to the default.
+          }
+          return defaultWidth;
+        });
+        const [resizing, setResizing] = React.useState(false);
+
+        React.useEffect(() => {
+          if (!resizing) return;
+          const previousCursor = document.body.style.cursor;
+          const previousUserSelect = document.body.style.userSelect;
+          document.body.style.cursor = "col-resize";
+          document.body.style.userSelect = "none";
+
+          // The panel is flush against the right edge of the window, so its target width is
+          // just the distance from the cursor to that edge.
+          const onMove = (e) => setWidth(Math.min(max, Math.max(min, window.innerWidth - e.clientX)));
+          const onUp = () => setResizing(false);
+          document.addEventListener("mousemove", onMove);
+          document.addEventListener("mouseup", onUp);
+          return () => {
+            document.removeEventListener("mousemove", onMove);
+            document.removeEventListener("mouseup", onUp);
+            document.body.style.cursor = previousCursor;
+            document.body.style.userSelect = previousUserSelect;
+          };
+        }, [resizing, min, max]);
+
+        React.useEffect(() => {
+          try {
+            localStorage.setItem(storageKey, String(width));
+          } catch {
+            // Nothing to persist to — the width just resets to the default next load.
+          }
+        }, [width, storageKey]);
+
+        return [width, () => setResizing(true), resizing];
+      }
+
+      // Always visible, like an inspector rather than a popup: shows a placeholder until a
+      // node is selected, and its own drag handle lets it be resized to fit wide messages.
+      function InspectorPanel({ node, width, onStartResize, resizing }) {
+        return h(
+          "div",
+          {
+            style: {
+              width,
+              flexShrink: 0,
+              display: "flex",
+              background: "#fff",
+              borderLeft: "1px solid #e5e7eb",
+              boxShadow: "-2px 0 8px rgba(0,0,0,0.04)",
+            },
+          },
+          h("div", {
+            className: "resize-handle",
+            onMouseDown: onStartResize,
+            style: {
+              width: 6,
+              flexShrink: 0,
+              cursor: "col-resize",
+              background: resizing ? "#3b82f6" : "transparent",
+            },
+          }),
+          h(
+            "div",
+            { style: { flex: 1, minWidth: 0, padding: 16, overflowY: "auto" } },
+            node
+              ? h(NodeDetails, { node })
+              : h(
+                  "div",
+                  { style: { color: "#6b7280", fontSize: 13, marginTop: 24, textAlign: "center" } },
+                  "Select a node to inspect it",
+                ),
+          ),
+        );
+      }
+
       function App() {
         const [graph, setGraph] = React.useState(null);
         const [error, setError] = React.useState(null);
         const [selectedNodeId, setSelectedNodeId] = React.useState(null);
         const [lagByEdge, setLagByEdge] = React.useState({});
+        const [panelWidth, startResize, resizing] = useResizablePanelWidth(
+          "tkati-dashboard-panel-width",
+          360,
+          260,
+          800,
+        );
 
         React.useEffect(() => {
           fetch("/api/graph")
@@ -497,7 +610,12 @@
               h(MiniMap, null),
             ),
           ),
-          selectedNode && h(NodePanel, { node: selectedNode, onClose: () => setSelectedNodeId(null) }),
+          h(InspectorPanel, {
+            node: selectedNode,
+            width: panelWidth,
+            onStartResize: startResize,
+            resizing,
+          }),
         );
       }
 

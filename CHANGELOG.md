@@ -6,6 +6,24 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### suonpnzk — tkati-dashboard: always-visible resizable inspector, message-oriented events
+
+- The node side panel is now an always-visible inspector rather than a popup: it shows a
+  placeholder ("Select a node to inspect it") until a node is clicked, instead of only existing
+  while one is selected. Dropped its close button accordingly — clicking empty canvas already
+  clears the selection back to the placeholder.
+- The panel is now resizable via a drag handle on its left edge
+  (`useResizablePanelWidth` in `static/index.html`), clamped to 260-800px and persisted to
+  `localStorage` across reloads.
+- `EventSnapshot`'s "Latest events" no longer renders a table: a real message commonly has
+  5-20 fields, too many to lay out as table columns in a side panel. Each message now renders
+  as its own pretty-printed JSON block instead (`JSON.stringify(event, null, 2)`, fields
+  reordered to match `schema` first when there is one).
+- Every panel section (Connection, Config, Schema, Topic stats, Latest events) is now
+  collapsible — click its header to toggle. A collapsed section's content stays mounted (just
+  hidden), so a live-fetching section like Topic stats or Latest events doesn't re-fetch every
+  time it's reopened.
+
 ### uznzxwzx — docs: connection fields; tkati-dashboard: read YAML fragments too
 
 - [docs/dataflow-serialization.md](docs/dataflow-serialization.md) never actually specified how

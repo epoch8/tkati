@@ -1,4 +1,4 @@
-# 0.4.0a4
+# 0.4.0a5
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -29,3 +29,10 @@
   reported as referencing an unknown node
 * `load_dataflow` now also reads `*.yaml`/`*.yml` fragments, freely mixable with `*.json` ones
   in the same directory — both decode to the same nodes/edges structure and merge identically
+* The node panel is now an always-visible, resizable inspector (drag its left edge; width
+  persisted to `localStorage`) instead of a popup that only exists while a node is selected
+* "Latest events" now shows each message as its own pretty-printed JSON block instead of a
+  table, since a real message commonly has too many fields for table columns to work in a
+  narrow panel
+* Every panel section (Connection, Config, Schema, Topic stats, Latest events) is now
+  collapsible, without unmounting/re-fetching a live-fetching section when reopened
