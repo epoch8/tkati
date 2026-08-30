@@ -12,14 +12,17 @@ the same graph identically).
 tkati-dashboard path/to/dataflow-dir
 ```
 
-Then open `http://127.0.0.1:8000/` in a browser. The page fetches `/api/graph` and renders it
-top-to-bottom with [React Flow](https://reactflow.dev), laid out by [dagre](https://github.com/dagrejs/dagre)
-using each node's real measured box (from its label text, via canvas measurement — no DOM mount
-needed) rather than a flat grid, so a node with a long `broker`/`topic` string pushes its
-neighbors aside instead of overlapping them. Source/sink nodes (`kafka-topic`, `clickhouse-table`)
-and processing nodes are colored differently, and stream edges are labeled by `kind` plus, for a
-Kafka consumer edge, its `group_id` and live lag. Click a node to fill the always-visible
-inspector panel on the right with its full connection/config/schema details; drag its left edge
+Then open `http://127.0.0.1:8000/` in a browser. The page fetches `/api/graph` and renders it with
+[React Flow](https://reactflow.dev), laid out by [dagre](https://github.com/dagrejs/dagre) using
+each node's real measured box (from its label text, via canvas measurement — no DOM mount needed)
+rather than a flat grid, so a node with a long `broker`/`topic` string pushes its neighbors aside
+instead of overlapping them. A toggle in the top-left corner of the canvas switches the layout
+between left-to-right (the default) and top-to-bottom, remembered across reloads. Source/sink
+nodes (`kafka-topic`, `clickhouse-table`) and processing nodes are colored differently, and stream
+edges are labeled by `kind` on its own line plus, for a Kafka consumer edge, `group:` and `lag:`
+on their own lines below it. Click a node to fill the always-visible inspector panel on the right
+— its border highlights blue while selected — with its full connection/config/schema details,
+plus every stream edge touching it and that edge's live consumer lag; drag the panel's left edge
 to resize it (the width is remembered across reloads).
 
 ### Try it with the bundled example
@@ -85,14 +88,16 @@ that section instead of breaking the page.
 ## Consumer lag
 
 For every stream edge whose `consumer.group_id` is set and whose source is a `kafka-topic`, the
-page also fetches `GET /api/nodes/{topic_id}/consumer-lag?group_id=...` and appends the result to
-the edge's label (e.g. `stream · group: orders-dedup · lag: 4`). This is another place
-`tkati-dashboard` talks to a live broker: it looks up `group_id`'s committed offset with
-`Consumer.committed()` and compares it to the topic's high watermark — it never subscribes or
-polls as that group, so it can't join it, trigger a rebalance, or otherwise disturb a real
-pipeline's consumer. A group that has never committed an offset is reported as fully behind (lag
-= the topic's full size); an unreachable broker shows `lag: n/a` on that edge instead of failing
-the page.
+page also fetches `GET /api/nodes/{topic_id}/consumer-lag?group_id=...` and shows the result both
+on the edge itself (a `group:`/`lag:` line under the edge's `kind`) and, for either node that edge
+touches, in the inspector panel's "Consumer lag" section (`← other-node (group_id)` for an edge
+consumed by the selected node, `→ other-node (group_id)` for one where it's the topic being
+consumed). This is another place `tkati-dashboard` talks to a live broker: it looks up
+`group_id`'s committed offset with `Consumer.committed()` and compares it to the topic's high
+watermark — it never subscribes or polls as that group, so it can't join it, trigger a rebalance,
+or otherwise disturb a real pipeline's consumer. A group that has never committed an offset is
+reported as fully behind (lag = the topic's full size); an unreachable broker shows `lag: n/a`
+instead of failing the page.
 
 ## Validation
 

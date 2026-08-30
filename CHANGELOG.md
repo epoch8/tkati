@@ -6,6 +6,23 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### ukyykwzq — tkati-dashboard: LR/TD toggle, selection highlight, multi-line edges, lag in panel
+
+- Added an LR/TD layout toggle (`LayoutDirectionToggle`, a `Panel` in the graph's top-left
+  corner), persisted to `localStorage` via a new `usePersistedState` hook — LR (left-to-right)
+  is now the default, dagre's `rankdir` and each node's `sourcePosition`/`targetPosition` switch
+  with it.
+- The selected node's box now gets a visible blue border/glow in the graph, not just a filled-in
+  inspector panel — there was previously no indication in the graph itself of which node the
+  panel was showing.
+- Edge labels are now multi-line (`kind`, then `group: …`, then `lag: …`, one per line) instead
+  of a single `·`-joined line. ReactFlow's default label is SVG `<text>` and can't render `\n`,
+  so this required a custom edge type (`LabeledEdge`, via `BaseEdge`/`EdgeLabelRenderer`/
+  `getBezierPath`) rendering the label as an HTML div instead.
+- The inspector panel has a new "Consumer lag" section: every stream edge touching the selected
+  node (either direction) that names a consumer group, with its live lag — reusing the lag
+  already fetched for the graph's edge labels rather than fetching it again.
+
 ### xvxosztm — tkati-dashboard: size-aware graph layout via dagre
 
 - Replaced the hand-rolled BFS rank/column layout with [dagre](https://github.com/dagrejs/dagre)

@@ -30,9 +30,13 @@
       import { createRoot } from "https://esm.sh/react-dom@18/client";
       import ReactFlow, {
         Background,
+        BaseEdge,
         Controls,
+        EdgeLabelRenderer,
         MiniMap,
+        Panel,
         Position,
+        getBezierPath,
       } from "https://esm.sh/reactflow@11?deps=react@18,react-dom@18";
       import dagre from "https://esm.sh/@dagrejs/dagre@3.1.1";
 
@@ -94,24 +98,105 @@
         return `${e.from}->${e.to}->${e.consumer?.group_id ?? ""}`;
       }
 
+      // One field per line rather than a single "·"-joined line — cramped side by side, and
+      // the group_id/lag are only relevant to stream edges that name a consumer anyway.
       function edgeLabel(e, lagState) {
+        const lines = [e.kind];
         const groupId = e.consumer?.group_id;
-        if (!groupId) return e.kind;
-        let lagText = "";
-        if (lagState?.status === "ready") lagText = ` · lag: ${lagState.total_lag}`;
-        else if (lagState?.status === "error") lagText = " · lag: n/a";
-        return `${e.kind} · group: ${groupId}${lagText}`;
+        if (groupId) {
+          lines.push(`group: ${groupId}`);
+          if (lagState?.status === "ready") lines.push(`lag: ${lagState.total_lag}`);
+          else if (lagState?.status === "error") lines.push("lag: n/a");
+        }
+        return lines.join("\n");
       }
 
-      // Lays the graph out top-to-bottom with dagre, fed each node's real measured box (see
-      // measureNodeBox) so a long label pushes neighboring nodes aside instead of overlapping
-      // them, and edges are ordered to reduce crossings — both beyond what a hand-rolled
-      // rank/column assignment would attempt. dagre also handles rank assignment (including any
-      // accidental cycle, e.g. a DLQ/reprocessing edge) without the manual root-finding a
-      // from-scratch BFS needs.
-      function layout(nodes, edges) {
+      // Renders an edge's (possibly multi-line) label as HTML via EdgeLabelRenderer rather than
+      // ReactFlow's default single-line SVG <text> label, which has no way to show "\n"-joined
+      // lines.
+      function LabeledEdge({
+        id,
+        sourceX,
+        sourceY,
+        targetX,
+        targetY,
+        sourcePosition,
+        targetPosition,
+        style,
+        markerEnd,
+        data,
+      }) {
+        const [path, labelX, labelY] = getBezierPath({
+          sourceX,
+          sourceY,
+          sourcePosition,
+          targetX,
+          targetY,
+          targetPosition,
+        });
+        return h(
+          React.Fragment,
+          null,
+          h(BaseEdge, { id, path, style, markerEnd }),
+          data?.label &&
+            h(
+              EdgeLabelRenderer,
+              null,
+              h(
+                "div",
+                {
+                  style: {
+                    position: "absolute",
+                    transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+                    background: "#fff",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 4,
+                    padding: "2px 6px",
+                    fontSize: 10,
+                    lineHeight: 1.4,
+                    textAlign: "center",
+                    whiteSpace: "pre-line",
+                    pointerEvents: "none",
+                  },
+                },
+                data.label,
+              ),
+            ),
+        );
+      }
+
+      const EDGE_TYPES = { labeled: LabeledEdge };
+
+      // Persists an arbitrary bit of UI state (JSON-serializable) to localStorage across reloads.
+      function usePersistedState(key, defaultValue) {
+        const [value, setValue] = React.useState(() => {
+          try {
+            const stored = localStorage.getItem(key);
+            if (stored !== null) return JSON.parse(stored);
+          } catch {
+            // localStorage unavailable, or the stored value predates this shape — fall back.
+          }
+          return defaultValue;
+        });
+        React.useEffect(() => {
+          try {
+            localStorage.setItem(key, JSON.stringify(value));
+          } catch {
+            // Nothing to persist to — the value just resets to the default next load.
+          }
+        }, [key, value]);
+        return [value, setValue];
+      }
+
+      // Lays the graph out with dagre in the given direction ("LR" left-to-right or "TD"
+      // top-to-bottom), fed each node's real measured box (see measureNodeBox) so a long label
+      // pushes neighboring nodes aside instead of overlapping them, and edges are ordered to
+      // reduce crossings — both beyond what a hand-rolled rank/column assignment would attempt.
+      // dagre also handles rank assignment (including any accidental cycle, e.g. a
+      // DLQ/reprocessing edge) without the manual root-finding a from-scratch BFS needs.
+      function layout(nodes, edges, direction) {
         const g = new dagre.graphlib.Graph();
-        g.setGraph({ rankdir: "TB", nodesep: 40, ranksep: 60 });
+        g.setGraph({ rankdir: direction === "LR" ? "LR" : "TB", nodesep: 40, ranksep: 60 });
         g.setDefaultEdgeLabel(() => ({}));
 
         const boxes = new Map();
@@ -126,6 +211,9 @@
 
         dagre.layout(g);
 
+        const sourcePosition = direction === "LR" ? Position.Right : Position.Bottom;
+        const targetPosition = direction === "LR" ? Position.Left : Position.Top;
+
         return nodes.map((n) => {
           const box = boxes.get(n.id);
           const { x, y } = g.node(n.id); // dagre's (x, y) is the box's center
@@ -133,8 +221,8 @@
           return {
             id: n.id,
             position: { x: x - box.width / 2, y: y - box.height / 2 },
-            sourcePosition: Position.Bottom,
-            targetPosition: Position.Top,
+            sourcePosition,
+            targetPosition,
             data: { label: nodeLabel(n) },
             style: {
               background: colors.background,
@@ -290,6 +378,59 @@
         cursor: "pointer",
         color: "#374151",
       };
+
+      const TOGGLE_BUTTON_STYLE = {
+        border: "none",
+        background: "transparent",
+        borderRadius: 4,
+        padding: "4px 8px",
+        fontSize: 12,
+        cursor: "pointer",
+        color: "#374151",
+      };
+      const TOGGLE_BUTTON_ACTIVE_STYLE = {
+        ...TOGGLE_BUTTON_STYLE,
+        background: "#3b82f6",
+        color: "#fff",
+      };
+
+      // A small top-left overlay to switch the graph's layout direction.
+      function LayoutDirectionToggle({ direction, onChange }) {
+        return h(
+          Panel,
+          { position: "top-left" },
+          h(
+            "div",
+            {
+              style: {
+                display: "flex",
+                gap: 2,
+                background: "#fff",
+                padding: 2,
+                borderRadius: 6,
+                border: "1px solid #e5e7eb",
+                boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+              },
+            },
+            h(
+              "button",
+              {
+                onClick: () => onChange("LR"),
+                style: direction === "LR" ? TOGGLE_BUTTON_ACTIVE_STYLE : TOGGLE_BUTTON_STYLE,
+              },
+              "→ LR",
+            ),
+            h(
+              "button",
+              {
+                onClick: () => onChange("TD"),
+                style: direction === "TD" ? TOGGLE_BUTTON_ACTIVE_STYLE : TOGGLE_BUTTON_STYLE,
+              },
+              "↓ TD",
+            ),
+          ),
+        );
+      }
 
       // Fetches messages only on demand — a message-heavy topic isn't something to hit every
       // time its node happens to be selected — and lets the user pull a fresh batch afterward.
@@ -521,7 +662,32 @@
         );
       }
 
-      function NodeDetails({ node }) {
+      function lagStatusText(lagState) {
+        if (!lagState) return "…";
+        if (lagState.status === "ready") return String(lagState.total_lag);
+        if (lagState.status === "error") return "n/a";
+        return "loading…";
+      }
+
+      // Every stream edge touching this node (either direction) that names a consumer group —
+      // the same lag already shown on the edge in the graph, surfaced here too since a node's
+      // own edges aren't otherwise visible while it's the one filling the panel.
+      function ConsumerLagSection({ node, edges, lagByEdge }) {
+        const relevant = edges.filter(
+          (e) => e.consumer?.group_id && (e.from === node.id || e.to === node.id),
+        );
+        if (relevant.length === 0) return null;
+
+        const rows = relevant.map((e) => {
+          const outgoing = e.from === node.id;
+          const other = outgoing ? e.to : e.from;
+          const label = `${outgoing ? "→" : "←"} ${other} (${e.consumer.group_id})`;
+          return [label, lagStatusText(lagByEdge[edgeKey(e)])];
+        });
+        return h(Section, { title: "Consumer lag" }, h(KVTable, { rows }));
+      }
+
+      function NodeDetails({ node, edges, lagByEdge }) {
         const connectionRows = node.connection ? Object.entries(node.connection) : [];
         const configRows = node.config ? Object.entries(node.config) : [];
         const schemaRows = node.schema ? Object.entries(node.schema) : [];
@@ -537,6 +703,7 @@
             h(Section, { title: "Config" }, h(KVTable, { rows: configRows })),
           schemaRows.length > 0 &&
             h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
+          h(ConsumerLagSection, { node, edges, lagByEdge }),
           node.type === "kafka-topic" &&
             h(Section, { title: "Topic stats" }, h(TopicStats, { nodeId: node.id })),
           node.type === "kafka-topic" &&
@@ -592,7 +759,7 @@
 
       // Always visible, like an inspector rather than a popup: shows a placeholder until a
       // node is selected, and its own drag handle lets it be resized to fit wide messages.
-      function InspectorPanel({ node, width, onStartResize, resizing }) {
+      function InspectorPanel({ node, width, onStartResize, resizing, edges, lagByEdge }) {
         return h(
           "div",
           {
@@ -619,7 +786,7 @@
             "div",
             { style: { flex: 1, minWidth: 0, padding: 16, overflowY: "auto" } },
             node
-              ? h(NodeDetails, { node })
+              ? h(NodeDetails, { node, edges, lagByEdge })
               : h(
                   "div",
                   { style: { color: "#6b7280", fontSize: 13, marginTop: 24, textAlign: "center" } },
@@ -640,6 +807,7 @@
           260,
           800,
         );
+        const [direction, setDirection] = usePersistedState("tkati-dashboard-direction", "LR");
 
         React.useEffect(() => {
           fetch("/api/graph")
@@ -698,12 +866,24 @@
         }
         if (!graph) return null;
 
-        const nodes = layout(graph.nodes, graph.edges);
-        const edges = graph.edges.map((e, i) => ({
+        const nodes = layout(graph.nodes, graph.edges, direction).map((n) =>
+          n.id === selectedNodeId
+            ? {
+                ...n,
+                style: {
+                  ...n.style,
+                  border: "2px solid #1d4ed8",
+                  boxShadow: "0 0 0 2px rgba(29, 78, 216, 0.25)",
+                },
+              }
+            : n,
+        );
+        const flowEdges = graph.edges.map((e, i) => ({
           id: `${e.from}-${e.to}-${i}`,
           source: e.from,
           target: e.to,
-          label: edgeLabel(e, lagByEdge[edgeKey(e)]),
+          type: "labeled",
+          data: { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
           animated: e.kind === "stream",
           markerEnd: { type: "arrowclosed" },
         }));
@@ -720,7 +900,8 @@
               ReactFlow,
               {
                 nodes,
-                edges,
+                edges: flowEdges,
+                edgeTypes: EDGE_TYPES,
                 fitView: true,
                 onNodeClick: (_event, node) => setSelectedNodeId(node.id),
                 onPaneClick: () => setSelectedNodeId(null),
@@ -728,6 +909,7 @@
               h(Background, null),
               h(Controls, null),
               h(MiniMap, null),
+              h(LayoutDirectionToggle, { direction, onChange: setDirection }),
             ),
           ),
           h(InspectorPanel, {
@@ -735,6 +917,8 @@
             width: panelWidth,
             onStartResize: startResize,
             resizing,
+            edges: graph.edges,
+            lagByEdge,
           }),
         );
       }

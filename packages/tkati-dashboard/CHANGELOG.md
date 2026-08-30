@@ -1,4 +1,4 @@
-# 0.4.0a7
+# 0.4.0a8
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -46,3 +46,9 @@
   briefly shrinks the scrollable panel
 * The graph is now laid out by dagre using each node's real measured size instead of a flat
   grid, so a node with a long `broker`/`topic` string no longer overlaps its neighbors
+* Added an LR/TD layout toggle (LR now the default), persisted across reloads
+* The selected node now shows a blue border/glow in the graph itself, not just in the panel
+* Edge labels are now multi-line (`kind`/`group:`/`lag:`, one per line) via a custom edge type,
+  instead of a single `·`-joined line
+* The inspector panel has a new "Consumer lag" section listing every stream edge touching the
+  selected node and its live lag
