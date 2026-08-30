@@ -1,4 +1,4 @@
-# 0.4.0a6
+# 0.4.0a7
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -44,3 +44,5 @@
 * Fixed "↻ Refresh" resetting the inspector panel's scroll position — the previous events now
   stay rendered while a refresh is in flight instead of being replaced by a "Loading…" that
   briefly shrinks the scrollable panel
+* The graph is now laid out by dagre using each node's real measured size instead of a flat
+  grid, so a node with a long `broker`/`topic` string no longer overlaps its neighbors

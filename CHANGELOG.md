@@ -6,6 +6,25 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### xvxosztm — tkati-dashboard: size-aware graph layout via dagre
+
+- Replaced the hand-rolled BFS rank/column layout with [dagre](https://github.com/dagrejs/dagre)
+  (`@dagrejs/dagre`, loaded from esm.sh like React/ReactFlow), fed each node's real box size
+  instead of a flat 240×160 grid. A node's size depends on its label — `kafka-topic` nodes show
+  `broker`/`topic`, and a real broker string (AWS MSK, Confluent Cloud, ClickHouse Cloud) can run
+  50-70+ characters — so the old flat grid let long labels visually overlap their neighbors.
+  `measureNodeBox()` gets each label's exact pixel size via an offscreen `<canvas>` +
+  `ctx.measureText()`, with the node's `style.width`/`style.height` set to match exactly (plus
+  `boxSizing: border-box`), so the rendered DOM node is exactly the size dagre assumed when
+  placing everything else around it.
+- Beyond fixing overlap, dagre also orders nodes within a rank to reduce edge crossings and
+  handles rank assignment robustly (including an accidental cycle, e.g. a DLQ/reprocessing
+  edge) — both beyond what the from-scratch BFS attempted.
+- Verified with a headless Node.js harness (mirroring `layout()`/`measureNodeBox()` exactly,
+  swapping in an approximate text-width function since there's no DOM canvas outside a browser)
+  against the real `analytics-pipeline`/`simple-pipeline` example graphs and a synthetic graph
+  with a 70-character AWS-MSK-style broker string: zero overlapping boxes in all three.
+
 ### nlmmssxp — tkati-dashboard: lazy-load latest events, with Kafka offset/timestamp metadata
 
 - `tkati_dashboard.snapshot.fetch_kafka_snapshot` now returns

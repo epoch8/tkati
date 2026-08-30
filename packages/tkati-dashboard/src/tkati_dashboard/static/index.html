@@ -34,6 +34,7 @@
         MiniMap,
         Position,
       } from "https://esm.sh/reactflow@11?deps=react@18,react-dom@18";
+      import dagre from "https://esm.sh/@dagrejs/dagre@3.1.1";
 
       const h = React.createElement;
 
@@ -52,6 +53,42 @@
         return lines.join("\n");
       }
 
+      const NODE_FONT_SIZE = 12;
+      const NODE_LINE_HEIGHT = 1.35; // set explicitly on the node style too, so this box math
+      // is exact rather than a guess at the browser's font-dependent default line height.
+      const NODE_PADDING = 8;
+      const NODE_BORDER = 1;
+      const MIN_NODE_WIDTH = 140;
+      const MIN_NODE_HEIGHT = 36;
+
+      let measureCtx = null;
+      function measureTextWidth(text) {
+        if (!measureCtx) {
+          measureCtx = document.createElement("canvas").getContext("2d");
+          measureCtx.font = `${NODE_FONT_SIZE}px system-ui, sans-serif`;
+        }
+        return measureCtx.measureText(text).width;
+      }
+
+      // Computes the box a node's label actually needs (via canvas text measurement, without
+      // ever mounting anything to the DOM), so the layout can give long labels — a full Kafka
+      // broker hostname easily runs 50-70+ characters — enough room instead of a flat guess.
+      function measureNodeBox(label) {
+        const lines = label.split("\n");
+        const textWidth = Math.max(...lines.map(measureTextWidth));
+        const lineHeightPx = NODE_FONT_SIZE * NODE_LINE_HEIGHT;
+        return {
+          width: Math.max(
+            MIN_NODE_WIDTH,
+            Math.ceil(textWidth) + (NODE_PADDING + NODE_BORDER) * 2,
+          ),
+          height: Math.max(
+            MIN_NODE_HEIGHT,
+            Math.ceil(lines.length * lineHeightPx) + (NODE_PADDING + NODE_BORDER) * 2,
+          ),
+        };
+      }
+
       // Identifies an edge's consumer for looking up its fetched lag, independent of array index.
       function edgeKey(e) {
         return `${e.from}->${e.to}->${e.consumer?.group_id ?? ""}`;
@@ -66,45 +103,36 @@
         return `${e.kind} · group: ${groupId}${lagText}`;
       }
 
-      // Assigns each node a y = topological rank (BFS distance from a root), x = index
-      // within that rank, so the graph reads top-to-bottom as a pipeline.
+      // Lays the graph out top-to-bottom with dagre, fed each node's real measured box (see
+      // measureNodeBox) so a long label pushes neighboring nodes aside instead of overlapping
+      // them, and edges are ordered to reduce crossings — both beyond what a hand-rolled
+      // rank/column assignment would attempt. dagre also handles rank assignment (including any
+      // accidental cycle, e.g. a DLQ/reprocessing edge) without the manual root-finding a
+      // from-scratch BFS needs.
       function layout(nodes, edges) {
-        const outgoing = new Map(nodes.map((n) => [n.id, []]));
-        const incomingCount = new Map(nodes.map((n) => [n.id, 0]));
+        const g = new dagre.graphlib.Graph();
+        g.setGraph({ rankdir: "TB", nodesep: 40, ranksep: 60 });
+        g.setDefaultEdgeLabel(() => ({}));
+
+        const boxes = new Map();
+        for (const n of nodes) {
+          const box = measureNodeBox(nodeLabel(n));
+          boxes.set(n.id, box);
+          g.setNode(n.id, box);
+        }
         for (const e of edges) {
-          outgoing.get(e.from)?.push(e.to);
-          incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
+          if (boxes.has(e.from) && boxes.has(e.to)) g.setEdge(e.from, e.to);
         }
 
-        const rank = new Map();
-        let frontier = nodes.filter((n) => incomingCount.get(n.id) === 0).map((n) => n.id);
-        if (frontier.length === 0 && nodes.length > 0) frontier = [nodes[0].id];
-        for (const id of frontier) rank.set(id, 0);
+        dagre.layout(g);
 
-        while (frontier.length > 0) {
-          const next = [];
-          for (const id of frontier) {
-            for (const target of outgoing.get(id) ?? []) {
-              const candidate = rank.get(id) + 1;
-              if (!rank.has(target) || candidate > rank.get(target)) {
-                rank.set(target, candidate);
-                next.push(target);
-              }
-            }
-          }
-          frontier = next;
-        }
-        for (const n of nodes) if (!rank.has(n.id)) rank.set(n.id, 0);
-
-        const rowCounts = new Map();
-        const positioned = nodes.map((n) => {
-          const r = rank.get(n.id);
-          const x = rowCounts.get(r) ?? 0;
-          rowCounts.set(r, x + 1);
+        return nodes.map((n) => {
+          const box = boxes.get(n.id);
+          const { x, y } = g.node(n.id); // dagre's (x, y) is the box's center
           const colors = GROUP_COLORS[n.group] ?? { background: "#e5e7eb", border: "#6b7280" };
           return {
             id: n.id,
-            position: { x: x * 240, y: r * 160 },
+            position: { x: x - box.width / 2, y: y - box.height / 2 },
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
             data: { label: nodeLabel(n) },
@@ -112,15 +140,17 @@
               background: colors.background,
               border: `1px solid ${colors.border}`,
               borderRadius: 8,
-              padding: 8,
-              minWidth: 170,
+              padding: NODE_PADDING,
+              boxSizing: "border-box",
+              width: box.width,
+              height: box.height,
+              lineHeight: NODE_LINE_HEIGHT,
               whiteSpace: "pre-line",
-              fontSize: 12,
+              fontSize: NODE_FONT_SIZE,
               cursor: "pointer",
             },
           };
         });
-        return positioned;
       }
 
       // Collapsible panel section. `children` stays mounted (just hidden) while collapsed, so a

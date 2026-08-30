@@ -13,11 +13,14 @@ tkati-dashboard path/to/dataflow-dir
 ```
 
 Then open `http://127.0.0.1:8000/` in a browser. The page fetches `/api/graph` and renders it
-top-to-bottom with [React Flow](https://reactflow.dev); source/sink nodes (`kafka-topic`,
-`clickhouse-table`) and processing nodes are colored differently, and stream edges are labeled by
-`kind` plus, for a Kafka consumer edge, its `group_id` and live lag. Click a node to fill the
-always-visible inspector panel on the right with its full connection/config/schema details; drag
-its left edge to resize it (the width is remembered across reloads).
+top-to-bottom with [React Flow](https://reactflow.dev), laid out by [dagre](https://github.com/dagrejs/dagre)
+using each node's real measured box (from its label text, via canvas measurement — no DOM mount
+needed) rather than a flat grid, so a node with a long `broker`/`topic` string pushes its
+neighbors aside instead of overlapping them. Source/sink nodes (`kafka-topic`, `clickhouse-table`)
+and processing nodes are colored differently, and stream edges are labeled by `kind` plus, for a
+Kafka consumer edge, its `group_id` and live lag. Click a node to fill the always-visible
+inspector panel on the right with its full connection/config/schema details; drag its left edge
+to resize it (the width is remembered across reloads).
 
 ### Try it with the bundled example
 
