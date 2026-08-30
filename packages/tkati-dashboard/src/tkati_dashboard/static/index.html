@@ -220,10 +220,10 @@
         return [value, setValue];
       }
 
-      // Lays the graph out with dagre in the given direction ("LR" left-to-right or "TD"
-      // top-to-bottom), fed each node's real measured box (see measureNodeBox) so a long label
-      // pushes neighboring nodes aside instead of overlapping them, and edges are ordered to
-      // reduce crossings — both beyond what a hand-rolled rank/column assignment would attempt.
+      // Lays the graph out left-to-right with dagre, fed each node's real measured box (see
+      // measureNodeBox) so a long label pushes neighboring nodes aside instead of overlapping
+      // them, and edges are ordered to reduce crossings — both beyond what a hand-rolled
+      // rank/column assignment would attempt.
       // dagre also handles rank assignment (including any accidental cycle, e.g. a
       // DLQ/reprocessing edge) without the manual root-finding a from-scratch BFS needs.
       // An incoming edge earns its own stacked row inside the consuming node's box when there's
@@ -237,9 +237,9 @@
 
       const DEFAULT_TARGET_HANDLE = "__default__";
 
-      function layout(nodes, edges, direction, lagByEdge) {
+      function layout(nodes, edges, lagByEdge) {
         const g = new dagre.graphlib.Graph();
-        g.setGraph({ rankdir: direction === "LR" ? "LR" : "TB", nodesep: 40, ranksep: 60 });
+        g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 60 });
         g.setDefaultEdgeLabel(() => ({}));
 
         const incomingByTarget = new Map();
@@ -269,9 +269,6 @@
 
         dagre.layout(g);
 
-        const sourcePosition = direction === "LR" ? Position.Right : Position.Bottom;
-        const targetPosition = direction === "LR" ? Position.Left : Position.Top;
-
         return nodes.map((n) => {
           const info = boxes.get(n.id);
           const { x, y } = g.node(n.id); // dagre's (x, y) is the box's center
@@ -285,9 +282,8 @@
               rows: info.rows,
               headerHeight: info.headerBox.height,
               colors,
-              sourcePosition,
-              targetPosition,
-              direction,
+              sourcePosition: Position.Right,
+              targetPosition: Position.Left,
             },
             style: { width: info.width, height: info.height },
           };
@@ -300,26 +296,17 @@
       // of the node's header — plus one shared DEFAULT_TARGET_HANDLE for edges with nothing
       // extra to show (see isRowEdge/LabeledEdge).
       function StackedNode({ data }) {
-        const { label, rows, headerHeight, colors, sourcePosition, targetPosition, direction, isSelected } = data;
-        const handleCount = 1 + rows.length;
+        const { label, rows, headerHeight, colors, sourcePosition, targetPosition, isSelected } = data;
 
         // Index 0 is the header's own DEFAULT_TARGET_HANDLE; indices 1..N are the rows, in the
-        // same top-to-bottom order they're rendered in.
+        // same top-to-bottom order they're rendered in. DEFAULT_TARGET_HANDLE (index 0) is
+        // rendered directly in the outer wrapper, so its `top` is relative to the whole node —
+        // but each row's own Handle is rendered *inside* that row's own `position: relative`
+        // div, so its `top` needs to be relative to just that row's height, not the whole
+        // node's, or it lands far past the row's actual bounds (visibly outside the node).
         function handleStyle(index) {
-          if (direction === "LR") {
-            // DEFAULT_TARGET_HANDLE (index 0) is rendered directly in the outer wrapper, so its
-            // `top` is relative to the whole node — but each row's own Handle is rendered
-            // *inside* that row's own `position: relative` div, so its `top` needs to be
-            // relative to just that row's height, not the whole node's, or it lands far past
-            // the row's actual bounds (visibly outside the node).
-            const centerY = index === 0 ? headerHeight / 2 : rows[index - 1].box.height / 2;
-            return { top: centerY, transform: "translateY(-50%)" };
-          }
-          // Rows always stack vertically inside the node regardless of the overall graph
-          // direction, so there's no natural horizontal position for a row along a top/bottom
-          // target side — spreading handles evenly at least keeps every row individually
-          // addressable, even if the visual order along that edge doesn't match row order.
-          return { left: `${((index + 1) / (handleCount + 1)) * 100}%` };
+          const centerY = index === 0 ? headerHeight / 2 : rows[index - 1].box.height / 2;
+          return { top: centerY, transform: "translateY(-50%)" };
         }
 
         return h(
@@ -530,62 +517,87 @@
         color: "#374151",
       };
 
-      const TOGGLE_BUTTON_STYLE = {
-        border: "none",
-        background: "transparent",
-        borderRadius: 4,
-        padding: "4px 8px",
-        fontSize: 12,
-        cursor: "pointer",
-        color: "#374151",
-      };
-      const TOGGLE_BUTTON_ACTIVE_STYLE = {
-        ...TOGGLE_BUTTON_STYLE,
-        background: "#3b82f6",
-        color: "#fff",
-      };
+      // Collapsed by default to a small ☰ button naming the current flow, so it costs almost no
+      // canvas space once a flow is picked; clicking it expands a dropdown listing every
+      // observed flow, which collapses again on a selection or a click outside it. Only
+      // rendered by App when there's more than one flow to choose between.
+      function FlowMenu({ flows, selectedFlowId, onChange }) {
+        const [open, setOpen] = React.useState(false);
+        const containerRef = React.useRef(null);
+        const current = flows.find((f) => f.id === selectedFlowId);
 
-      // A small top-left overlay to switch the graph's layout direction.
-      function LayoutDirectionToggle({ direction, onChange }) {
+        React.useEffect(() => {
+          if (!open) return;
+          const onClickOutside = (e) => {
+            if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+          };
+          document.addEventListener("mousedown", onClickOutside);
+          return () => document.removeEventListener("mousedown", onClickOutside);
+        }, [open]);
+
         return h(
-          Panel,
-          { position: "top-left" },
+          "div",
+          { ref: containerRef, style: { position: "relative" } },
           h(
-            "div",
+            "button",
             {
+              onClick: () => setOpen((o) => !o),
               style: {
+                ...BUTTON_STYLE,
                 display: "flex",
-                gap: 2,
+                alignItems: "center",
+                gap: 6,
                 background: "#fff",
-                padding: 2,
-                borderRadius: 6,
-                border: "1px solid #e5e7eb",
                 boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
               },
             },
-            h(
-              "button",
-              {
-                onClick: () => onChange("LR"),
-                style: direction === "LR" ? TOGGLE_BUTTON_ACTIVE_STYLE : TOGGLE_BUTTON_STYLE,
-              },
-              "→ LR",
-            ),
-            h(
-              "button",
-              {
-                onClick: () => onChange("TD"),
-                style: direction === "TD" ? TOGGLE_BUTTON_ACTIVE_STYLE : TOGGLE_BUTTON_STYLE,
-              },
-              "↓ TD",
-            ),
+            "☰",
+            current?.name ?? "Select flow",
           ),
+          open &&
+            h(
+              "div",
+              {
+                style: {
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  left: 0,
+                  minWidth: 180,
+                  background: "#fff",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 6,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+                  overflow: "hidden",
+                  zIndex: 5,
+                },
+              },
+              flows.map((f) =>
+                h(
+                  "div",
+                  {
+                    key: f.id,
+                    onClick: () => {
+                      onChange(f.id);
+                      setOpen(false);
+                    },
+                    style: {
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      background: f.id === selectedFlowId ? "#eff6ff" : "#fff",
+                      color: f.id === selectedFlowId ? "#1d4ed8" : "#374151",
+                    },
+                  },
+                  f.name,
+                ),
+              ),
+            ),
         );
       }
 
       // Fetches messages only on demand — a message-heavy topic isn't something to hit every
       // time its node happens to be selected — and lets the user pull a fresh batch afterward.
-      function EventSnapshot({ nodeId, schema }) {
+      function EventSnapshot({ flowId, nodeId, schema }) {
         // `events` (the last successfully loaded batch) is tracked separately from `phase`, so
         // a refresh keeps rendering the same event list underneath rather than replacing it
         // with a bare "Loading…" — swapping the whole panel content out and back in mid-fetch
@@ -597,7 +609,9 @@
 
         const load = React.useCallback(() => {
           setPhase("loading");
-          fetch(`/api/nodes/${encodeURIComponent(nodeId)}/snapshot`)
+          fetch(
+            `/api/flows/${encodeURIComponent(flowId)}/nodes/${encodeURIComponent(nodeId)}/snapshot`,
+          )
             .then(async (res) => {
               if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -613,16 +627,16 @@
               setErrorMessage(e.message);
               setPhase("error");
             });
-        }, [nodeId]);
+        }, [flowId, nodeId]);
 
-        // A different node was selected — drop any previously loaded batch rather than show
-        // stale events under a "Refresh" button that would otherwise silently apply to the
-        // wrong topic.
+        // A different node (or flow) was selected — drop any previously loaded batch rather
+        // than show stale events under a "Refresh" button that would otherwise silently apply
+        // to the wrong topic.
         React.useEffect(() => {
           setEvents(null);
           setPhase("idle");
           setErrorMessage(null);
-        }, [nodeId]);
+        }, [flowId, nodeId]);
 
         if (events === null) {
           if (phase === "idle") {
@@ -717,12 +731,14 @@
 
       // Fetches /api/nodes/{id}/topic-stats for a selected kafka-topic node: partitioning,
       // replication, and topic-level config (retention, cleanup policy, ...).
-      function TopicStats({ nodeId }) {
+      function TopicStats({ flowId, nodeId }) {
         const [state, setState] = React.useState({ status: "loading" });
 
         React.useEffect(() => {
           setState({ status: "loading" });
-          fetch(`/api/nodes/${encodeURIComponent(nodeId)}/topic-stats`)
+          fetch(
+            `/api/flows/${encodeURIComponent(flowId)}/nodes/${encodeURIComponent(nodeId)}/topic-stats`,
+          )
             .then(async (res) => {
               if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -732,7 +748,7 @@
             })
             .then((body) => setState({ status: "ready", stats: body }))
             .catch((e) => setState({ status: "error", message: e.message }));
-        }, [nodeId]);
+        }, [flowId, nodeId]);
 
         if (state.status === "loading") {
           return h("div", { style: { color: "#6b7280" } }, "Loading…");
@@ -831,7 +847,7 @@
         return h(Section, { title: "Consumer lag" }, h(KVTable, { rows }));
       }
 
-      function NodeDetails({ node, edges, lagByEdge }) {
+      function NodeDetails({ flowId, node, edges, lagByEdge }) {
         const connectionRows = node.connection ? Object.entries(node.connection) : [];
         const configRows = node.config ? Object.entries(node.config) : [];
         const schemaRows = node.schema ? Object.entries(node.schema) : [];
@@ -849,9 +865,13 @@
             h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
           h(ConsumerLagSection, { node, edges, lagByEdge }),
           node.type === "kafka-topic" &&
-            h(Section, { title: "Topic stats" }, h(TopicStats, { nodeId: node.id })),
+            h(Section, { title: "Topic stats" }, h(TopicStats, { flowId, nodeId: node.id })),
           node.type === "kafka-topic" &&
-            h(Section, { title: "Latest events" }, h(EventSnapshot, { nodeId: node.id, schema: node.schema })),
+            h(
+              Section,
+              { title: "Latest events" },
+              h(EventSnapshot, { flowId, nodeId: node.id, schema: node.schema }),
+            ),
         );
       }
 
@@ -903,7 +923,7 @@
 
       // Always visible, like an inspector rather than a popup: shows a placeholder until a
       // node is selected, and its own drag handle lets it be resized to fit wide messages.
-      function InspectorPanel({ node, width, onStartResize, resizing, edges, lagByEdge }) {
+      function InspectorPanel({ flowId, node, width, onStartResize, resizing, edges, lagByEdge }) {
         return h(
           "div",
           {
@@ -930,7 +950,7 @@
             "div",
             { style: { flex: 1, minWidth: 0, padding: 16, overflowY: "auto" } },
             node
-              ? h(NodeDetails, { node, edges, lagByEdge })
+              ? h(NodeDetails, { flowId, node, edges, lagByEdge })
               : h(
                   "div",
                   { style: { color: "#6b7280", fontSize: 13, marginTop: 24, textAlign: "center" } },
@@ -941,6 +961,11 @@
       }
 
       function App() {
+        const [flows, setFlows] = React.useState(null);
+        const [selectedFlowId, setSelectedFlowId] = usePersistedState(
+          "tkati-dashboard-selected-flow",
+          null,
+        );
         const [graph, setGraph] = React.useState(null);
         const [error, setError] = React.useState(null);
         const [selectedNodeId, setSelectedNodeId] = React.useState(null);
@@ -951,11 +976,54 @@
           260,
           800,
         );
-        const [direction, setDirection] = usePersistedState("tkati-dashboard-direction", "LR");
         const updateNodeInternals = useUpdateNodeInternals();
 
+        // Loaded once on mount, like /api/graph used to be — the flow list isn't polled, so a
+        // flow directory added/removed since is picked up on the next page reload. A `?flow=`
+        // in the URL, when it names a flow that still exists, wins over whatever was last
+        // persisted (a shared/bookmarked link should always open on the flow it names).
         React.useEffect(() => {
-          fetch("/api/graph")
+          fetch("/api/flows")
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((list) => {
+              setFlows(list);
+              const ids = new Set(list.map((f) => f.id));
+              const fromUrl = new URLSearchParams(window.location.search).get("flow");
+              if (fromUrl && ids.has(fromUrl)) {
+                setSelectedFlowId(fromUrl);
+              } else if (!selectedFlowId || !ids.has(selectedFlowId)) {
+                setSelectedFlowId(list[0]?.id ?? null);
+              }
+            })
+            .catch((e) => setError(e.message));
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, []);
+
+        // Reflects the current flow into the URL (without adding history entries) so a
+        // specific flow's dashboard view is linkable/bookmarkable.
+        React.useEffect(() => {
+          if (!selectedFlowId) return;
+          const url = new URL(window.location.href);
+          if (url.searchParams.get("flow") === selectedFlowId) return;
+          url.searchParams.set("flow", selectedFlowId);
+          window.history.replaceState(null, "", url);
+        }, [selectedFlowId]);
+
+        // Fetches the selected flow's graph. Switching flows drops the previous flow's node
+        // selection and fetched lag — neither necessarily means anything against a different
+        // flow's node/edge ids.
+        React.useEffect(() => {
+          if (!selectedFlowId) return;
+          setGraph(null);
+          setSelectedNodeId(null);
+          setLagByEdge({});
+          fetch(`/api/flows/${encodeURIComponent(selectedFlowId)}/graph`)
             .then(async (res) => {
               if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -965,7 +1033,7 @@
             })
             .then(setGraph)
             .catch((e) => setError(e.message));
-        }, []);
+        }, [selectedFlowId]);
 
         // Once the graph is in, fetch live consumer lag for every stream edge whose source is
         // a kafka-topic and which names a consumer group — best-effort, per edge, independent
@@ -979,7 +1047,7 @@
             const key = edgeKey(e);
             setLagByEdge((prev) => ({ ...prev, [key]: { status: "loading" } }));
             fetch(
-              `/api/nodes/${encodeURIComponent(e.from)}/consumer-lag?group_id=${encodeURIComponent(groupId)}`,
+              `/api/flows/${encodeURIComponent(selectedFlowId)}/nodes/${encodeURIComponent(e.from)}/consumer-lag?group_id=${encodeURIComponent(groupId)}`,
             )
               .then(async (res) => {
                 if (!res.ok) {
@@ -1001,7 +1069,7 @@
                 })),
               );
           }
-        }, [graph]);
+        }, [graph, selectedFlowId]);
 
         // `layout()` does real work (canvas text measurement + a full dagre run) — memoized so
         // dragging the inspector panel's resize handle, which re-renders this component on
@@ -1013,11 +1081,11 @@
         // that happens, not just on initial load.
         const nodes = React.useMemo(() => {
           if (!graph) return [];
-          return layout(graph.nodes, graph.edges, direction, lagByEdge).map((n) => ({
+          return layout(graph.nodes, graph.edges, lagByEdge).map((n) => ({
             ...n,
             data: { ...n.data, isSelected: n.id === selectedNodeId },
           }));
-        }, [graph, direction, selectedNodeId, lagByEdge]);
+        }, [graph, selectedNodeId, lagByEdge]);
 
         const flowEdges = React.useMemo(() => {
           if (!graph) return [];
@@ -1051,7 +1119,7 @@
           el.style.display = "block";
           return null;
         }
-        if (!graph) return null;
+        if (!flows || !selectedFlowId || !graph) return null;
 
         const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
 
@@ -1075,10 +1143,16 @@
               h(Background, null),
               h(Controls, null),
               h(MiniMap, { nodeColor: (n) => n.data?.colors?.background ?? FALLBACK_COLORS.background }),
-              h(LayoutDirectionToggle, { direction, onChange: setDirection }),
+              flows.length > 1 &&
+                h(
+                  Panel,
+                  { position: "top-left" },
+                  h(FlowMenu, { flows, selectedFlowId, onChange: setSelectedFlowId }),
+                ),
             ),
           ),
           h(InspectorPanel, {
+            flowId: selectedFlowId,
             node: selectedNode,
             width: panelWidth,
             onStartResize: startResize,

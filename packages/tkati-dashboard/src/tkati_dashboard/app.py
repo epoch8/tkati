@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,23 @@ from tkati_dashboard.dataflow import (
     NodeDef,
     load_dataflow,
 )
+from tkati_dashboard.flows import FlowConfigError
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _list_flows(list_flows: Callable[[], dict[str, Path]]) -> dict[str, Path]:
+    try:
+        return list_flows()
+    except FlowConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _resolve_flow_dir(list_flows: Callable[[], dict[str, Path]], flow_id: str) -> Path:
+    directory = _list_flows(list_flows).get(flow_id)
+    if directory is None:
+        raise HTTPException(status_code=404, detail=f"Unknown flow {flow_id!r}")
+    return directory
 
 
 def _graph_json(directory: Path) -> dict[str, Any]:
@@ -72,24 +88,31 @@ def _require_kafka_connection(
     return broker, topic
 
 
-def create_app(dataflow_dir: Path) -> FastAPI:
+def create_app(list_flows: Callable[[], dict[str, Path]]) -> FastAPI:
     app = FastAPI(title="tkati-dashboard")
 
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
-    @app.get("/api/graph")
-    def graph() -> dict[str, Any]:
+    @app.get("/api/flows")
+    def flows() -> list[dict[str, str]]:
+        resolved = _list_flows(list_flows)
+        return [{"id": flow_id, "name": flow_id} for flow_id in sorted(resolved, key=str.lower)]
+
+    @app.get("/api/flows/{flow_id}/graph")
+    def graph(flow_id: str) -> dict[str, Any]:
+        directory = _resolve_flow_dir(list_flows, flow_id)
         try:
-            return _graph_json(dataflow_dir)
+            return _graph_json(directory)
         except DataflowValidationError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
 
-    @app.get("/api/nodes/{node_id}/snapshot")
-    def node_snapshot(node_id: str) -> dict[str, Any]:
+    @app.get("/api/flows/{flow_id}/nodes/{node_id}/snapshot")
+    def node_snapshot(flow_id: str, node_id: str) -> dict[str, Any]:
+        directory = _resolve_flow_dir(list_flows, flow_id)
         try:
-            node = _get_node(dataflow_dir, node_id)
+            node = _get_node(directory, node_id)
         except DataflowValidationError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
         broker, topic = _require_kafka_connection(node_id, node, "live snapshot")
@@ -101,10 +124,11 @@ def create_app(dataflow_dir: Path) -> FastAPI:
 
         return {"events": events}
 
-    @app.get("/api/nodes/{node_id}/consumer-lag")
-    def node_consumer_lag(node_id: str, group_id: str) -> dict[str, Any]:
+    @app.get("/api/flows/{flow_id}/nodes/{node_id}/consumer-lag")
+    def node_consumer_lag(flow_id: str, node_id: str, group_id: str) -> dict[str, Any]:
+        directory = _resolve_flow_dir(list_flows, flow_id)
         try:
-            node = _get_node(dataflow_dir, node_id)
+            node = _get_node(directory, node_id)
         except DataflowValidationError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
         broker, topic = _require_kafka_connection(node_id, node, "consumer lag")
@@ -114,10 +138,11 @@ def create_app(dataflow_dir: Path) -> FastAPI:
         except lag.LagError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
 
-    @app.get("/api/nodes/{node_id}/topic-stats")
-    def node_topic_stats(node_id: str) -> dict[str, Any]:
+    @app.get("/api/flows/{flow_id}/nodes/{node_id}/topic-stats")
+    def node_topic_stats(flow_id: str, node_id: str) -> dict[str, Any]:
+        directory = _resolve_flow_dir(list_flows, flow_id)
         try:
-            node = _get_node(dataflow_dir, node_id)
+            node = _get_node(directory, node_id)
         except DataflowValidationError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
         broker, topic = _require_kafka_connection(node_id, node, "topic stats")

@@ -6,6 +6,41 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### kmoslqtw — tkati-dashboard: observe multiple flows from one dashboard instance
+
+- The CLI's single positional `dataflow_dir` is now `nargs="+"` — pass more than one directory to
+  observe several dataflows from one server instead of running one instance per flow. A flow's id
+  is its directory's own basename, same identity `Dataflow.name` already had; two directories
+  sharing a basename is now a startup error asking you to rename one of them.
+- New `--flows-root DIR` (repeatable): every immediate subdirectory of `DIR` containing dataflow
+  fragments becomes its own flow, discovered fresh on every `/api/flows` request rather than once
+  at startup — adding or removing a flow directory there is picked up without restarting, the same
+  "always read live" philosophy `load_dataflow` already applies to one flow's fragments. New
+  `tkati_dashboard.flows` module (`discover_flows_root`/`make_flow_lister`) implements this,
+  combined with any explicit directories into one `list_flows()` resolver passed into `create_app`.
+- `create_app` now takes that `list_flows` callable instead of a single `Path`. Every route is
+  nested under a `flow_id` path segment — `/api/graph` → `GET /api/flows/{flow_id}/graph`, and
+  likewise for the three `/api/nodes/{id}/...` routes — plus a new `GET /api/flows` listing every
+  currently-resolved flow (`{id, name}`, sorted by name). An unknown `flow_id` (or a
+  `--flows-root` directory removed since the process started) 404s instead of erroring.
+- The frontend now fetches `/api/flows` first, then the selected flow's graph from
+  `/api/flows/{id}/graph`; every per-node fetch (snapshot/topic-stats/consumer-lag) threads the
+  selected flow id through the same prop path (`InspectorPanel` → `NodeDetails` →
+  `EventSnapshot`/`TopicStats`). Switching flows drops the previous flow's selected node and
+  fetched lag, since neither's ids necessarily mean anything against a different flow's graph.
+- New `FlowMenu`: a ☰ button in the canvas's top-left corner naming the current flow, expanding
+  into a dropdown on click and collapsing again on a pick or an outside click — so it costs almost
+  no canvas space once a flow is chosen. Rendered only when there's more than one flow; with
+  exactly one (today's common case, and what a single-directory invocation still gives you) the
+  page looks and behaves exactly as before. The selected flow is also persisted (`localStorage`,
+  via the existing `usePersistedState`) and reflected into the URL as `?flow=<id>` so a specific
+  flow's view is bookmarkable/shareable, with the URL param taking precedence over the persisted
+  choice on load.
+- Removed the LR/TD layout direction toggle (`LayoutDirectionToggle`, added back in `ukyykwzq`) —
+  the graph now always lays out left-to-right; `layout()`/`StackedNode` no longer take/branch on a
+  `direction`, since dagre's `rankdir` and each handle's `sourcePosition`/`targetPosition` are now
+  fixed to the LR case that was already the only one anyone used.
+
 ### ntsxvmtt — tkati-dashboard: fold consumer-edge info into the consuming node as stacked rows
 
 - An incoming edge with a consumer group (i.e. something to show beyond its bare `kind`) no

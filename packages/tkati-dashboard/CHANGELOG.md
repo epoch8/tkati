@@ -1,4 +1,4 @@
-# 0.4.0a10
+# 0.4.0a11
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -68,3 +68,12 @@
   Handle's position being computed relative to the wrong parent (the whole node instead of
   just that row's own div, which is what it's actually rendered inside)
 * A row's color is now a deeper shade of its own node's color instead of a fixed indigo
+* One dashboard instance can now observe multiple flows: pass more than one `dataflow_dir` on the
+  command line, and/or `--flows-root DIR` to auto-discover every fragment-containing subdirectory
+  of `DIR` as its own flow (rescanned live, so adding/removing one is picked up without
+  restarting). Every API route is now nested under `/api/flows/{flow_id}/...`, with a new
+  `GET /api/flows` listing them. A ☰ menu appears in the graph's top-left corner to switch flows
+  when there's more than one (persisted, and reflected in the URL as `?flow=<id>` for
+  bookmarking/sharing); with just one flow — including today's single-directory invocation — the
+  page is unchanged
+* Removed the LR/TD layout toggle — the graph now always lays out left-to-right

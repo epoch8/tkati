@@ -12,12 +12,14 @@ the same graph identically).
 tkati-dashboard path/to/dataflow-dir
 ```
 
-Then open `http://127.0.0.1:8000/` in a browser. The page fetches `/api/graph` and renders it with
+Then open `http://127.0.0.1:8000/` in a browser. Pass more than one directory (or
+`--flows-root`, see [Multiple flows](#multiple-flows) below) to observe several dataflows from
+one dashboard instead of just this one. The page fetches the list of flows from `/api/flows`,
+then the selected one's graph from `/api/flows/{id}/graph`, and renders it with
 [React Flow](https://reactflow.dev), laid out by [dagre](https://github.com/dagrejs/dagre) using
 each node's real measured box (from its label text, via canvas measurement — no DOM mount needed)
 rather than a flat grid, so a node with a long `broker`/`topic` string pushes its neighbors aside
-instead of overlapping them. A toggle in the top-left corner of the canvas switches the layout
-between left-to-right (the default) and top-to-bottom, remembered across reloads.
+instead of overlapping them. The graph always lays out left-to-right.
 
 A node consuming a stream with a consumer group doesn't get that edge's `group`/`lag` as a
 floating label — it gets its own stacked row inside the *consuming* node instead, right below the
@@ -52,13 +54,46 @@ side branch straight to another table), see [`examples/analytics-pipeline`](exam
 — its topics aren't seeded with data, so "Latest events" there will error unless you produce to
 them yourself.
 
+Since `examples/` itself contains both as sibling directories, it also doubles as a ready-made
+`--flows-root` demo — `tkati-dashboard --flows-root packages/tkati-dashboard/examples` serves both
+as separate flows, switchable from the ☰ menu (see [Multiple flows](#multiple-flows)).
+
 Options:
 
 - `--host` (default `127.0.0.1`)
 - `--port` (default `8000`)
+- `--flows-root DIR` — auto-discover flows (see below); repeatable
 
-The dataflow directory is re-read on every request to `/api/graph`, so editing the fragments and
-refreshing the browser picks up the change without restarting the server.
+A dataflow directory is re-read on every request to its `/api/flows/{id}/graph`, so editing the
+fragments and refreshing the browser picks up the change without restarting the server.
+
+## Multiple flows
+
+A real deployment usually runs more than one dataflow per environment, and one dashboard
+instance can observe all of them at once instead of one directory per instance:
+
+```sh
+# name each flow directory explicitly (flow id = each directory's own basename)
+tkati-dashboard path/to/orders-flow path/to/clicks-flow
+
+# or point at a parent directory and let every fragment-containing subdirectory become a flow
+tkati-dashboard --flows-root path/to/env/flows
+```
+
+The two forms can be combined, and `--flows-root` is repeatable. Either way, a flow's id is its
+directory's own basename — passing two directories with the same name is a startup error asking
+you to rename one of them. Unlike the explicit directories, a `--flows-root`'s subdirectories are
+rescanned on every request to `/api/flows`, so adding or removing a flow directory there shows up
+without restarting the server; a subdirectory with no fragments in it (a stray `README`, say) is
+silently skipped rather than treated as an error.
+
+With more than one flow configured, the graph page gets a ☰ menu in its top-left corner naming the
+currently selected flow — click it to switch to another one. It stays collapsed to that single
+button otherwise, so the canvas keeps its space once a flow is picked.
+The current flow is also reflected in the page's URL as `?flow=<id>`, so a link to a specific
+flow's view can be bookmarked or shared. With only one flow configured (the common case, and the
+default if you pass a single directory as before), the menu doesn't appear at all — the page looks
+exactly as it always has.
 
 ## Node panel
 
@@ -69,7 +104,7 @@ placeholder. Every section has a clickable header to collapse/expand it — a co
 stays mounted, just hidden, so collapsing a live-fetching section and reopening it doesn't
 re-fetch. For a `kafka-topic` node, the panel also fetches two more, live views:
 
-- `GET /api/nodes/{id}/snapshot` connects to `connection.broker`/`connection.topic` and shows the
+- `GET /api/flows/{flow_id}/nodes/{id}/snapshot` connects to `connection.broker`/`connection.topic` and shows the
   most recent messages on that topic (newest last), parsed as JSON, using a throwaway consumer
   group that never commits offsets. It only fetches on demand — click "Load latest events" — and
   a "↻ Refresh" button afterward pulls a fresh batch on request rather than automatically. Each
@@ -77,7 +112,7 @@ re-fetch. For a `kafka-topic` node, the panel also fetches two more, live views:
   there is one) rather than a table — real messages commonly carry 5-20 fields, too many to lay
   out sensibly as table columns in a side panel — with a small header showing that message's
   Kafka-level `partition`, `offset`, and timestamp, alongside its parsed body.
-- `GET /api/nodes/{id}/topic-stats` shows the topic's partitioning and replication (per-partition
+- `GET /api/flows/{flow_id}/nodes/{id}/topic-stats` shows the topic's partitioning and replication (per-partition
   leader/replicas/in-sync-replicas, flagging any under-replicated partition) and its topic-level
   config — `retention.ms`, `retention.bytes`, `cleanup.policy`, `segment.bytes`,
   `compression.type`, `max.message.bytes` — via `tkati_dashboard.topic_stats`, marking each value
@@ -93,7 +128,7 @@ that section instead of breaking the page.
 ## Consumer lag
 
 For every stream edge whose `consumer.group_id` is set and whose source is a `kafka-topic`, the
-page also fetches `GET /api/nodes/{topic_id}/consumer-lag?group_id=...` and shows the result in
+page also fetches `GET /api/flows/{flow_id}/nodes/{topic_id}/consumer-lag?group_id=...` and shows the result in
 two places: the `group`/`lag` lines in that edge's stacked row inside the consuming node (see
 above), and, for either node that edge touches, the inspector panel's "Consumer lag" section
 (`← other-node (group_id)` for an edge consumed by the selected node, `→ other-node (group_id)`
