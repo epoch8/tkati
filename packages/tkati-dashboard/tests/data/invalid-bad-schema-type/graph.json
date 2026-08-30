@@ -1,0 +1,12 @@
+{
+  "nodes": {
+    "bad-topic": {
+      "type": "kafka-topic",
+      "schema": {
+        "id": "not-a-real-type"
+      },
+      "connection": {"broker": "localhost:9092"}
+    }
+  },
+  "edges": []
+}

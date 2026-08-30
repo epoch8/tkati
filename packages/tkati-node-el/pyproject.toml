@@ -1,11 +1,11 @@
 [project]
 name = "tkati-node-el"
-version = "0.3.1"
+version = "0.4.0"
 description = "Generic extract/load node: reads from a configurable input and writes to a configurable output"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "tkati-core==0.3.1",
+    "tkati-core==0.4.0",
     "loguru>=0.7.0",
     "pydantic-settings>=2.11.0",
 ]

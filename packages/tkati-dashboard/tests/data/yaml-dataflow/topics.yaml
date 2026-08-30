@@ -1,0 +1,19 @@
+nodes:
+  raw-orders:
+    type: kafka-topic
+    schema:
+      id: string
+      time: timestamp[ms]
+      amount: int64
+    connection:
+      broker: redpanda:29092
+      topic: raw_orders
+  deduped-orders:
+    type: kafka-topic
+    schema:
+      id: string
+      time: timestamp[ms]
+      amount: int64
+    connection:
+      broker: redpanda:29092
+      topic: deduped_orders

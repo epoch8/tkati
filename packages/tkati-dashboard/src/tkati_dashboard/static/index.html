@@ -1,0 +1,1410 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>tkati-dashboard</title>
+    <link rel="stylesheet" href="https://esm.sh/reactflow@11/dist/style.css" />
+    <style>
+      html, body, #root { height: 100%; margin: 0; }
+      body { font-family: system-ui, sans-serif; }
+      #error {
+        position: absolute; top: 1rem; left: 1rem; right: 1rem;
+        padding: 0.75rem 1rem; background: #fee2e2; color: #7f1d1d;
+        border: 1px solid #fca5a5; border-radius: 6px; font-family: monospace;
+        white-space: pre-wrap; display: none; z-index: 10;
+      }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      td, th {
+        text-align: left; padding: 3px 6px; border-bottom: 1px solid #e5e7eb;
+        vertical-align: top; word-break: break-word;
+      }
+      th { color: #6b7280; font-weight: 600; position: sticky; top: 0; background: #fff; }
+      .resize-handle:hover { background: #93c5fd; }
+    </style>
+  </head>
+  <body>
+    <div id="error"></div>
+    <div id="root"></div>
+    <script type="module">
+      import React from "https://esm.sh/react@18";
+      import { createRoot } from "https://esm.sh/react-dom@18/client";
+      import ReactFlow, {
+        Background,
+        BaseEdge,
+        Controls,
+        EdgeLabelRenderer,
+        Handle,
+        MiniMap,
+        Panel,
+        Position,
+        ReactFlowProvider,
+        getBezierPath,
+        useUpdateNodeInternals,
+      } from "https://esm.sh/reactflow@11?deps=react@18,react-dom@18";
+      import dagre from "https://esm.sh/@dagrejs/dagre@3.1.1";
+
+      const h = React.createElement;
+
+      // rowBackground/rowText are a deeper shade of the same hue as background/border — used by
+      // a node's stacked consumer rows, so they read as part of the same node rather than an
+      // unrelated color.
+      const GROUP_COLORS = {
+        "source-sink": {
+          background: "#dbeafe",
+          border: "#3b82f6",
+          rowBackground: "#bfdbfe",
+          rowText: "#1e40af",
+        },
+        "processing-node": {
+          background: "#dcfce7",
+          border: "#22c55e",
+          rowBackground: "#bbf7d0",
+          rowText: "#166534",
+        },
+      };
+      const FALLBACK_COLORS = {
+        background: "#e5e7eb",
+        border: "#6b7280",
+        rowBackground: "#d1d5db",
+        rowText: "#1f2937",
+      };
+
+      // Matches the selected node's own glow (`rgba(29, 78, 216, 0.35)` on StackedNode) — used
+      // to highlight every edge touching the selected node, so "this is connected to what's
+      // selected" reads as one consistent color across the graph.
+      const SELECTED_EDGE_COLOR = "#1d4ed8";
+
+      // Type-specific connection details worth surfacing on the node itself.
+      function nodeLabel(n) {
+        const lines = [n.label, `(${n.type})`];
+        if (n.type === "kafka-topic" && n.connection) {
+          if (n.connection.broker) lines.push(`broker: ${n.connection.broker}`);
+          if (n.connection.topic) lines.push(`topic: ${n.connection.topic}`);
+        }
+        return lines.join("\n");
+      }
+
+      const NODE_FONT_SIZE = 12;
+      const NODE_LINE_HEIGHT = 1.35; // set explicitly on the node style too, so this box math
+      // is exact rather than a guess at the browser's font-dependent default line height.
+      const NODE_PADDING = 8;
+      const NODE_BORDER = 1;
+      const MIN_NODE_WIDTH = 140;
+      const MIN_NODE_HEIGHT = 36;
+
+      let measureCtx = null;
+      function measureTextWidth(text) {
+        if (!measureCtx) {
+          measureCtx = document.createElement("canvas").getContext("2d");
+          measureCtx.font = `${NODE_FONT_SIZE}px system-ui, sans-serif`;
+        }
+        return measureCtx.measureText(text).width;
+      }
+
+      // Computes the box a node's label actually needs (via canvas text measurement, without
+      // ever mounting anything to the DOM), so the layout can give long labels — a full Kafka
+      // broker hostname easily runs 50-70+ characters — enough room instead of a flat guess.
+      function measureNodeBox(label) {
+        const lines = label.split("\n");
+        const textWidth = Math.max(...lines.map(measureTextWidth));
+        const lineHeightPx = NODE_FONT_SIZE * NODE_LINE_HEIGHT;
+        return {
+          width: Math.max(
+            MIN_NODE_WIDTH,
+            Math.ceil(textWidth) + (NODE_PADDING + NODE_BORDER) * 2,
+          ),
+          height: Math.max(
+            MIN_NODE_HEIGHT,
+            Math.ceil(lines.length * lineHeightPx) + (NODE_PADDING + NODE_BORDER) * 2,
+          ),
+        };
+      }
+
+      // Identifies an edge's consumer for looking up its fetched lag, independent of array index.
+      function edgeKey(e) {
+        return `${e.from}->${e.to}->${e.consumer?.group_id ?? ""}`;
+      }
+
+      function lagStatusText(lagState) {
+        if (!lagState) return "…";
+        if (lagState.status === "ready") return String(lagState.total_lag);
+        if (lagState.status === "error") return "n/a";
+        return "loading…";
+      }
+
+      // Every stream edge lag is ever fetched for: it names a consumer group and its source is
+      // a kafka-topic (the only thing `/consumer-lag` can answer for). Shared by the initial
+      // load, the auto-refresh timer, and the manual "refresh now" button, so all three always
+      // agree on exactly what "refresh the lag" means.
+      function relevantLagEdges(graph) {
+        if (!graph) return [];
+        const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+        return graph.edges.filter(
+          (e) => e.consumer?.group_id && nodesById.get(e.from)?.type === "kafka-topic",
+        );
+      }
+
+      // One field per line rather than a single "·"-joined line — cramped side by side, and
+      // the group_id/lag are only relevant to stream edges that name a consumer anyway. The lag
+      // line is reserved as soon as there's a group (showing a placeholder until it resolves)
+      // rather than appearing later, so this text's line count — and therefore the box a
+      // consuming node's row/an edge's floating label needs — doesn't change shape once the
+      // fetch completes.
+      function edgeLabel(e, lagState) {
+        const lines = [e.kind];
+        const groupId = e.consumer?.group_id;
+        if (groupId) {
+          lines.push(`group: ${groupId}`);
+          lines.push(`lag: ${lagStatusText(lagState)}`);
+        }
+        return lines.join("\n");
+      }
+
+      // Renders an edge's (possibly multi-line) label as HTML via EdgeLabelRenderer rather than
+      // ReactFlow's default single-line SVG <text> label, which has no way to show "\n"-joined
+      // lines.
+      function LabeledEdge({
+        id,
+        sourceX,
+        sourceY,
+        targetX,
+        targetY,
+        sourcePosition,
+        targetPosition,
+        style,
+        markerEnd,
+        data,
+      }) {
+        const [path, labelX, labelY] = getBezierPath({
+          sourceX,
+          sourceY,
+          sourcePosition,
+          targetX,
+          targetY,
+          targetPosition,
+        });
+        return h(
+          React.Fragment,
+          null,
+          h(BaseEdge, { id, path, style, markerEnd }),
+          data?.label &&
+            h(
+              EdgeLabelRenderer,
+              null,
+              h(
+                "div",
+                {
+                  style: {
+                    position: "absolute",
+                    transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+                    background: "#fff",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 4,
+                    padding: "2px 6px",
+                    fontSize: 10,
+                    lineHeight: 1.4,
+                    textAlign: "center",
+                    whiteSpace: "pre-line",
+                    pointerEvents: "none",
+                  },
+                },
+                data.label,
+              ),
+            ),
+        );
+      }
+
+      const EDGE_TYPES = { labeled: LabeledEdge };
+
+      // Persists an arbitrary bit of UI state (JSON-serializable) to localStorage across reloads.
+      function usePersistedState(key, defaultValue) {
+        const [value, setValue] = React.useState(() => {
+          try {
+            const stored = localStorage.getItem(key);
+            if (stored !== null) return JSON.parse(stored);
+          } catch {
+            // localStorage unavailable, or the stored value predates this shape — fall back.
+          }
+          return defaultValue;
+        });
+        React.useEffect(() => {
+          try {
+            localStorage.setItem(key, JSON.stringify(value));
+          } catch {
+            // Nothing to persist to — the value just resets to the default next load.
+          }
+        }, [key, value]);
+        return [value, setValue];
+      }
+
+      // Lays the graph out left-to-right with dagre, fed each node's real measured box (see
+      // measureNodeBox) so a long label pushes neighboring nodes aside instead of overlapping
+      // them, and edges are ordered to reduce crossings — both beyond what a hand-rolled
+      // rank/column assignment would attempt.
+      // dagre also handles rank assignment (including any accidental cycle, e.g. a
+      // DLQ/reprocessing edge) without the manual root-finding a from-scratch BFS needs.
+      // An incoming edge earns its own stacked row inside the consuming node's box when there's
+      // something to show beyond its bare kind (today: a consumer group, and therefore lag) —
+      // moving what used to float on the edge into the node it actually describes. An edge
+      // without extra info stays a plain, unlabeled-beyond-kind line into a shared handle (see
+      // LabeledEdge/edgeLabel).
+      function isRowEdge(e) {
+        return Boolean(e.consumer?.group_id);
+      }
+
+      const DEFAULT_TARGET_HANDLE = "__default__";
+
+      function layout(nodes, edges, lagByEdge) {
+        const g = new dagre.graphlib.Graph();
+        g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 60 });
+        g.setDefaultEdgeLabel(() => ({}));
+
+        const incomingByTarget = new Map();
+        for (const e of edges) {
+          if (!incomingByTarget.has(e.to)) incomingByTarget.set(e.to, []);
+          incomingByTarget.get(e.to).push(e);
+        }
+
+        // Per node: its header box (own label, as before) plus one measured box per row-worthy
+        // incoming edge, stacked below it. The combined box — what dagre actually spaces and
+        // positions — is as wide as the widest of those, and as tall as all of them summed.
+        const boxes = new Map();
+        for (const n of nodes) {
+          const headerBox = measureNodeBox(nodeLabel(n));
+          const rows = (incomingByTarget.get(n.id) ?? []).filter(isRowEdge).map((e) => {
+            const text = edgeLabel(e, lagByEdge[edgeKey(e)]);
+            return { id: edgeKey(e), text, box: measureNodeBox(text) };
+          });
+          const width = Math.max(headerBox.width, ...rows.map((r) => r.box.width));
+          const height = headerBox.height + rows.reduce((sum, r) => sum + r.box.height, 0);
+          boxes.set(n.id, { headerBox, rows, width, height });
+        }
+        for (const n of nodes) g.setNode(n.id, boxes.get(n.id));
+        for (const e of edges) {
+          if (boxes.has(e.from) && boxes.has(e.to)) g.setEdge(e.from, e.to);
+        }
+
+        dagre.layout(g);
+
+        return nodes.map((n) => {
+          const info = boxes.get(n.id);
+          const { x, y } = g.node(n.id); // dagre's (x, y) is the box's center
+          const colors = GROUP_COLORS[n.group] ?? FALLBACK_COLORS;
+          return {
+            id: n.id,
+            type: "stacked",
+            position: { x: x - info.width / 2, y: y - info.height / 2 },
+            data: {
+              label: nodeLabel(n),
+              rows: info.rows,
+              headerHeight: info.headerBox.height,
+              colors,
+              sourcePosition: Position.Right,
+              targetPosition: Position.Left,
+            },
+            style: { width: info.width, height: info.height },
+          };
+        });
+      }
+
+      // Renders a node as a header (its own label, styled by GROUP_COLORS as before) with zero
+      // or more rows stacked below it, one per incoming edge that has a consumer group. Each row
+      // gets its own named target Handle, so that edge's arrow visibly lands on its row instead
+      // of the node's header — plus one shared DEFAULT_TARGET_HANDLE for edges with nothing
+      // extra to show (see isRowEdge/LabeledEdge).
+      function StackedNode({ data }) {
+        const { label, rows, headerHeight, colors, sourcePosition, targetPosition, isSelected } = data;
+
+        // Index 0 is the header's own DEFAULT_TARGET_HANDLE; indices 1..N are the rows, in the
+        // same top-to-bottom order they're rendered in. DEFAULT_TARGET_HANDLE (index 0) is
+        // rendered directly in the outer wrapper, so its `top` is relative to the whole node —
+        // but each row's own Handle is rendered *inside* that row's own `position: relative`
+        // div, so its `top` needs to be relative to just that row's height, not the whole
+        // node's, or it lands far past the row's actual bounds (visibly outside the node).
+        function handleStyle(index) {
+          const centerY = index === 0 ? headerHeight / 2 : rows[index - 1].box.height / 2;
+          return { top: centerY, transform: "translateY(-50%)" };
+        }
+
+        return h(
+          "div",
+          {
+            style: {
+              width: "100%",
+              height: "100%",
+              position: "relative",
+              borderRadius: 8,
+              overflow: "hidden",
+              boxShadow: isSelected ? "0 0 0 3px rgba(29, 78, 216, 0.35)" : undefined,
+              cursor: "pointer",
+            },
+          },
+          h(Handle, { type: "source", position: sourcePosition }),
+          h(Handle, {
+            type: "target",
+            id: DEFAULT_TARGET_HANDLE,
+            position: targetPosition,
+            style: handleStyle(0),
+          }),
+          h(
+            "div",
+            {
+              style: {
+                height: headerHeight,
+                boxSizing: "border-box",
+                background: colors.background,
+                border: `1px solid ${colors.border}`,
+                // Matches the outer wrapper's rounding on whichever corners are actually its
+                // own (top corners always; bottom too if there are no rows below it) — a plain
+                // rectangular border relies on the parent's overflow:hidden to clip its square
+                // corners into the curve, which visibly chops them instead of following it.
+                borderRadius: rows.length > 0 ? "8px 8px 0 0" : 8,
+                padding: NODE_PADDING,
+                whiteSpace: "pre-line",
+                lineHeight: NODE_LINE_HEIGHT,
+                fontSize: NODE_FONT_SIZE,
+              },
+            },
+            label,
+          ),
+          rows.map((row, i) =>
+            h(
+              "div",
+              {
+                key: row.id,
+                style: {
+                  position: "relative",
+                  height: row.box.height,
+                  boxSizing: "border-box",
+                  background: colors.rowBackground,
+                  border: `1px solid ${colors.border}`,
+                  borderTop: "none",
+                  borderRadius: i === rows.length - 1 ? "0 0 8px 8px" : 0,
+                  padding: NODE_PADDING,
+                  whiteSpace: "pre-line",
+                  lineHeight: NODE_LINE_HEIGHT,
+                  fontSize: NODE_FONT_SIZE,
+                  color: colors.rowText,
+                },
+              },
+              row.text,
+              h(Handle, { type: "target", id: row.id, position: targetPosition, style: handleStyle(i + 1) }),
+            ),
+          ),
+        );
+      }
+
+      const NODE_TYPES = { stacked: StackedNode };
+
+      // Collapsible panel section. `children` stays mounted (just hidden) while collapsed, so a
+      // live-fetching section like EventSnapshot/TopicStats doesn't re-fetch every time it's
+      // toggled back open.
+      function Section({ title, children, defaultOpen = true }) {
+        const [open, setOpen] = React.useState(defaultOpen);
+        return h(
+          "div",
+          { style: { marginBottom: 16 } },
+          h(
+            "div",
+            {
+              onClick: () => setOpen((o) => !o),
+              style: {
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                cursor: "pointer",
+                userSelect: "none",
+                fontSize: 11,
+                fontWeight: 700,
+                color: "#6b7280",
+                textTransform: "uppercase",
+                marginBottom: 6,
+                letterSpacing: 0.4,
+              },
+            },
+            h(
+              "span",
+              {
+                style: {
+                  display: "inline-block",
+                  fontSize: 9,
+                  transform: open ? "rotate(90deg)" : "none",
+                  transition: "transform 0.1s",
+                },
+              },
+              "▶",
+            ),
+            title,
+          ),
+          h("div", { style: { display: open ? "block" : "none" } }, children),
+        );
+      }
+
+      function formatCell(v) {
+        if (v === undefined || v === null) return "";
+        if (typeof v === "object") return JSON.stringify(v);
+        return String(v);
+      }
+
+      function formatDuration(msString) {
+        const ms = Number(msString);
+        if (ms < 0) return "unbounded";
+        const units = [
+          ["d", 86400000],
+          ["h", 3600000],
+          ["m", 60000],
+          ["s", 1000],
+        ];
+        for (const [suffix, unitMs] of units) {
+          if (ms >= unitMs) return `${(ms / unitMs).toFixed(1)}${suffix}`;
+        }
+        return `${ms}ms`;
+      }
+
+      function formatBytes(byteString) {
+        const bytes = Number(byteString);
+        if (bytes < 0) return "unbounded";
+        const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let value = bytes;
+        let i = 0;
+        while (value >= 1024 && i < units.length - 1) {
+          value /= 1024;
+          i++;
+        }
+        return `${value.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+      }
+
+      const BYTE_CONFIGS = new Set(["retention.bytes", "segment.bytes", "max.message.bytes"]);
+
+      function formatConfigValue(name, value) {
+        if (name === "retention.ms") return formatDuration(value);
+        if (BYTE_CONFIGS.has(name)) return formatBytes(value);
+        return value;
+      }
+
+      function KVTable({ rows }) {
+        return h(
+          "table",
+          null,
+          h(
+            "tbody",
+            null,
+            rows.map(([k, v]) =>
+              h(
+                "tr",
+                { key: k },
+                h("td", { style: { color: "#6b7280", width: "40%" } }, k),
+                h("td", null, formatCell(v)),
+              ),
+            ),
+          ),
+        );
+      }
+
+      // An object value renders pretty-printed (matching EventSnapshot's message blocks), since
+      // a config value is at least as likely to be a nested object as a scalar.
+      function formatCodeValue(v) {
+        if (v === undefined || v === null) return "";
+        if (typeof v === "object") return JSON.stringify(v, null, 2);
+        return String(v);
+      }
+
+      // One card per config entry — its key as a small header band, its value as a code block
+      // body — rather than a table row, since a config value is often multi-line/structured
+      // enough that a narrow table column doesn't give it room to read well.
+      function ConfigCards({ rows }) {
+        return h(
+          "div",
+          { style: { display: "flex", flexDirection: "column", gap: 8 } },
+          rows.map(([key, value]) =>
+            h(
+              "div",
+              {
+                key,
+                style: { border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" },
+              },
+              h(
+                "div",
+                {
+                  style: {
+                    padding: "4px 8px",
+                    background: "#f9fafb",
+                    color: "#6b7280",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    fontFamily: "monospace",
+                    borderBottom: "1px solid #e5e7eb",
+                  },
+                },
+                key,
+              ),
+              h(
+                "pre",
+                {
+                  style: {
+                    margin: 0,
+                    padding: 8,
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  },
+                },
+                h("code", null, formatCodeValue(value)),
+              ),
+            ),
+          ),
+        );
+      }
+
+      // Reorders an event's keys to match the schema's field order (schema fields first, then
+      // any extras), purely so related fields read together — a message can have 5-20 fields,
+      // which a wide table has no good way to show in a narrow side panel.
+      function orderBySchema(event, schema) {
+        if (!schema) return event;
+        const ordered = {};
+        for (const key of Object.keys(schema)) {
+          if (key in event) ordered[key] = event[key];
+        }
+        for (const key of Object.keys(event)) {
+          if (!(key in ordered)) ordered[key] = event[key];
+        }
+        return ordered;
+      }
+
+      // Fetches /api/nodes/{id}/snapshot for a selected kafka-topic node and renders each
+      // message as its own pretty-printed JSON block — a table falls apart once a message has
+      // more than a handful of fields, so this shows one whole record at a time instead.
+      function formatKafkaTimestamp(ms) {
+        if (ms === null || ms === undefined) return "no timestamp";
+        return new Date(ms).toISOString();
+      }
+
+      const BUTTON_STYLE = {
+        border: "1px solid #d1d5db",
+        background: "#fff",
+        borderRadius: 6,
+        padding: "4px 10px",
+        fontSize: 12,
+        cursor: "pointer",
+        color: "#374151",
+      };
+
+      // A bare icon-only button for a table cell — e.g. a per-row "refresh this one" action —
+      // where BUTTON_STYLE's border/padding would be too heavy.
+      const ICON_BUTTON_STYLE = {
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        fontSize: 12,
+        color: "#6b7280",
+        padding: "0 4px",
+        lineHeight: 1,
+      };
+
+      // Collapsed by default to a small ☰ button naming the current flow, so it costs almost no
+      // canvas space once a flow is picked; clicking it expands a dropdown listing every
+      // observed flow, which collapses again on a selection or a click outside it. Only
+      // rendered by App when there's more than one flow to choose between.
+      function FlowMenu({ flows, selectedFlowId, onChange }) {
+        const [open, setOpen] = React.useState(false);
+        const containerRef = React.useRef(null);
+        const current = flows.find((f) => f.id === selectedFlowId);
+
+        React.useEffect(() => {
+          if (!open) return;
+          const onClickOutside = (e) => {
+            if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+          };
+          document.addEventListener("mousedown", onClickOutside);
+          return () => document.removeEventListener("mousedown", onClickOutside);
+        }, [open]);
+
+        return h(
+          "div",
+          { ref: containerRef, style: { position: "relative" } },
+          h(
+            "button",
+            {
+              onClick: () => setOpen((o) => !o),
+              style: {
+                ...BUTTON_STYLE,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                background: "#fff",
+                boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+              },
+            },
+            "☰",
+            current?.name ?? "Select flow",
+          ),
+          open &&
+            h(
+              "div",
+              {
+                style: {
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  left: 0,
+                  minWidth: 180,
+                  background: "#fff",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 6,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+                  overflow: "hidden",
+                  zIndex: 5,
+                },
+              },
+              flows.map((f) =>
+                h(
+                  "div",
+                  {
+                    key: f.id,
+                    onClick: () => {
+                      onChange(f.id);
+                      setOpen(false);
+                    },
+                    style: {
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      background: f.id === selectedFlowId ? "#eff6ff" : "#fff",
+                      color: f.id === selectedFlowId ? "#1d4ed8" : "#374151",
+                    },
+                  },
+                  f.name,
+                ),
+              ),
+            ),
+        );
+      }
+
+      // Grafana-style refresh control: a "run now" button plus a persisted auto-refresh
+      // interval, rather than a fixed polling cadence baked into the page. There's no push API
+      // for Kafka consumer lag — it's always re-derived from committed offset vs. high
+      // watermark — so however "live" it looks is really just how often *someone* re-queries
+      // the broker for it; how aggressively that's worth doing (and whether it's worth doing at
+      // all right now) is the dashboard viewer's call, not a fixed default.
+      const REFRESH_INTERVAL_OPTIONS = [
+        { label: "Off", value: 0 },
+        { label: "5s", value: 5000 },
+        { label: "15s", value: 15000 },
+        { label: "30s", value: 30000 },
+        { label: "1m", value: 60000 },
+        { label: "5m", value: 300000 },
+      ];
+
+      function RefreshControl({ intervalMs, onIntervalChange, onRefreshNow }) {
+        return h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              background: "#fff",
+              borderRadius: 6,
+              border: "1px solid #e5e7eb",
+              boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+            },
+          },
+          h(
+            "button",
+            {
+              onClick: onRefreshNow,
+              title: "Refresh consumer lag now",
+              style: { ...ICON_BUTTON_STYLE, padding: "4px 8px", borderRight: "1px solid #e5e7eb" },
+            },
+            "↻",
+          ),
+          h(
+            "select",
+            {
+              value: intervalMs,
+              onChange: (ev) => onIntervalChange(Number(ev.target.value)),
+              title: "Auto-refresh consumer lag",
+              style: {
+                border: "none",
+                background: "transparent",
+                fontSize: 12,
+                color: "#374151",
+                padding: "4px 6px",
+                cursor: "pointer",
+              },
+            },
+            REFRESH_INTERVAL_OPTIONS.map((opt) =>
+              h("option", { key: opt.value, value: opt.value }, opt.label),
+            ),
+          ),
+        );
+      }
+
+      // Fetches messages only on demand — a message-heavy topic isn't something to hit every
+      // time its node happens to be selected — and lets the user pull a fresh batch afterward.
+      function EventSnapshot({ flowId, nodeId, schema }) {
+        // `events` (the last successfully loaded batch) is tracked separately from `phase`, so
+        // a refresh keeps rendering the same event list underneath rather than replacing it
+        // with a bare "Loading…" — swapping the whole panel content out and back in mid-fetch
+        // shrinks the scrollable container and makes the browser clamp/reset its scroll
+        // position, which is exactly what a refresh shouldn't do.
+        const [events, setEvents] = React.useState(null);
+        const [phase, setPhase] = React.useState("idle"); // "idle" | "loading" | "error"
+        const [errorMessage, setErrorMessage] = React.useState(null);
+
+        const load = React.useCallback(() => {
+          setPhase("loading");
+          fetch(
+            `/api/flows/${encodeURIComponent(flowId)}/nodes/${encodeURIComponent(nodeId)}/snapshot`,
+          )
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((body) => {
+              setEvents(body.events);
+              setPhase("idle");
+            })
+            .catch((e) => {
+              setErrorMessage(e.message);
+              setPhase("error");
+            });
+        }, [flowId, nodeId]);
+
+        // A different node (or flow) was selected — drop any previously loaded batch rather
+        // than show stale events under a "Refresh" button that would otherwise silently apply
+        // to the wrong topic.
+        React.useEffect(() => {
+          setEvents(null);
+          setPhase("idle");
+          setErrorMessage(null);
+        }, [flowId, nodeId]);
+
+        if (events === null) {
+          if (phase === "idle") {
+            return h("button", { onClick: load, style: BUTTON_STYLE }, "Load latest events");
+          }
+          if (phase === "loading") {
+            return h("div", { style: { color: "#6b7280" } }, "Loading…");
+          }
+          return h(
+            "div",
+            null,
+            h(
+              "div",
+              {
+                style: {
+                  color: "#b91c1c",
+                  fontFamily: "monospace",
+                  whiteSpace: "pre-wrap",
+                  marginBottom: 8,
+                },
+              },
+              errorMessage,
+            ),
+            h("button", { onClick: load, style: BUTTON_STYLE }, "Retry"),
+          );
+        }
+
+        return h(
+          "div",
+          null,
+          h(
+            "div",
+            { style: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 8 } },
+            phase === "error" &&
+              h("span", { style: { color: "#b91c1c", fontSize: 11 } }, `Refresh failed: ${errorMessage}`),
+            h(
+              "button",
+              { onClick: load, disabled: phase === "loading", style: BUTTON_STYLE },
+              phase === "loading" ? "Refreshing…" : "↻ Refresh",
+            ),
+          ),
+          events.length === 0
+            ? h("div", { style: { color: "#6b7280" } }, "No recent events found.")
+            : h(
+                "div",
+                { style: { display: "flex", flexDirection: "column", gap: 8 } },
+                events.map((event, i) =>
+                  h(
+                    "div",
+                    {
+                      key: i,
+                      style: { border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" },
+                    },
+                    h(
+                      "div",
+                      {
+                        style: {
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: 8,
+                          padding: "4px 8px",
+                          background: "#eef2ff",
+                          color: "#4338ca",
+                          fontSize: 10,
+                          fontFamily: "monospace",
+                        },
+                      },
+                      h("span", null, `partition ${event.partition}`),
+                      h("span", null, `offset ${event.offset}`),
+                      h("span", null, formatKafkaTimestamp(event.timestamp)),
+                    ),
+                    h(
+                      "pre",
+                      {
+                        style: {
+                          margin: 0,
+                          padding: 8,
+                          background: "#f9fafb",
+                          fontSize: 11,
+                          lineHeight: 1.5,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                        },
+                      },
+                      JSON.stringify(orderBySchema(event.value, schema), null, 2),
+                    ),
+                  ),
+                ),
+              ),
+        );
+      }
+
+      // Fetches /api/nodes/{id}/topic-stats for a selected kafka-topic node: partitioning,
+      // replication, and topic-level config (retention, cleanup policy, ...).
+      function TopicStats({ flowId, nodeId }) {
+        const [state, setState] = React.useState({ status: "loading" });
+
+        React.useEffect(() => {
+          setState({ status: "loading" });
+          fetch(
+            `/api/flows/${encodeURIComponent(flowId)}/nodes/${encodeURIComponent(nodeId)}/topic-stats`,
+          )
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((body) => setState({ status: "ready", stats: body }))
+            .catch((e) => setState({ status: "error", message: e.message }));
+        }, [flowId, nodeId]);
+
+        if (state.status === "loading") {
+          return h("div", { style: { color: "#6b7280" } }, "Loading…");
+        }
+        if (state.status === "error") {
+          return h(
+            "div",
+            { style: { color: "#b91c1c", fontFamily: "monospace", whiteSpace: "pre-wrap" } },
+            state.message,
+          );
+        }
+
+        const { partition_count, replication_factor, partitions, config } = state.stats;
+        const underReplicated = partitions.some((p) => p.under_replicated);
+        // A "*" flags a config value that differs from the broker default, i.e. was
+        // deliberately set on this topic rather than inherited.
+        const configRows = Object.entries(config).map(([name, entry]) => [
+          entry.is_default ? name : `${name} *`,
+          formatConfigValue(name, entry.value),
+        ]);
+
+        return h(
+          "div",
+          null,
+          h(
+            "div",
+            { style: { fontSize: 12, marginBottom: 8 } },
+            `${partition_count} partition${partition_count === 1 ? "" : "s"}, replication factor ${replication_factor}`,
+          ),
+          underReplicated &&
+            h(
+              "div",
+              { style: { color: "#b91c1c", fontSize: 12, marginBottom: 8 } },
+              "⚠ under-replicated partition(s)",
+            ),
+          h(
+            "div",
+            {
+              style: {
+                maxHeight: 160,
+                overflow: "auto",
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
+                marginBottom: 12,
+              },
+            },
+            h(
+              "table",
+              null,
+              h(
+                "thead",
+                null,
+                h(
+                  "tr",
+                  null,
+                  ["partition", "leader", "replicas", "isrs"].map((c) => h("th", { key: c }, c)),
+                ),
+              ),
+              h(
+                "tbody",
+                null,
+                partitions.map((p) =>
+                  h(
+                    "tr",
+                    { key: p.partition, style: p.under_replicated ? { background: "#fef2f2" } : undefined },
+                    h("td", null, p.partition),
+                    h("td", null, p.leader),
+                    h("td", null, p.replicas.join(", ")),
+                    h("td", null, p.isrs.join(", ")),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          configRows.length > 0 && h(KVTable, { rows: configRows }),
+          configRows.some(([name]) => name.endsWith(" *")) &&
+            h("div", { style: { fontSize: 11, color: "#6b7280", marginTop: 4 } }, "* differs from broker default"),
+        );
+      }
+
+      // Every stream edge touching this node (either direction) that names a consumer group —
+      // the same lag already shown on the edge in the graph, surfaced here too since a node's
+      // own edges aren't otherwise visible while it's the one filling the panel. Lag is also
+      // kept fresh automatically (App polls every edge on an interval — see fetchLag), but it's
+      // time-sensitive enough that each row gets its own "↻" to pull a fresh value on demand
+      // rather than waiting for the next tick.
+      function ConsumerLagSection({ node, edges, lagByEdge, onRefresh }) {
+        const relevant = edges.filter(
+          (e) => e.consumer?.group_id && (e.from === node.id || e.to === node.id),
+        );
+        if (relevant.length === 0) return null;
+
+        return h(
+          Section,
+          { title: "Consumer lag" },
+          h(
+            "table",
+            null,
+            h(
+              "tbody",
+              null,
+              relevant.map((e) => {
+                const outgoing = e.from === node.id;
+                const other = outgoing ? e.to : e.from;
+                const label = `${outgoing ? "→" : "←"} ${other} (${e.consumer.group_id})`;
+                const lagState = lagByEdge[edgeKey(e)];
+                return h(
+                  "tr",
+                  { key: edgeKey(e) },
+                  h("td", { style: { color: "#6b7280", width: "40%" } }, label),
+                  h("td", null, lagStatusText(lagState)),
+                  h(
+                    "td",
+                    { style: { width: 1 } },
+                    h(
+                      "button",
+                      {
+                        onClick: () => onRefresh(e),
+                        disabled: lagState?.fetching,
+                        title: "Refresh lag",
+                        style: ICON_BUTTON_STYLE,
+                      },
+                      "↻",
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        );
+      }
+
+      function NodeDetails({ flowId, node, edges, lagByEdge, onRefreshLag }) {
+        const connectionRows = node.connection ? Object.entries(node.connection) : [];
+        const configRows = node.config ? Object.entries(node.config) : [];
+        const schemaRows = node.schema ? Object.entries(node.schema) : [];
+
+        return h(
+          "div",
+          null,
+          h("div", { style: { fontSize: 15, fontWeight: 700, marginBottom: 4 } }, node.label),
+          h("div", { style: { color: "#6b7280", fontSize: 12, marginBottom: 16 } }, node.type),
+          connectionRows.length > 0 &&
+            h(Section, { title: "Connection" }, h(KVTable, { rows: connectionRows })),
+          configRows.length > 0 &&
+            h(Section, { title: "Config" }, h(ConfigCards, { rows: configRows })),
+          schemaRows.length > 0 &&
+            h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
+          h(ConsumerLagSection, { node, edges, lagByEdge, onRefresh: onRefreshLag }),
+          node.type === "kafka-topic" &&
+            h(Section, { title: "Topic stats" }, h(TopicStats, { flowId, nodeId: node.id })),
+          node.type === "kafka-topic" &&
+            h(
+              Section,
+              { title: "Latest events" },
+              h(EventSnapshot, { flowId, nodeId: node.id, schema: node.schema }),
+            ),
+        );
+      }
+
+      // Persists a resizable panel width across reloads, tracking a drag on a handle rendered
+      // separately (see the returned `resizing` flag / `startResizing` callback).
+      function useResizablePanelWidth(storageKey, defaultWidth, min, max) {
+        const [width, setWidth] = React.useState(() => {
+          try {
+            const stored = Number(localStorage.getItem(storageKey));
+            if (Number.isFinite(stored) && stored >= min && stored <= max) return stored;
+          } catch {
+            // localStorage unavailable (private mode, etc.) — fall back to the default.
+          }
+          return defaultWidth;
+        });
+        const [resizing, setResizing] = React.useState(false);
+
+        React.useEffect(() => {
+          if (!resizing) return;
+          const previousCursor = document.body.style.cursor;
+          const previousUserSelect = document.body.style.userSelect;
+          document.body.style.cursor = "col-resize";
+          document.body.style.userSelect = "none";
+
+          // The panel is flush against the right edge of the window, so its target width is
+          // just the distance from the cursor to that edge.
+          const onMove = (e) => setWidth(Math.min(max, Math.max(min, window.innerWidth - e.clientX)));
+          const onUp = () => setResizing(false);
+          document.addEventListener("mousemove", onMove);
+          document.addEventListener("mouseup", onUp);
+          return () => {
+            document.removeEventListener("mousemove", onMove);
+            document.removeEventListener("mouseup", onUp);
+            document.body.style.cursor = previousCursor;
+            document.body.style.userSelect = previousUserSelect;
+          };
+        }, [resizing, min, max]);
+
+        React.useEffect(() => {
+          try {
+            localStorage.setItem(storageKey, String(width));
+          } catch {
+            // Nothing to persist to — the width just resets to the default next load.
+          }
+        }, [width, storageKey]);
+
+        return [width, () => setResizing(true), resizing];
+      }
+
+      // Always visible, like an inspector rather than a popup: shows a placeholder until a
+      // node is selected, and its own drag handle lets it be resized to fit wide messages.
+      function InspectorPanel({
+        flowId,
+        node,
+        width,
+        onStartResize,
+        resizing,
+        edges,
+        lagByEdge,
+        onRefreshLag,
+      }) {
+        return h(
+          "div",
+          {
+            style: {
+              width,
+              flexShrink: 0,
+              display: "flex",
+              background: "#fff",
+              borderLeft: "1px solid #e5e7eb",
+              boxShadow: "-2px 0 8px rgba(0,0,0,0.04)",
+            },
+          },
+          h("div", {
+            className: "resize-handle",
+            onMouseDown: onStartResize,
+            style: {
+              width: 6,
+              flexShrink: 0,
+              cursor: "col-resize",
+              background: resizing ? "#3b82f6" : "transparent",
+            },
+          }),
+          h(
+            "div",
+            { style: { flex: 1, minWidth: 0, padding: 16, overflowY: "auto" } },
+            node
+              ? h(NodeDetails, { flowId, node, edges, lagByEdge, onRefreshLag })
+              : h(
+                  "div",
+                  { style: { color: "#6b7280", fontSize: 13, marginTop: 24, textAlign: "center" } },
+                  "Select a node to inspect it",
+                ),
+          ),
+        );
+      }
+
+      function App() {
+        const [flows, setFlows] = React.useState(null);
+        const [selectedFlowId, setSelectedFlowId] = usePersistedState(
+          "tkati-dashboard-selected-flow",
+          null,
+        );
+        const [graph, setGraph] = React.useState(null);
+        const [error, setError] = React.useState(null);
+        const [selectedNodeId, setSelectedNodeId] = React.useState(null);
+        const [lagByEdge, setLagByEdge] = React.useState({});
+        const [refreshIntervalMs, setRefreshIntervalMs] = usePersistedState(
+          "tkati-dashboard-lag-refresh-interval",
+          0,
+        );
+        const [panelWidth, startResize, resizing] = useResizablePanelWidth(
+          "tkati-dashboard-panel-width",
+          360,
+          260,
+          800,
+        );
+        const updateNodeInternals = useUpdateNodeInternals();
+
+        // Loaded once on mount, like /api/graph used to be — the flow list isn't polled, so a
+        // flow directory added/removed since is picked up on the next page reload. A `?flow=`
+        // in the URL, when it names a flow that still exists, wins over whatever was last
+        // persisted (a shared/bookmarked link should always open on the flow it names).
+        React.useEffect(() => {
+          fetch("/api/flows")
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((list) => {
+              setFlows(list);
+              const ids = new Set(list.map((f) => f.id));
+              const fromUrl = new URLSearchParams(window.location.search).get("flow");
+              if (fromUrl && ids.has(fromUrl)) {
+                setSelectedFlowId(fromUrl);
+              } else if (!selectedFlowId || !ids.has(selectedFlowId)) {
+                setSelectedFlowId(list[0]?.id ?? null);
+              }
+            })
+            .catch((e) => setError(e.message));
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, []);
+
+        // Reflects the current flow into the URL (without adding history entries) so a
+        // specific flow's dashboard view is linkable/bookmarkable.
+        React.useEffect(() => {
+          if (!selectedFlowId) return;
+          const url = new URL(window.location.href);
+          if (url.searchParams.get("flow") === selectedFlowId) return;
+          url.searchParams.set("flow", selectedFlowId);
+          window.history.replaceState(null, "", url);
+        }, [selectedFlowId]);
+
+        // Fetches the selected flow's graph. Switching flows drops the previous flow's node
+        // selection and fetched lag — neither necessarily means anything against a different
+        // flow's node/edge ids.
+        React.useEffect(() => {
+          if (!selectedFlowId) return;
+          setGraph(null);
+          setSelectedNodeId(null);
+          setLagByEdge({});
+          fetch(`/api/flows/${encodeURIComponent(selectedFlowId)}/graph`)
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then(setGraph)
+            .catch((e) => setError(e.message));
+        }, [selectedFlowId]);
+
+        // Fetches (or re-fetches) one edge's live consumer lag. Used for the initial load, the
+        // auto-refresh timer, and both manual "refresh" affordances (top-right run-now button,
+        // per-row button in the inspector's Consumer lag section) — one path so they can't
+        // disagree about what a refresh actually does. A previously-ready value is kept on
+        // screen while a refresh is in flight (only `fetching` flips) rather than blanking to
+        // "loading…" every cycle, which would otherwise flicker on every auto-refresh tick.
+        const fetchLag = React.useCallback((flowId, e) => {
+          const groupId = e.consumer?.group_id;
+          if (!groupId) return;
+          const key = edgeKey(e);
+          setLagByEdge((prev) => ({
+            ...prev,
+            [key]: { ...prev[key], status: prev[key]?.status ?? "loading", fetching: true },
+          }));
+          fetch(
+            `/api/flows/${encodeURIComponent(flowId)}/nodes/${encodeURIComponent(e.from)}/consumer-lag?group_id=${encodeURIComponent(groupId)}`,
+          )
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((body) =>
+              setLagByEdge((prev) => ({
+                ...prev,
+                [key]: { status: "ready", total_lag: body.total_lag, fetching: false },
+              })),
+            )
+            .catch((err) =>
+              setLagByEdge((prev) => ({
+                ...prev,
+                [key]: { status: "error", message: err.message, fetching: false },
+              })),
+            );
+        }, []);
+
+        const refreshAllLag = React.useCallback(() => {
+          for (const e of relevantLagEdges(graph)) fetchLag(selectedFlowId, e);
+        }, [graph, selectedFlowId, fetchLag]);
+
+        // Once the graph is in, fetch live consumer lag for every stream edge whose source is
+        // a kafka-topic and which names a consumer group — best-effort, per edge, independent
+        // of the rest of the page.
+        React.useEffect(() => {
+          refreshAllLag();
+        }, [refreshAllLag]);
+
+        // Kafka has no push API for consumer lag — it's always re-derived by comparing a
+        // committed offset to the topic's high watermark — so "live" here just means polling on
+        // an interval, at a cadence the viewer picks (RefreshControl; "Off" by default). Paused
+        // while the tab isn't visible, so a forgotten background tab doesn't keep hitting the
+        // broker for nothing.
+        React.useEffect(() => {
+          if (!refreshIntervalMs) return;
+          const interval = setInterval(() => {
+            if (!document.hidden) refreshAllLag();
+          }, refreshIntervalMs);
+          return () => clearInterval(interval);
+        }, [refreshIntervalMs, refreshAllLag]);
+
+        // `layout()` does real work (canvas text measurement + a full dagre run) — memoized so
+        // dragging the inspector panel's resize handle, which re-renders this component on
+        // every mousemove, doesn't re-run it dozens of times a second. That churn was fighting
+        // ReactFlow's own resize-driven viewport recalculation and made every node vanish
+        // mid-drag.
+        // lagByEdge is a dependency here too: a row's content (and so its measured size) grows
+        // once that edge's lag resolves — see edgeLabel — so the graph needs to relayout when
+        // that happens, not just on initial load.
+        const nodes = React.useMemo(() => {
+          if (!graph) return [];
+          return layout(graph.nodes, graph.edges, lagByEdge).map((n) => ({
+            ...n,
+            data: { ...n.data, isSelected: n.id === selectedNodeId },
+          }));
+        }, [graph, selectedNodeId, lagByEdge]);
+
+        const flowEdges = React.useMemo(() => {
+          if (!graph) return [];
+          return graph.edges.map((e, i) => {
+            const isHighlighted =
+              selectedNodeId != null && (e.from === selectedNodeId || e.to === selectedNodeId);
+            return {
+              id: `${e.from}-${e.to}-${i}`,
+              source: e.from,
+              target: e.to,
+              targetHandle: isRowEdge(e) ? edgeKey(e) : DEFAULT_TARGET_HANDLE,
+              type: "labeled",
+              // A row-worthy edge's info now lives in its row inside the target node instead of
+              // floating on the edge (see layout()/StackedNode) — so it gets no label here.
+              data: isRowEdge(e) ? {} : { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
+              animated: e.kind === "stream",
+              // Every edge into or out of the selected node — matching the node's own glow color
+              // — so it's easy to trace what a node actually talks to at a glance. zIndex keeps
+              // a highlighted edge drawn above any unhighlighted one it happens to overlap.
+              style: isHighlighted ? { stroke: SELECTED_EDGE_COLOR, strokeWidth: 2.5 } : undefined,
+              markerEnd: isHighlighted
+                ? { type: "arrowclosed", color: SELECTED_EDGE_COLOR }
+                : { type: "arrowclosed" },
+              zIndex: isHighlighted ? 1 : 0,
+            };
+          });
+        }, [graph, lagByEdge, selectedNodeId]);
+
+        // Each node's set of Handles (one per row, plus the default) is only known once its
+        // rows are computed — different nodes have different counts. ReactFlow measures a
+        // node's handle positions once and doesn't notice on its own when that set changes
+        // ("dynamic handles" in their docs), so without this, an edge targeting a row's handle
+        // can resolve to a stale/default position instead of that row — e.g. rendering with no
+        // visible arrowhead. Re-running this whenever `nodes` changes keeps it in sync.
+        React.useEffect(() => {
+          for (const n of nodes) updateNodeInternals(n.id);
+        }, [nodes, updateNodeInternals]);
+
+        if (error) {
+          const el = document.getElementById("error");
+          el.textContent = "Failed to load dataflow: " + error;
+          el.style.display = "block";
+          return null;
+        }
+        if (!flows || !selectedFlowId || !graph) return null;
+
+        const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
+
+        return h(
+          "div",
+          { style: { display: "flex", height: "100%" } },
+          h(
+            "div",
+            { style: { flex: 1, minWidth: 0 } },
+            h(
+              ReactFlow,
+              {
+                nodes,
+                edges: flowEdges,
+                edgeTypes: EDGE_TYPES,
+                nodeTypes: NODE_TYPES,
+                fitView: true,
+                onNodeClick: (_event, node) => setSelectedNodeId(node.id),
+                onPaneClick: () => setSelectedNodeId(null),
+              },
+              h(Background, null),
+              h(Controls, null),
+              h(MiniMap, { nodeColor: (n) => n.data?.colors?.background ?? FALLBACK_COLORS.background }),
+              flows.length > 1 &&
+                h(
+                  Panel,
+                  { position: "top-left" },
+                  h(FlowMenu, { flows, selectedFlowId, onChange: setSelectedFlowId }),
+                ),
+              relevantLagEdges(graph).length > 0 &&
+                h(
+                  Panel,
+                  { position: "top-right" },
+                  h(RefreshControl, {
+                    intervalMs: refreshIntervalMs,
+                    onIntervalChange: setRefreshIntervalMs,
+                    onRefreshNow: refreshAllLag,
+                  }),
+                ),
+            ),
+          ),
+          h(InspectorPanel, {
+            flowId: selectedFlowId,
+            node: selectedNode,
+            width: panelWidth,
+            onStartResize: startResize,
+            resizing,
+            edges: graph.edges,
+            lagByEdge,
+            onRefreshLag: (e) => fetchLag(selectedFlowId, e),
+          }),
+        );
+      }
+
+      // useUpdateNodeInternals (see App) requires being inside a ReactFlowProvider, which the
+      // top-level <ReactFlow> element itself only provides to its own children, not its parent.
+      createRoot(document.getElementById("root")).render(h(ReactFlowProvider, null, h(App)));
+    </script>
+  </body>
+</html>
