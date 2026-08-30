@@ -6,6 +6,26 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### xqtxwrls — tkati-dashboard: keep consumer lag fresh with a Grafana-style refresh control
+
+- Kafka has no push API for consumer lag (it's always re-derived from committed offset vs. high
+  watermark), so a new `RefreshControl` — a ☰-corner `Panel` in the canvas's top-right, shown
+  whenever the graph has at least one lag-carrying edge (`relevantLagEdges()`) — lets the viewer
+  decide how (and whether) to keep re-querying it: a "↻" button refreshes every visible edge's
+  lag immediately, and a `REFRESH_INTERVAL_OPTIONS` dropdown (Off/5s/15s/30s/1m/5m, `usePersistedState`
+  under `tkati-dashboard-lag-refresh-interval`, defaulting to Off) sets an auto-refresh interval.
+  The interval is skipped while `document.hidden`, so a background tab doesn't keep hitting the
+  broker for nothing.
+- `App`'s lag-fetching logic is consolidated into one `fetchLag(flowId, edge)` callback shared by
+  the initial load, the auto-refresh timer, and both manual refresh affordances, so they can't
+  disagree about what "refresh the lag" means. A previously-`"ready"` value now stays on screen
+  (only a new `fetching` flag flips) while a refresh is in flight, instead of blanking to
+  `"loading…"` every cycle — the initial load still shows `"loading…"` since there's nothing to
+  preserve yet.
+- The inspector's "Consumer lag" section (no longer a plain `KVTable`) gets its own per-row "↻",
+  refreshing just that one edge on demand — a global refresh (or waiting for the next tick)
+  would otherwise touch every edge, not just the one being looked at.
+
 ### sqkmzpro — tkati-dashboard: render node config as cards instead of a table
 
 - The inspector panel's "Config" section (a node's own `config`, not `TopicStats`'s topic-level

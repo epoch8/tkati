@@ -139,6 +139,14 @@ it, trigger a rebalance, or otherwise disturb a real pipeline's consumer. A grou
 committed an offset is reported as fully behind (lag = the topic's full size); an unreachable
 broker shows `lag: n/a` instead of failing the page.
 
+Lag is time-sensitive, so it doesn't just get fetched once. A ☰-style control in the canvas's
+top-right corner (shown whenever the graph has at least one such edge) works like Grafana's
+refresh picker: a "↻" button re-fetches every visible edge's lag immediately, and a dropdown next
+to it sets an auto-refresh interval (Off/5s/15s/30s/1m/5m, persisted across reloads, paused while
+the browser tab isn't visible). The inspector's "Consumer lag" section additionally has its own
+per-row "↻" to refresh just the one edge you're looking at, without waiting for the next tick or
+refreshing every other edge in the graph.
+
 ## Validation
 
 `tkati_dashboard.dataflow.load_dataflow` enforces the rules from the serialization doc: the

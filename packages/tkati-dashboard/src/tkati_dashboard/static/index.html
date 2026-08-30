@@ -127,6 +127,18 @@
         return "loading…";
       }
 
+      // Every stream edge lag is ever fetched for: it names a consumer group and its source is
+      // a kafka-topic (the only thing `/consumer-lag` can answer for). Shared by the initial
+      // load, the auto-refresh timer, and the manual "refresh now" button, so all three always
+      // agree on exactly what "refresh the lag" means.
+      function relevantLagEdges(graph) {
+        if (!graph) return [];
+        const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+        return graph.edges.filter(
+          (e) => e.consumer?.group_id && nodesById.get(e.from)?.type === "kafka-topic",
+        );
+      }
+
       // One field per line rather than a single "·"-joined line — cramped side by side, and
       // the group_id/lag are only relevant to stream edges that name a consumer anyway. The lag
       // line is reserved as soon as there's a group (showing a placeholder until it resolves)
@@ -573,6 +585,18 @@
         color: "#374151",
       };
 
+      // A bare icon-only button for a table cell — e.g. a per-row "refresh this one" action —
+      // where BUTTON_STYLE's border/padding would be too heavy.
+      const ICON_BUTTON_STYLE = {
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        fontSize: 12,
+        color: "#6b7280",
+        padding: "0 4px",
+        lineHeight: 1,
+      };
+
       // Collapsed by default to a small ☰ button naming the current flow, so it costs almost no
       // canvas space once a flow is picked; clicking it expands a dropdown listing every
       // observed flow, which collapses again on a selection or a click outside it. Only
@@ -648,6 +672,65 @@
                 ),
               ),
             ),
+        );
+      }
+
+      // Grafana-style refresh control: a "run now" button plus a persisted auto-refresh
+      // interval, rather than a fixed polling cadence baked into the page. There's no push API
+      // for Kafka consumer lag — it's always re-derived from committed offset vs. high
+      // watermark — so however "live" it looks is really just how often *someone* re-queries
+      // the broker for it; how aggressively that's worth doing (and whether it's worth doing at
+      // all right now) is the dashboard viewer's call, not a fixed default.
+      const REFRESH_INTERVAL_OPTIONS = [
+        { label: "Off", value: 0 },
+        { label: "5s", value: 5000 },
+        { label: "15s", value: 15000 },
+        { label: "30s", value: 30000 },
+        { label: "1m", value: 60000 },
+        { label: "5m", value: 300000 },
+      ];
+
+      function RefreshControl({ intervalMs, onIntervalChange, onRefreshNow }) {
+        return h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              background: "#fff",
+              borderRadius: 6,
+              border: "1px solid #e5e7eb",
+              boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+            },
+          },
+          h(
+            "button",
+            {
+              onClick: onRefreshNow,
+              title: "Refresh consumer lag now",
+              style: { ...ICON_BUTTON_STYLE, padding: "4px 8px", borderRight: "1px solid #e5e7eb" },
+            },
+            "↻",
+          ),
+          h(
+            "select",
+            {
+              value: intervalMs,
+              onChange: (ev) => onIntervalChange(Number(ev.target.value)),
+              title: "Auto-refresh consumer lag",
+              style: {
+                border: "none",
+                background: "transparent",
+                fontSize: 12,
+                color: "#374151",
+                padding: "4px 6px",
+                cursor: "pointer",
+              },
+            },
+            REFRESH_INTERVAL_OPTIONS.map((opt) =>
+              h("option", { key: opt.value, value: opt.value }, opt.label),
+            ),
+          ),
         );
       }
 
@@ -887,23 +970,57 @@
 
       // Every stream edge touching this node (either direction) that names a consumer group —
       // the same lag already shown on the edge in the graph, surfaced here too since a node's
-      // own edges aren't otherwise visible while it's the one filling the panel.
-      function ConsumerLagSection({ node, edges, lagByEdge }) {
+      // own edges aren't otherwise visible while it's the one filling the panel. Lag is also
+      // kept fresh automatically (App polls every edge on an interval — see fetchLag), but it's
+      // time-sensitive enough that each row gets its own "↻" to pull a fresh value on demand
+      // rather than waiting for the next tick.
+      function ConsumerLagSection({ node, edges, lagByEdge, onRefresh }) {
         const relevant = edges.filter(
           (e) => e.consumer?.group_id && (e.from === node.id || e.to === node.id),
         );
         if (relevant.length === 0) return null;
 
-        const rows = relevant.map((e) => {
-          const outgoing = e.from === node.id;
-          const other = outgoing ? e.to : e.from;
-          const label = `${outgoing ? "→" : "←"} ${other} (${e.consumer.group_id})`;
-          return [label, lagStatusText(lagByEdge[edgeKey(e)])];
-        });
-        return h(Section, { title: "Consumer lag" }, h(KVTable, { rows }));
+        return h(
+          Section,
+          { title: "Consumer lag" },
+          h(
+            "table",
+            null,
+            h(
+              "tbody",
+              null,
+              relevant.map((e) => {
+                const outgoing = e.from === node.id;
+                const other = outgoing ? e.to : e.from;
+                const label = `${outgoing ? "→" : "←"} ${other} (${e.consumer.group_id})`;
+                const lagState = lagByEdge[edgeKey(e)];
+                return h(
+                  "tr",
+                  { key: edgeKey(e) },
+                  h("td", { style: { color: "#6b7280", width: "40%" } }, label),
+                  h("td", null, lagStatusText(lagState)),
+                  h(
+                    "td",
+                    { style: { width: 1 } },
+                    h(
+                      "button",
+                      {
+                        onClick: () => onRefresh(e),
+                        disabled: lagState?.fetching,
+                        title: "Refresh lag",
+                        style: ICON_BUTTON_STYLE,
+                      },
+                      "↻",
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        );
       }
 
-      function NodeDetails({ flowId, node, edges, lagByEdge }) {
+      function NodeDetails({ flowId, node, edges, lagByEdge, onRefreshLag }) {
         const connectionRows = node.connection ? Object.entries(node.connection) : [];
         const configRows = node.config ? Object.entries(node.config) : [];
         const schemaRows = node.schema ? Object.entries(node.schema) : [];
@@ -919,7 +1036,7 @@
             h(Section, { title: "Config" }, h(ConfigCards, { rows: configRows })),
           schemaRows.length > 0 &&
             h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
-          h(ConsumerLagSection, { node, edges, lagByEdge }),
+          h(ConsumerLagSection, { node, edges, lagByEdge, onRefresh: onRefreshLag }),
           node.type === "kafka-topic" &&
             h(Section, { title: "Topic stats" }, h(TopicStats, { flowId, nodeId: node.id })),
           node.type === "kafka-topic" &&
@@ -979,7 +1096,16 @@
 
       // Always visible, like an inspector rather than a popup: shows a placeholder until a
       // node is selected, and its own drag handle lets it be resized to fit wide messages.
-      function InspectorPanel({ flowId, node, width, onStartResize, resizing, edges, lagByEdge }) {
+      function InspectorPanel({
+        flowId,
+        node,
+        width,
+        onStartResize,
+        resizing,
+        edges,
+        lagByEdge,
+        onRefreshLag,
+      }) {
         return h(
           "div",
           {
@@ -1006,7 +1132,7 @@
             "div",
             { style: { flex: 1, minWidth: 0, padding: 16, overflowY: "auto" } },
             node
-              ? h(NodeDetails, { flowId, node, edges, lagByEdge })
+              ? h(NodeDetails, { flowId, node, edges, lagByEdge, onRefreshLag })
               : h(
                   "div",
                   { style: { color: "#6b7280", fontSize: 13, marginTop: 24, textAlign: "center" } },
@@ -1026,6 +1152,10 @@
         const [error, setError] = React.useState(null);
         const [selectedNodeId, setSelectedNodeId] = React.useState(null);
         const [lagByEdge, setLagByEdge] = React.useState({});
+        const [refreshIntervalMs, setRefreshIntervalMs] = usePersistedState(
+          "tkati-dashboard-lag-refresh-interval",
+          0,
+        );
         const [panelWidth, startResize, resizing] = useResizablePanelWidth(
           "tkati-dashboard-panel-width",
           360,
@@ -1091,41 +1221,67 @@
             .catch((e) => setError(e.message));
         }, [selectedFlowId]);
 
+        // Fetches (or re-fetches) one edge's live consumer lag. Used for the initial load, the
+        // auto-refresh timer, and both manual "refresh" affordances (top-right run-now button,
+        // per-row button in the inspector's Consumer lag section) — one path so they can't
+        // disagree about what a refresh actually does. A previously-ready value is kept on
+        // screen while a refresh is in flight (only `fetching` flips) rather than blanking to
+        // "loading…" every cycle, which would otherwise flicker on every auto-refresh tick.
+        const fetchLag = React.useCallback((flowId, e) => {
+          const groupId = e.consumer?.group_id;
+          if (!groupId) return;
+          const key = edgeKey(e);
+          setLagByEdge((prev) => ({
+            ...prev,
+            [key]: { ...prev[key], status: prev[key]?.status ?? "loading", fetching: true },
+          }));
+          fetch(
+            `/api/flows/${encodeURIComponent(flowId)}/nodes/${encodeURIComponent(e.from)}/consumer-lag?group_id=${encodeURIComponent(groupId)}`,
+          )
+            .then(async (res) => {
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `HTTP ${res.status}`);
+              }
+              return res.json();
+            })
+            .then((body) =>
+              setLagByEdge((prev) => ({
+                ...prev,
+                [key]: { status: "ready", total_lag: body.total_lag, fetching: false },
+              })),
+            )
+            .catch((err) =>
+              setLagByEdge((prev) => ({
+                ...prev,
+                [key]: { status: "error", message: err.message, fetching: false },
+              })),
+            );
+        }, []);
+
+        const refreshAllLag = React.useCallback(() => {
+          for (const e of relevantLagEdges(graph)) fetchLag(selectedFlowId, e);
+        }, [graph, selectedFlowId, fetchLag]);
+
         // Once the graph is in, fetch live consumer lag for every stream edge whose source is
         // a kafka-topic and which names a consumer group — best-effort, per edge, independent
         // of the rest of the page.
         React.useEffect(() => {
-          if (!graph) return;
-          const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
-          for (const e of graph.edges) {
-            const groupId = e.consumer?.group_id;
-            if (!groupId || nodesById.get(e.from)?.type !== "kafka-topic") continue;
-            const key = edgeKey(e);
-            setLagByEdge((prev) => ({ ...prev, [key]: { status: "loading" } }));
-            fetch(
-              `/api/flows/${encodeURIComponent(selectedFlowId)}/nodes/${encodeURIComponent(e.from)}/consumer-lag?group_id=${encodeURIComponent(groupId)}`,
-            )
-              .then(async (res) => {
-                if (!res.ok) {
-                  const body = await res.json().catch(() => ({}));
-                  throw new Error(body.detail || `HTTP ${res.status}`);
-                }
-                return res.json();
-              })
-              .then((body) =>
-                setLagByEdge((prev) => ({
-                  ...prev,
-                  [key]: { status: "ready", total_lag: body.total_lag },
-                })),
-              )
-              .catch((err) =>
-                setLagByEdge((prev) => ({
-                  ...prev,
-                  [key]: { status: "error", message: err.message },
-                })),
-              );
-          }
-        }, [graph, selectedFlowId]);
+          refreshAllLag();
+        }, [refreshAllLag]);
+
+        // Kafka has no push API for consumer lag — it's always re-derived by comparing a
+        // committed offset to the topic's high watermark — so "live" here just means polling on
+        // an interval, at a cadence the viewer picks (RefreshControl; "Off" by default). Paused
+        // while the tab isn't visible, so a forgotten background tab doesn't keep hitting the
+        // broker for nothing.
+        React.useEffect(() => {
+          if (!refreshIntervalMs) return;
+          const interval = setInterval(() => {
+            if (!document.hidden) refreshAllLag();
+          }, refreshIntervalMs);
+          return () => clearInterval(interval);
+        }, [refreshIntervalMs, refreshAllLag]);
 
         // `layout()` does real work (canvas text measurement + a full dagre run) — memoized so
         // dragging the inspector panel's resize handle, which re-renders this component on
@@ -1205,6 +1361,16 @@
                   { position: "top-left" },
                   h(FlowMenu, { flows, selectedFlowId, onChange: setSelectedFlowId }),
                 ),
+              relevantLagEdges(graph).length > 0 &&
+                h(
+                  Panel,
+                  { position: "top-right" },
+                  h(RefreshControl, {
+                    intervalMs: refreshIntervalMs,
+                    onIntervalChange: setRefreshIntervalMs,
+                    onRefreshNow: refreshAllLag,
+                  }),
+                ),
             ),
           ),
           h(InspectorPanel, {
@@ -1215,6 +1381,7 @@
             resizing,
             edges: graph.edges,
             lagByEdge,
+            onRefreshLag: (e) => fetchLag(selectedFlowId, e),
           }),
         );
       }

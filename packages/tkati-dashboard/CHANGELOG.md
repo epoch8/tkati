@@ -1,4 +1,4 @@
-# 0.4.0a12
+# 0.4.0a13
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -79,3 +79,7 @@
 * Removed the LR/TD layout toggle — the graph now always lays out left-to-right
 * The inspector panel's "Config" section now renders each entry as a card (its key as a header,
   its value as a code block) instead of a table row, with an object value pretty-printed
+* Consumer lag now has a Grafana-style refresh control in the graph's top-right corner: a "↻"
+  button to refresh every visible edge's lag immediately, and a dropdown to set an auto-refresh
+  interval (Off/5s/15s/30s/1m/5m, persisted, off by default, paused while the tab is hidden). The
+  inspector's "Consumer lag" section also gets its own per-row "↻" to refresh just one edge
