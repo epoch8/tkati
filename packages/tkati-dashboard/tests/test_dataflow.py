@@ -140,3 +140,91 @@ def test_singular_node_fragment_without_id_raises(tmp_path: Path) -> None:
 
     with pytest.raises(DataflowValidationError):
         load_dataflow(tmp_path)
+
+
+@pytest.fixture
+def yaml_dataflow_dir() -> Path:
+    return Path(__file__).parent / "data" / "yaml-dataflow"
+
+
+def test_load_dataflow_reads_yaml_fragments(yaml_dataflow_dir: Path) -> None:
+    """YAML fragments (.yaml/.yml) merge exactly like .json ones."""
+    dataflow = load_dataflow(yaml_dataflow_dir)
+
+    assert dataflow.name == "yaml-dataflow"
+    assert set(dataflow.nodes) == {"raw-orders", "dedup", "deduped-orders"}
+    assert dataflow.nodes["raw-orders"].schema == {
+        "id": "string",
+        "time": "timestamp[ms]",
+        "amount": "int64",
+    }
+    assert dataflow.nodes["raw-orders"].connection == {
+        "broker": "redpanda:29092",
+        "topic": "raw_orders",
+    }
+    assert len(dataflow.edges) == 2
+    assert dataflow.edges[0].consumer == {"group_id": "orders-dedup"}
+
+
+def test_load_dataflow_merges_json_and_yaml_fragments(tmp_path: Path) -> None:
+    (tmp_path / "topics.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "raw": {
+                        "type": "kafka-topic",
+                        "connection": {"broker": "b", "topic": "raw"},
+                    },
+                }
+            }
+        )
+    )
+    (tmp_path / "rest.yaml").write_text(
+        "nodes:\n"
+        "  sink:\n"
+        "    type: kafka-topic\n"
+        "    connection: {broker: b, topic: sink}\n"
+        "edges:\n"
+        "  - from: raw\n"
+        "    to: sink\n"
+        "    kind: stream\n"
+    )
+
+    dataflow = load_dataflow(tmp_path)
+
+    assert set(dataflow.nodes) == {"raw", "sink"}
+    assert len(dataflow.edges) == 1
+    assert dataflow.edges[0].from_ == "raw"
+    assert dataflow.edges[0].to == "sink"
+
+
+def test_yaml_fragment_defining_same_node_identically_is_deduped(
+    tmp_path: Path,
+) -> None:
+    node = {"type": "kafka-topic", "connection": {"broker": "b", "topic": "t"}}
+    (tmp_path / "a.json").write_text(json.dumps({"nodes": {"shared": node}}))
+    (tmp_path / "b.yaml").write_text(
+        "nodes:\n  shared:\n    type: kafka-topic\n    connection: {broker: b, topic: t}\n"
+    )
+
+    dataflow = load_dataflow(tmp_path)
+
+    assert set(dataflow.nodes) == {"shared"}
+
+
+def test_empty_yaml_fragment_is_valid(tmp_path: Path) -> None:
+    (tmp_path / "empty.yaml").write_text("")
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"nodes": {"a": {"type": "processing-node"}}, "edges": []})
+    )
+
+    dataflow = load_dataflow(tmp_path)
+
+    assert set(dataflow.nodes) == {"a"}
+
+
+def test_non_object_yaml_fragment_raises(tmp_path: Path) -> None:
+    (tmp_path / "bad.yaml").write_text("- just\n- a\n- list\n")
+
+    with pytest.raises(DataflowValidationError):
+        load_dataflow(tmp_path)

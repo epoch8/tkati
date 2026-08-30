@@ -1,4 +1,4 @@
-# 0.4.0a3
+# 0.4.0a4
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -27,3 +27,5 @@
 * A fragment can now also declare a single node via a top-level `"node"` object carrying its
   own `"id"`, instead of only `"nodes": {<id>: {...}}` — fixes edges to such a node being
   reported as referencing an unknown node
+* `load_dataflow` now also reads `*.yaml`/`*.yml` fragments, freely mixable with `*.json` ones
+  in the same directory — both decode to the same nodes/edges structure and merge identically

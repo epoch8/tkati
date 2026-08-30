@@ -6,6 +6,25 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### uznzxwzx — docs: connection fields; tkati-dashboard: read YAML fragments too
+
+- [docs/dataflow-serialization.md](docs/dataflow-serialization.md) never actually specified how
+  to declare a Kafka topic's physical name — every example only showed `connection.broker`,
+  leaving a reader to (wrongly) assume the node's own `id` doubles as the topic name. Added a
+  "Connection settings" subsection under "Node model" spelling out `kafka-topic`'s `broker`/
+  `topic` (matching what `tkati-dashboard`'s live lookups actually read) and
+  `clickhouse-table`'s `host`/`port`/`database`/`user`/`secure`, plus a note against putting
+  live credentials in a checked-in fragment.
+- Updated every example fragment in the doc to include `connection.topic`, and noted in
+  "Validation and tooling" that these per-type connection fields are not enforced by
+  `load_dataflow` — a node missing them still loads, it just can't back a live lookup.
+- `tkati_dashboard.dataflow.load_dataflow` now reads `*.yaml`/`*.yml` fragments alongside
+  `*.json` ones in the same directory — both decode to the same nodes/edges structure before
+  the existing merge/validation pipeline ever sees them, so JSON and YAML fragments merge and
+  dedupe identically (including a node defined identically in one of each). New
+  `find_fragment_paths()` (shared with `main.py`'s CLI sanity check) replaces the old
+  JSON-only glob. Added a matching YAML example to the doc's "Fragment format" section.
+
 ### qoorwymz — tkati-dashboard: support a singular "node" fragment shape
 
 - Fixed `load_dataflow` failing to resolve edges to a node declared via a top-level `"node"`

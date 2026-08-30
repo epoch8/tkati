@@ -1,0 +1,9 @@
+edges:
+  - from: raw-orders
+    to: dedup
+    kind: stream
+    consumer:
+      group_id: orders-dedup
+  - from: dedup
+    to: deduped-orders
+    kind: stream

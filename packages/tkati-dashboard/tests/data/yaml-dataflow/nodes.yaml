@@ -1,0 +1,7 @@
+nodes:
+  dedup:
+    type: processing-node
+    implementation: tkati-node-dedup
+    config:
+      field: id
+      window_hours: 3

@@ -3,7 +3,8 @@
 Reads a serialized tkati dataflow directory (see
 [docs/dataflow-serialization.md](../../docs/dataflow-serialization.md)) and serves a local web page
 rendering it as a graph — no live runtime process required, no manifest to maintain, just a
-directory of `*.json` fragment files.
+directory of `*.json`/`*.yaml`/`*.yml` fragment files (freely mixable — both encodings merge into
+the same graph identically).
 
 ## Usage
 
@@ -83,8 +84,8 @@ the page.
 ## Validation
 
 `tkati_dashboard.dataflow.load_dataflow` enforces the rules from the serialization doc: the
-directory must contain at least one `*.json` fragment, node ids must be unique (or identically
-redefined) across fragments, edges must reference existing nodes, and a node's `schema`, when
+directory must contain at least one `*.json`/`*.yaml`/`*.yml` fragment, node ids must be unique
+(or identically redefined) across fragments, edges must reference existing nodes, and a node's `schema`, when
 present, must use field types known to `tkati_core.type_mapping` — `schema` itself is always
 optional, since it isn't always on hand for a real-world node. A validation failure surfaces as
 an HTTP 422 with the error message, shown inline on the page instead of a blank graph.

@@ -1,14 +1,15 @@
 """Load and validate a serialized tkati dataflow directory.
 
-See docs/dataflow-serialization.md for the format this module implements: a directory of JSON
-fragments merged into one graph of nodes and edges. There is no manifest file — every `*.json`
-file directly inside the directory is a fragment.
+See docs/dataflow-serialization.md for the format this module implements: a directory of JSON or
+YAML fragments merged into one graph of nodes and edges. There is no manifest file — every
+`*.json`/`*.yaml`/`*.yml` file directly inside the directory is a fragment.
 """
 
 import json
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from tkati_core.type_mapping import TYPE_MAPPING
 
@@ -16,6 +17,9 @@ from tkati_core.type_mapping import TYPE_MAPPING
 # a `schema`. Kept as a heuristic, not a closed registry: an unrecognized type is still accepted,
 # it just isn't schema-checked.
 SOURCE_SINK_TYPES = {"kafka-topic", "clickhouse-table"}
+
+FRAGMENT_GLOBS = ("*.json", "*.yaml", "*.yml")
+YAML_SUFFIXES = (".yaml", ".yml")
 
 
 class DataflowValidationError(ValueError):
@@ -47,13 +51,36 @@ class Dataflow(BaseModel):
     edges: list[EdgeDef]
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def find_fragment_paths(directory: Path) -> list[Path]:
+    """Return every `*.json`/`*.yaml`/`*.yml` file directly inside `directory`, sorted by name
+    (mixing extensions in one alphabetical list, so merge order is purely filename-driven)."""
+    return sorted(p for pattern in FRAGMENT_GLOBS for p in directory.glob(pattern))
+
+
+def _read_fragment(path: Path) -> dict[str, Any]:
     try:
-        return json.loads(path.read_text())
+        text = path.read_text()
     except FileNotFoundError as e:
         raise DataflowValidationError(f"Missing dataflow file: {path}") from e
-    except json.JSONDecodeError as e:
-        raise DataflowValidationError(f"Invalid JSON in {path}: {e}") from e
+
+    if path.suffix in YAML_SUFFIXES:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            raise DataflowValidationError(f"Invalid YAML in {path}: {e}") from e
+    else:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise DataflowValidationError(f"Invalid JSON in {path}: {e}") from e
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise DataflowValidationError(
+            f"{path}: fragment must be a JSON/YAML object, got {type(data).__name__}"
+        )
+    return data
 
 
 def _validate_node(node_id: str, node: NodeDef) -> None:
@@ -88,18 +115,18 @@ def _merge_node(
 
 
 def load_dataflow(directory: Path) -> Dataflow:
-    """Read every `*.json` fragment directly inside `directory`, merge, and validate them.
+    """Read every JSON/YAML fragment directly inside `directory`, merge, and validate them.
 
-    There is no manifest: any JSON file in the directory is a fragment contributing to the
-    graph. The dataflow's name is the directory's own name.
+    There is no manifest: any `*.json`/`*.yaml`/`*.yml` file in the directory is a fragment
+    contributing to the graph. The dataflow's name is the directory's own name.
     """
     if not directory.is_dir():
         raise DataflowValidationError(f"Not a directory: {directory}")
 
-    fragment_paths = sorted(directory.glob("*.json"))
+    fragment_paths = find_fragment_paths(directory)
     if not fragment_paths:
         raise DataflowValidationError(
-            f"No dataflow fragments (*.json) found in {directory}"
+            f"No dataflow fragments ({'/'.join(FRAGMENT_GLOBS)}) found in {directory}"
         )
 
     nodes: dict[str, NodeDef] = {}
@@ -109,7 +136,7 @@ def load_dataflow(directory: Path) -> Dataflow:
     edges: list[EdgeDef] = []
 
     for fragment_path in fragment_paths:
-        fragment = _read_json(fragment_path)
+        fragment = _read_fragment(fragment_path)
 
         for node_id, raw_node in fragment.get("nodes", {}).items():
             _merge_node(nodes, node_sources, fragment_path.name, node_id, raw_node)
