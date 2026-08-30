@@ -1,0 +1,8 @@
+{
+  "nodes": {
+    "shared": {
+      "type": "processing-node",
+      "config": {"field": "other-field"}
+    }
+  }
+}

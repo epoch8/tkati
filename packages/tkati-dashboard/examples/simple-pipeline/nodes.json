@@ -1,0 +1,13 @@
+{
+  "nodes": {
+    "dedup": {
+      "type": "processing-node",
+      "name": "Dedup by event_id",
+      "implementation": "tkati-node-dedup",
+      "config": {
+        "field": "event_id",
+        "window_hours": 1
+      }
+    }
+  }
+}

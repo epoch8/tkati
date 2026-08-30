@@ -1,0 +1,38 @@
+[project]
+name = "tkati-dashboard"
+version = "0.4.0"
+description = "Local web dashboard that renders a serialized tkati dataflow directory as a graph"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "tkati-core==0.4.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "confluent-kafka>=2.11.0",
+    "orjson>=3.9.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+tkati-dashboard = "tkati_dashboard.main:main"
+
+[dependency-groups]
+dev = ["pytest>=9.0.1", "httpx>=0.28.0"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tkati_dashboard*"]
+
+[tool.setuptools.package-data]
+tkati_dashboard = ["static/*.html"]
+
+[tool.uv]
+package = true
+
+[tool.uv-workspace-codegen]
+generate = true
+template_type = ["test", "publish"]

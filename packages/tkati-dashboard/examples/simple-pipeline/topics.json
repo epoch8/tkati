@@ -1,0 +1,32 @@
+{
+  "nodes": {
+    "raw-events": {
+      "type": "kafka-topic",
+      "name": "Raw page views",
+      "schema": {
+        "event_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "page": "string"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "raw_events"
+      }
+    },
+    "deduped-events": {
+      "type": "kafka-topic",
+      "name": "Deduped page views",
+      "schema": {
+        "event_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "page": "string"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "deduped_events"
+      }
+    }
+  }
+}

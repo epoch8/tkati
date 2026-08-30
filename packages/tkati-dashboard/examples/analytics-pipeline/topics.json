@@ -1,0 +1,75 @@
+{
+  "nodes": {
+    "raw-clicks": {
+      "type": "kafka-topic",
+      "name": "Raw clicks",
+      "schema": {
+        "session_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "url": "string"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "raw_clicks"
+      }
+    },
+    "raw-purchases": {
+      "type": "kafka-topic",
+      "name": "Raw purchases",
+      "schema": {
+        "order_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "amount": "int64"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "raw_purchases"
+      }
+    },
+    "deduped-clicks": {
+      "type": "kafka-topic",
+      "name": "Deduped clicks",
+      "schema": {
+        "session_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "url": "string"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "deduped_clicks"
+      }
+    },
+    "deduped-purchases": {
+      "type": "kafka-topic",
+      "name": "Deduped purchases",
+      "schema": {
+        "order_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "amount": "int64"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "deduped_purchases"
+      }
+    },
+    "enriched-events": {
+      "type": "kafka-topic",
+      "name": "Enriched events",
+      "schema": {
+        "session_id": "string",
+        "user_id": "string",
+        "time": "timestamp[ms]",
+        "event_type": "string",
+        "amount": "int64"
+      },
+      "connection": {
+        "broker": "localhost:9092",
+        "topic": "enriched_events"
+      }
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "edges": [
+    {
+      "from": "raw-clicks",
+      "to": "dedup-clicks",
+      "kind": "stream",
+      "consumer": {"group_id": "clicks-dedup"}
+    },
+    {
+      "from": "dedup-clicks",
+      "to": "deduped-clicks",
+      "kind": "stream"
+    },
+    {
+      "from": "raw-purchases",
+      "to": "dedup-purchases",
+      "kind": "stream",
+      "consumer": {"group_id": "purchases-dedup"}
+    },
+    {
+      "from": "dedup-purchases",
+      "to": "deduped-purchases",
+      "kind": "stream"
+    },
+    {
+      "from": "deduped-clicks",
+      "to": "sessionize",
+      "kind": "stream",
+      "consumer": {"group_id": "sessionize-clicks"}
+    },
+    {
+      "from": "deduped-purchases",
+      "to": "sessionize",
+      "kind": "stream",
+      "consumer": {"group_id": "sessionize-purchases"}
+    },
+    {
+      "from": "sessionize",
+      "to": "enriched-events",
+      "kind": "stream"
+    },
+    {
+      "from": "enriched-events",
+      "to": "load-events",
+      "kind": "stream",
+      "consumer": {"group_id": "load-events"}
+    },
+    {
+      "from": "load-events",
+      "to": "events-table",
+      "kind": "stream"
+    },
+    {
+      "from": "deduped-purchases",
+      "to": "load-purchases",
+      "kind": "stream",
+      "consumer": {"group_id": "load-purchases"}
+    },
+    {
+      "from": "load-purchases",
+      "to": "purchases-table",
+      "kind": "stream"
+    }
+  ]
+}
