@@ -1,4 +1,4 @@
-# 0.4.0a11
+# 0.4.0a12
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -77,3 +77,5 @@
   bookmarking/sharing); with just one flow — including today's single-directory invocation — the
   page is unchanged
 * Removed the LR/TD layout toggle — the graph now always lays out left-to-right
+* The inspector panel's "Config" section now renders each entry as a card (its key as a header,
+  its value as a code block) instead of a table row, with an object value pretty-printed

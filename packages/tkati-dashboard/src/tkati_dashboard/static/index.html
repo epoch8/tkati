@@ -484,6 +484,62 @@
         );
       }
 
+      // An object value renders pretty-printed (matching EventSnapshot's message blocks), since
+      // a config value is at least as likely to be a nested object as a scalar.
+      function formatCodeValue(v) {
+        if (v === undefined || v === null) return "";
+        if (typeof v === "object") return JSON.stringify(v, null, 2);
+        return String(v);
+      }
+
+      // One card per config entry — its key as a small header band, its value as a code block
+      // body — rather than a table row, since a config value is often multi-line/structured
+      // enough that a narrow table column doesn't give it room to read well.
+      function ConfigCards({ rows }) {
+        return h(
+          "div",
+          { style: { display: "flex", flexDirection: "column", gap: 8 } },
+          rows.map(([key, value]) =>
+            h(
+              "div",
+              {
+                key,
+                style: { border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" },
+              },
+              h(
+                "div",
+                {
+                  style: {
+                    padding: "4px 8px",
+                    background: "#f9fafb",
+                    color: "#6b7280",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    fontFamily: "monospace",
+                    borderBottom: "1px solid #e5e7eb",
+                  },
+                },
+                key,
+              ),
+              h(
+                "pre",
+                {
+                  style: {
+                    margin: 0,
+                    padding: 8,
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  },
+                },
+                h("code", null, formatCodeValue(value)),
+              ),
+            ),
+          ),
+        );
+      }
+
       // Reorders an event's keys to match the schema's field order (schema fields first, then
       // any extras), purely so related fields read together — a message can have 5-20 fields,
       // which a wide table has no good way to show in a narrow side panel.
@@ -860,7 +916,7 @@
           connectionRows.length > 0 &&
             h(Section, { title: "Connection" }, h(KVTable, { rows: connectionRows })),
           configRows.length > 0 &&
-            h(Section, { title: "Config" }, h(KVTable, { rows: configRows })),
+            h(Section, { title: "Config" }, h(ConfigCards, { rows: configRows })),
           schemaRows.length > 0 &&
             h(Section, { title: "Schema" }, h(KVTable, { rows: schemaRows })),
           h(ConsumerLagSection, { node, edges, lagByEdge }),

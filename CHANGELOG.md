@@ -6,6 +6,16 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### sqkmzpro — tkati-dashboard: render node config as cards instead of a table
+
+- The inspector panel's "Config" section (a node's own `config`, not `TopicStats`'s topic-level
+  config table) now renders each entry as its own card — the key as a small header band, the
+  value as a `<pre><code>` block below it — instead of a `KVTable` row. New `ConfigCards`
+  component; new `formatCodeValue()` pretty-prints an object value (`JSON.stringify(v, null, 2)`,
+  matching how `EventSnapshot` already renders a message body) rather than `formatCell`'s
+  single-line `JSON.stringify`, since a config value is at least as likely to be a nested object
+  as a scalar and a narrow table column doesn't give it room to read well.
+
 ### kmoslqtw — tkati-dashboard: observe multiple flows from one dashboard instance
 
 - The CLI's single positional `dataflow_dir` is now `nargs="+"` — pass more than one directory to
