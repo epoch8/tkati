@@ -68,6 +68,25 @@ def _validate_node(node_id: str, node: NodeDef) -> None:
                 )
 
 
+def _merge_node(
+    nodes: dict[str, NodeDef],
+    node_sources: dict[str, str],
+    fragment_name: str,
+    node_id: str,
+    raw_node: dict[str, Any],
+) -> None:
+    node = NodeDef.model_validate(raw_node)
+    if node_id in nodes:
+        if nodes[node_id] != node:
+            raise DataflowValidationError(
+                f"Node {node_id!r} is defined differently in "
+                f"{node_sources[node_id]!r} and {fragment_name!r}"
+            )
+        return
+    nodes[node_id] = node
+    node_sources[node_id] = fragment_name
+
+
 def load_dataflow(directory: Path) -> Dataflow:
     """Read every `*.json` fragment directly inside `directory`, merge, and validate them.
 
@@ -93,16 +112,18 @@ def load_dataflow(directory: Path) -> Dataflow:
         fragment = _read_json(fragment_path)
 
         for node_id, raw_node in fragment.get("nodes", {}).items():
-            node = NodeDef.model_validate(raw_node)
-            if node_id in nodes:
-                if nodes[node_id] != node:
-                    raise DataflowValidationError(
-                        f"Node {node_id!r} is defined differently in "
-                        f"{node_sources[node_id]!r} and {fragment_path.name!r}"
-                    )
-                continue
-            nodes[node_id] = node
-            node_sources[node_id] = fragment_path.name
+            _merge_node(nodes, node_sources, fragment_path.name, node_id, raw_node)
+
+        # A fragment may also declare a single node via a top-level "node" object carrying
+        # its own "id", instead of keying it under "nodes" — e.g. one file per node.
+        if "node" in fragment:
+            raw_node = fragment["node"]
+            node_id = raw_node.get("id")
+            if not node_id:
+                raise DataflowValidationError(
+                    f"{fragment_path.name!r} has a 'node' object with no 'id'"
+                )
+            _merge_node(nodes, node_sources, fragment_path.name, node_id, raw_node)
 
         for raw_edge in fragment.get("edges", []):
             edges.append(EdgeDef.model_validate(raw_edge))

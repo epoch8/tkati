@@ -4,7 +4,17 @@ One entry per jj change, keyed by its change identifier (stable across
 `jj describe`/`jj squash`/rebases — use `jj log -r <change-id>` to look one
 up). Newest first.
 
-## 0.4.0a2
+## WIP 0.4.0
+
+### qoorwymz — tkati-dashboard: support a singular "node" fragment shape
+
+- Fixed `load_dataflow` failing to resolve edges to a node declared via a top-level `"node"`
+  object with its own `"id"` field (e.g. one file per processing node, as a code generator
+  might produce), instead of the usual `"nodes": {<id>: {...}}` dict — it was silently
+  ignored, so any edge referencing it raised "references unknown node".
+- Extracted `_merge_node`, shared by both the `"nodes"` dict and singular `"node"` code paths.
+- Documented the singular `"node"` shape in
+  [docs/dataflow-serialization.md](docs/dataflow-serialization.md)'s "Fragment format" section.
 
 ### ykrrxmkz — tkati-dashboard: topic stats in the node panel, optional schema
 

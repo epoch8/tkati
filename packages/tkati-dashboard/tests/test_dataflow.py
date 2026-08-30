@@ -72,3 +72,71 @@ def test_source_sink_node_without_schema_is_valid(tmp_path: Path) -> None:
     dataflow = load_dataflow(tmp_path)
 
     assert dataflow.nodes["proxy-reboot-requests-cloud-ch"].schema is None
+
+
+def test_singular_node_fragment_is_valid(tmp_path: Path) -> None:
+    """A fragment may declare one node via a top-level "node" object carrying its own "id",
+    instead of keying it under "nodes" — e.g. one file per processing node."""
+    (tmp_path / "node.json").write_text(
+        json.dumps(
+            {
+                "node": {
+                    "id": "stage-eu-reboot-requests-k2ch-cloud-ch",
+                    "type": "processing-node",
+                    "implementation": "k2ch",
+                    "config": {},
+                },
+                "edges": [
+                    {
+                        "from": "raw",
+                        "to": "stage-eu-reboot-requests-k2ch-cloud-ch",
+                        "kind": "stream",
+                        "consumer": {"group_id": "g"},
+                    },
+                    {
+                        "from": "stage-eu-reboot-requests-k2ch-cloud-ch",
+                        "to": "sink",
+                        "kind": "stream",
+                    },
+                ],
+            }
+        )
+    )
+    (tmp_path / "topics.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "raw": {
+                        "type": "kafka-topic",
+                        "connection": {"broker": "b", "topic": "raw"},
+                    },
+                    "sink": {
+                        "type": "kafka-topic",
+                        "connection": {"broker": "b", "topic": "sink"},
+                    },
+                }
+            }
+        )
+    )
+
+    dataflow = load_dataflow(tmp_path)
+
+    assert set(dataflow.nodes) == {
+        "stage-eu-reboot-requests-k2ch-cloud-ch",
+        "raw",
+        "sink",
+    }
+    assert (
+        dataflow.nodes["stage-eu-reboot-requests-k2ch-cloud-ch"].type
+        == "processing-node"
+    )
+    assert len(dataflow.edges) == 2
+
+
+def test_singular_node_fragment_without_id_raises(tmp_path: Path) -> None:
+    (tmp_path / "node.json").write_text(
+        json.dumps({"node": {"type": "processing-node"}})
+    )
+
+    with pytest.raises(DataflowValidationError):
+        load_dataflow(tmp_path)

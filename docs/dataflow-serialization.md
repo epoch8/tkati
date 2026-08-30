@@ -111,6 +111,27 @@ Example fragment:
 
 This is intentionally similar to the TOML config used by tkati nodes, but serialized in a portable structure that can be consumed by tools other than Python.
 
+A fragment that describes a single node — e.g. one file per processing node, as a code generator
+might produce — may instead declare it under a singular `node` key, with the id as a field on the
+object itself rather than as the surrounding dict's key:
+
+```json
+{
+  "node": {
+    "id": "dedup-process",
+    "type": "processing-node",
+    "implementation": "tkati-node-dedup",
+    "config": {
+      "field": "id",
+      "window_hours": 3
+    }
+  }
+}
+```
+
+This is equivalent to a `"nodes": {"dedup-process": {...}}` entry (minus the `id` field, which
+isn't part of the node's own metadata in that form) and merges into the same graph identically.
+
 ## Node model
 
 At the serialized level, every node needs the following minimal metadata:

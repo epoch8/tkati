@@ -1,4 +1,4 @@
-# 0.4.0a2
+# 0.4.0a3
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -24,3 +24,6 @@
   default), via `GET /api/nodes/{id}/topic-stats` and `tkati_dashboard.topic_stats`
 * `schema` is optional for every node type (previously required for `kafka-topic`/
   `clickhouse-table`), since it isn't always on hand for a real-world node
+* A fragment can now also declare a single node via a top-level `"node"` object carrying its
+  own `"id"`, instead of only `"nodes": {<id>: {...}}` — fixes edges to such a node being
+  reported as referencing an unknown node
