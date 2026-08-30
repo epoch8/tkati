@@ -1,4 +1,4 @@
-# 0.4.0a13
+# 0.4.0a14
 
 * Initial implementation of `tkati-dashboard`: reads a serialized tkati dataflow directory — a
   directory of JSON fragments, no manifest required, every `*.json` file directly inside it is
@@ -83,3 +83,5 @@
   button to refresh every visible edge's lag immediately, and a dropdown to set an auto-refresh
   interval (Off/5s/15s/30s/1m/5m, persisted, off by default, paused while the tab is hidden). The
   inspector's "Consumer lag" section also gets its own per-row "↻" to refresh just one edge
+* Selecting a node now also highlights every edge into or out of it in the graph (same blue as
+  the node's own selection glow, drawn above any edge it crosses)

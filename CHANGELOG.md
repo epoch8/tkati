@@ -6,6 +6,15 @@ up). Newest first.
 
 ## WIP 0.4.0
 
+### yywonqyq — tkati-dashboard: highlight a selected node's edges in the graph
+
+- Every edge into or out of the selected node now turns the same blue as the node's own
+  selection glow (`SELECTED_EDGE_COLOR`, matching `rgba(29, 78, 216, ...)`) and gets a higher
+  `zIndex` so it draws above any edge it happens to cross — added to `flowEdges`'s existing
+  per-edge `style`/`markerEnd` (already forwarded to `BaseEdge` by `LabeledEdge`, so no change
+  needed there), computed from `selectedNodeId` alongside the edges that were already
+  recomputed on selection.
+
 ### xqtxwrls — tkati-dashboard: keep consumer lag fresh with a Grafana-style refresh control
 
 - Kafka has no push API for consumer lag (it's always re-derived from committed offset vs. high

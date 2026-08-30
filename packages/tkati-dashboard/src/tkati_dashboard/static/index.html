@@ -69,6 +69,11 @@
         rowText: "#1f2937",
       };
 
+      // Matches the selected node's own glow (`rgba(29, 78, 216, 0.35)` on StackedNode) — used
+      // to highlight every edge touching the selected node, so "this is connected to what's
+      // selected" reads as one consistent color across the graph.
+      const SELECTED_EDGE_COLOR = "#1d4ed8";
+
       // Type-specific connection details worth surfacing on the node itself.
       function nodeLabel(n) {
         const lines = [n.label, `(${n.type})`];
@@ -1301,19 +1306,30 @@
 
         const flowEdges = React.useMemo(() => {
           if (!graph) return [];
-          return graph.edges.map((e, i) => ({
-            id: `${e.from}-${e.to}-${i}`,
-            source: e.from,
-            target: e.to,
-            targetHandle: isRowEdge(e) ? edgeKey(e) : DEFAULT_TARGET_HANDLE,
-            type: "labeled",
-            // A row-worthy edge's info now lives in its row inside the target node instead of
-            // floating on the edge (see layout()/StackedNode) — so it gets no label here.
-            data: isRowEdge(e) ? {} : { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
-            animated: e.kind === "stream",
-            markerEnd: { type: "arrowclosed" },
-          }));
-        }, [graph, lagByEdge]);
+          return graph.edges.map((e, i) => {
+            const isHighlighted =
+              selectedNodeId != null && (e.from === selectedNodeId || e.to === selectedNodeId);
+            return {
+              id: `${e.from}-${e.to}-${i}`,
+              source: e.from,
+              target: e.to,
+              targetHandle: isRowEdge(e) ? edgeKey(e) : DEFAULT_TARGET_HANDLE,
+              type: "labeled",
+              // A row-worthy edge's info now lives in its row inside the target node instead of
+              // floating on the edge (see layout()/StackedNode) — so it gets no label here.
+              data: isRowEdge(e) ? {} : { label: edgeLabel(e, lagByEdge[edgeKey(e)]) },
+              animated: e.kind === "stream",
+              // Every edge into or out of the selected node — matching the node's own glow color
+              // — so it's easy to trace what a node actually talks to at a glance. zIndex keeps
+              // a highlighted edge drawn above any unhighlighted one it happens to overlap.
+              style: isHighlighted ? { stroke: SELECTED_EDGE_COLOR, strokeWidth: 2.5 } : undefined,
+              markerEnd: isHighlighted
+                ? { type: "arrowclosed", color: SELECTED_EDGE_COLOR }
+                : { type: "arrowclosed" },
+              zIndex: isHighlighted ? 1 : 0,
+            };
+          });
+        }, [graph, lagByEdge, selectedNodeId]);
 
         // Each node's set of Handles (one per row, plus the default) is only known once its
         // rows are computed — different nodes have different counts. ReactFlow measures a

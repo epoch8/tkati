@@ -28,8 +28,10 @@ shows two rows, each fed by its own arrow landing directly on its row). An edge 
 to show beyond its `kind` (no consumer group) stays a plain, unlabeled-beyond-`kind` line into the
 node's header. Source/sink nodes (`kafka-topic`, `clickhouse-table`) and processing nodes are
 colored differently. Click a node to fill the always-visible inspector panel on the right — the
-whole node box glows blue while selected — with its full connection/config/schema details, plus
-every stream edge touching it and that edge's live consumer lag; drag the panel's left edge to
+whole node box glows blue while selected, and every edge into or out of it (in the graph itself)
+turns the same blue and draws on top of any edge it crosses, so what a node actually talks to is
+easy to trace at a glance — with its full connection/config/schema details, plus every stream
+edge touching it and that edge's live consumer lag; drag the panel's left edge to
 resize it (the width is remembered across reloads).
 
 ### Try it with the bundled example
