@@ -141,6 +141,16 @@ it, trigger a rebalance, or otherwise disturb a real pipeline's consumer. A grou
 committed an offset is reported as fully behind (lag = the topic's full size); an unreachable
 broker shows `lag: n/a` instead of failing the page.
 
+The number on the edge in the graph is the group's total lag summed over every partition. The
+inspector panel's section shows that same total and, beneath each one, a `partition`/`lag` table
+breaking it down per partition — the endpoint already returns both, so the breakdown costs no
+extra broker traffic, and it's what distinguishes a backlog spread evenly across partitions from
+one stuck partition holding all of it while the rest are caught up. The table appears once that
+edge's lag resolves (a loading or errored edge shows just its summary row), and scrolls within a
+fixed height so a high-partition-count topic doesn't crowd out the sections below it. The graph's
+own labels stay aggregate-only: their line count feeds the layout's node sizing, so per-partition
+lines there would reshape the graph on every refresh.
+
 Lag is time-sensitive, so it doesn't just get fetched once. A ☰-style control in the canvas's
 top-right corner (shown whenever the graph has at least one such edge) works like Grafana's
 refresh picker: a "↻" button re-fetches every visible edge's lag immediately, and a dropdown next

@@ -4,6 +4,30 @@ One entry per jj change, keyed by its change identifier (stable across
 `jj describe`/`jj squash`/rebases — use `jj log -r <change-id>` to look one
 up). Newest first.
 
+## 0.4.1
+
+### ulyqzzps — Break consumer lag down per partition in the dashboard inspector
+
+- The inspector panel's "Consumer lag" section (`ConsumerLagSection` in
+  `packages/tkati-dashboard/src/tkati_dashboard/static/index.html`) renders each consuming
+  edge as its own block: the existing summary row (`← other-node (group_id)`, the group's total
+  lag, a per-row "↻") followed by a new `PartitionLagTable` listing `partition`/`lag` for every
+  partition, sorted by partition id. An aggregate alone can't tell a backlog spread evenly over
+  a topic's partitions from one stuck partition holding all of it.
+- No backend change: `lag.fetch_consumer_lag` has always returned `partitions[]` (with
+  `partition`, `committed_offset`, `high_watermark`, `lag`) next to `total_lag`, and
+  `GET /api/flows/{flow_id}/nodes/{id}/consumer-lag` has always passed it through — the frontend's
+  `fetchLag` was dropping everything but `total_lag`, and now keeps the array in `lagByEdge`.
+  So the breakdown costs no extra broker round trips and rides the existing refresh paths
+  (initial load, auto-refresh interval, per-row and global "↻") unchanged.
+- The table renders only for a resolved lag, so a loading or errored edge — or a topic with no
+  partitions — shows just its summary row as before. It scrolls within a `maxHeight: 160`
+  container, matching `TopicStats`, so a high-partition-count topic doesn't push the panel's
+  later sections off screen.
+- The graph's own labels (`edgeLabel`) stay aggregate-only deliberately: their line count feeds
+  the canvas text measurement that sizes nodes for dagre, so per-partition lines there would
+  relayout the graph on every refresh tick.
+
 ## 0.4.0
 
 ### mtxpxzkt — Add tkati-dashboard: multi-flow dataflow graph viewer
