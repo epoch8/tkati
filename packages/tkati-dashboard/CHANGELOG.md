@@ -1,3 +1,17 @@
+# 0.4.1
+
+* The inspector panel's "Consumer lag" section now breaks each consumer group's lag down per
+  partition: the group's total still heads the row, with a `partition`/`lag` table beneath it,
+  so a backlog concentrated on one stuck partition is distinguishable from one spread evenly
+  across all of them. The data already came back from
+  `GET /api/flows/{flow_id}/nodes/{id}/consumer-lag` (which has always returned `partitions[]`
+  alongside `total_lag`) and was being discarded client-side, so this adds no broker traffic and
+  no backend change. The table appears once that edge's lag resolves — a loading or errored edge
+  still shows just its summary row — and scrolls within a fixed height so a topic with many
+  partitions doesn't crowd out the panel's other sections. Labels in the graph itself stay
+  aggregate-only: their line count drives dagre's node sizing, so per-partition lines there would
+  reshape the graph on every refresh.
+
 # 0.4.0
 
 * New package `tkati-dashboard`: a local web server that reads one or more serialized tkati

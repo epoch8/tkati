@@ -973,10 +973,61 @@
         );
       }
 
+      // The summary row's number is a sum across partitions, which hides the case that number
+      // is usually consulted for: one stuck partition holding the whole backlog while the rest
+      // are caught up. Built from the `partitions` /consumer-lag already returns alongside the
+      // total, so showing it costs no extra broker traffic. Rendered only for a resolved lag —
+      // while loading, on error, and for a topic with no partitions the summary row stands
+      // alone, exactly as before. Height-capped and scrollable like TopicStats, so a
+      // high-partition-count topic (or a node with several consuming edges) doesn't push the
+      // sections below it off the panel.
+      function PartitionLagTable({ lagState }) {
+        if (lagState?.status !== "ready") return null;
+        const partitions = lagState.partitions;
+        if (!partitions?.length) return null;
+        // The backend reports partitions in topic-metadata order (see _kafka_metadata.py's
+        // resolve_partitions), which isn't guaranteed sorted.
+        const sorted = [...partitions].sort((a, b) => a.partition - b.partition);
+
+        return h(
+          "div",
+          {
+            style: {
+              maxHeight: 160,
+              overflow: "auto",
+              border: "1px solid #e5e7eb",
+              borderRadius: 6,
+              marginTop: 4,
+            },
+          },
+          h(
+            "table",
+            null,
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                null,
+                ["partition", "lag"].map((c) => h("th", { key: c }, c)),
+              ),
+            ),
+            h(
+              "tbody",
+              null,
+              sorted.map((p) =>
+                h("tr", { key: p.partition }, h("td", null, p.partition), h("td", null, p.lag)),
+              ),
+            ),
+          ),
+        );
+      }
+
       // Every stream edge touching this node (either direction) that names a consumer group —
       // the same lag already shown on the edge in the graph, surfaced here too since a node's
-      // own edges aren't otherwise visible while it's the one filling the panel. Lag is also
-      // kept fresh automatically (App polls every edge on an interval — see fetchLag), but it's
+      // own edges aren't otherwise visible while it's the one filling the panel, and broken
+      // down per partition (PartitionLagTable) as the graph label can't be. Lag is also kept
+      // fresh automatically (App polls every edge on an interval — see fetchLag), but it's
       // time-sensitive enough that each row gets its own "↻" to pull a fresh value on demand
       // rather than waiting for the next tick.
       function ConsumerLagSection({ node, edges, lagByEdge, onRefresh }) {
@@ -985,43 +1036,55 @@
         );
         if (relevant.length === 0) return null;
 
+        // A block per edge rather than one table over all of them: each edge's per-partition
+        // table is its own table, which can't be nested inside a shared row's columns.
         return h(
           Section,
           { title: "Consumer lag" },
-          h(
-            "table",
-            null,
-            h(
-              "tbody",
-              null,
-              relevant.map((e) => {
-                const outgoing = e.from === node.id;
-                const other = outgoing ? e.to : e.from;
-                const label = `${outgoing ? "→" : "←"} ${other} (${e.consumer.group_id})`;
-                const lagState = lagByEdge[edgeKey(e)];
-                return h(
-                  "tr",
-                  { key: edgeKey(e) },
-                  h("td", { style: { color: "#6b7280", width: "40%" } }, label),
-                  h("td", null, lagStatusText(lagState)),
+          relevant.map((e, i) => {
+            const outgoing = e.from === node.id;
+            const other = outgoing ? e.to : e.from;
+            const label = `${outgoing ? "→" : "←"} ${other} (${e.consumer.group_id})`;
+            const lagState = lagByEdge[edgeKey(e)];
+            return h(
+              "div",
+              {
+                key: edgeKey(e),
+                // Separates one edge's block from the next; the last one leans on Section's
+                // own bottom margin instead of stacking a second gap on top of it.
+                style: { marginBottom: i === relevant.length - 1 ? 0 : 12 },
+              },
+              h(
+                "table",
+                null,
+                h(
+                  "tbody",
+                  null,
                   h(
-                    "td",
-                    { style: { width: 1 } },
+                    "tr",
+                    null,
+                    h("td", { style: { color: "#6b7280", width: "40%" } }, label),
+                    h("td", null, lagStatusText(lagState)),
                     h(
-                      "button",
-                      {
-                        onClick: () => onRefresh(e),
-                        disabled: lagState?.fetching,
-                        title: "Refresh lag",
-                        style: ICON_BUTTON_STYLE,
-                      },
-                      "↻",
+                      "td",
+                      { style: { width: 1 } },
+                      h(
+                        "button",
+                        {
+                          onClick: () => onRefresh(e),
+                          disabled: lagState?.fetching,
+                          title: "Refresh lag",
+                          style: ICON_BUTTON_STYLE,
+                        },
+                        "↻",
+                      ),
                     ),
                   ),
-                );
-              }),
-            ),
-          ),
+                ),
+              ),
+              h(PartitionLagTable, { lagState }),
+            );
+          }),
         );
       }
 
@@ -1253,7 +1316,12 @@
             .then((body) =>
               setLagByEdge((prev) => ({
                 ...prev,
-                [key]: { status: "ready", total_lag: body.total_lag, fetching: false },
+                [key]: {
+                  status: "ready",
+                  total_lag: body.total_lag,
+                  partitions: body.partitions,
+                  fetching: false,
+                },
               })),
             )
             .catch((err) =>
