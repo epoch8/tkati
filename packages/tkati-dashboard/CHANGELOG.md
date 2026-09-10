@@ -1,3 +1,12 @@
+# 0.4.2
+
+* The page now follows the OS/browser light/dark preference (`prefers-color-scheme`) instead of
+  always rendering light, and switches live when the preference changes — no reload, no graph
+  relayout, selection kept. Light mode looks as before. In dark mode the canvas, inspector panel,
+  menus, nodes, and React Flow's own chrome (edges, arrowheads, handles, grid, controls, minimap)
+  all switch to dark variants, as do native controls like the auto-refresh dropdown. There's no
+  in-page toggle.
+
 # 0.4.1
 
 * The inspector panel's "Consumer lag" section now breaks each consumer group's lag down per

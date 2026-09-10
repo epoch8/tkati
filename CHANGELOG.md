@@ -4,6 +4,28 @@ One entry per jj change, keyed by its change identifier (stable across
 `jj describe`/`jj squash`/rebases — use `jj log -r <change-id>` to look one
 up). Newest first.
 
+## 0.4.2
+
+### rwoxuqpw — Make the dashboard follow the light/dark color scheme
+
+- Every color in `packages/tkati-dashboard/src/tkati_dashboard/static/index.html` is now a CSS
+  custom property defined once in the `<style>` block as a `light-dark(<light>, <dark>)` pair,
+  with `color-scheme: light dark` on `:root` (plus the matching `<meta>`). Light values are the
+  previous hardcoded hexes, so light mode is unchanged. Inline styles in the React code reference
+  the tokens as `"var(--…)"` strings — including `GROUP_COLORS`/`FALLBACK_COLORS` and
+  `SELECTED_EDGE_COLOR` — so a scheme change repaints in CSS alone: no `matchMedia` listener, no
+  re-render, and `layout()`'s memoized dagre run isn't touched.
+- React Flow v11 has no dark mode of its own (`colorMode` is v12+), so its stylesheet's
+  hardcoded colors (edge paths, handles, controls, minimap, attribution) are overridden in the
+  same `<style>`, which loads after the esm.sh `<link>`. The minimap node fill, minimap mask, and
+  background dots are SVG presentation attributes in v11, so they're themed with CSS rules rather
+  than props: `MiniMap` switched from `nodeColor` to `nodeClassName` (`minimap-node--<group>`,
+  with `group` added to each node's `data`).
+- Arrowheads: `<ReactFlow defaultMarkerColor="var(--edge)">` for plain edges. v11 applies marker
+  colors through the polyline's inline `style`, where `var()` resolves. The highlighted edge's
+  marker uses `SELECTED_EDGE_COLOR` (`var(--accent)`) the same way.
+- `light-dark()` requires Chrome 123, Firefox 120, or Safari 17.5 (all 2024).
+
 ## 0.4.1
 
 ### ulyqzzps — Break consumer lag down per partition in the dashboard inspector
