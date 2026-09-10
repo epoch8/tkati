@@ -2,24 +2,109 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <title>tkati-dashboard</title>
     <link rel="stylesheet" href="https://esm.sh/reactflow@11/dist/style.css" />
     <style>
+      /* Every color on the page is one of these tokens, each a light-dark(light, dark) pair
+         resolved against the OS/browser's prefers-color-scheme (via color-scheme below) — so a
+         theme switch repaints in place, with no React re-render or graph relayout. Inline styles
+         in the script reference them as "var(--…)" strings. */
+      :root {
+        color-scheme: light dark;
+
+        --bg: light-dark(#fff, #111827);
+        --surface: light-dark(#fff, #1f2937);
+        --surface-muted: light-dark(#f9fafb, #172030);
+        --surface-hover: light-dark(#f4f4f4, #374151);
+        --border: light-dark(#e5e7eb, #374151);
+        --border-strong: light-dark(#d1d5db, #4b5563);
+        --text: light-dark(#000, #e5e7eb);
+        --text-muted: light-dark(#6b7280, #9ca3af);
+        --text-control: light-dark(#374151, #d1d5db);
+        --shadow-soft: light-dark(rgba(0, 0, 0, 0.04), rgba(0, 0, 0, 0.3));
+        --shadow: light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.4));
+        --shadow-strong: light-dark(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.5));
+
+        --accent: light-dark(#1d4ed8, #60a5fa);
+        --accent-glow: light-dark(rgba(29, 78, 216, 0.35), rgba(96, 165, 250, 0.5));
+        --accent-soft: light-dark(#eff6ff, rgba(59, 130, 246, 0.18));
+        --resize-active: light-dark(#3b82f6, #3b82f6);
+        --resize-hover: light-dark(#93c5fd, #1e40af);
+
+        --danger: light-dark(#b91c1c, #f87171);
+        --danger-row: light-dark(#fef2f2, rgba(248, 113, 113, 0.12));
+        --error-bg: light-dark(#fee2e2, #450a0a);
+        --error-text: light-dark(#7f1d1d, #fecaca);
+        --error-border: light-dark(#fca5a5, #991b1b);
+
+        --event-header-bg: light-dark(#eef2ff, rgba(99, 102, 241, 0.18));
+        --event-header-text: light-dark(#4338ca, #a5b4fc);
+
+        /* Node groups (see GROUP_COLORS): row-* is a deeper shade of the same hue as bg/border. */
+        --node-text: var(--text);
+        --node-source-bg: light-dark(#dbeafe, #172554);
+        --node-source-border: light-dark(#3b82f6, #3b82f6);
+        --node-source-row-bg: light-dark(#bfdbfe, #1e3a8a);
+        --node-source-row-text: light-dark(#1e40af, #bfdbfe);
+        --node-processing-bg: light-dark(#dcfce7, #052e16);
+        --node-processing-border: light-dark(#22c55e, #22c55e);
+        --node-processing-row-bg: light-dark(#bbf7d0, #14532d);
+        --node-processing-row-text: light-dark(#166534, #bbf7d0);
+        --node-other-bg: light-dark(#e5e7eb, #1f2937);
+        --node-other-border: light-dark(#6b7280, #6b7280);
+        --node-other-row-bg: light-dark(#d1d5db, #374151);
+        --node-other-row-text: light-dark(#1f2937, #e5e7eb);
+
+        /* React Flow's own chrome — light values are its v11 stylesheet defaults. */
+        --edge: light-dark(#b1b1b7, #6b7280);
+        --grid-dot: light-dark(#91919a, #374151);
+        --handle-bg: light-dark(#1a192b, #9ca3af);
+        --handle-border: light-dark(#fff, #111827);
+        --minimap-mask: light-dark(rgba(240, 240, 240, 0.6), rgba(17, 24, 39, 0.6));
+        --attribution-bg: light-dark(rgba(255, 255, 255, 0.5), rgba(17, 24, 39, 0.5));
+        --attribution-text: light-dark(#999, #6b7280);
+      }
+
       html, body, #root { height: 100%; margin: 0; }
-      body { font-family: system-ui, sans-serif; }
+      body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
       #error {
         position: absolute; top: 1rem; left: 1rem; right: 1rem;
-        padding: 0.75rem 1rem; background: #fee2e2; color: #7f1d1d;
-        border: 1px solid #fca5a5; border-radius: 6px; font-family: monospace;
+        padding: 0.75rem 1rem; background: var(--error-bg); color: var(--error-text);
+        border: 1px solid var(--error-border); border-radius: 6px; font-family: monospace;
         white-space: pre-wrap; display: none; z-index: 10;
       }
       table { border-collapse: collapse; width: 100%; font-size: 12px; }
       td, th {
-        text-align: left; padding: 3px 6px; border-bottom: 1px solid #e5e7eb;
+        text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border);
         vertical-align: top; word-break: break-word;
       }
-      th { color: #6b7280; font-weight: 600; position: sticky; top: 0; background: #fff; }
-      .resize-handle:hover { background: #93c5fd; }
+      th {
+        color: var(--text-muted); font-weight: 600; position: sticky; top: 0;
+        background: var(--surface);
+      }
+      .resize-handle:hover { background: var(--resize-hover); }
+
+      /* React Flow v11 has no dark mode of its own (colorMode is v12+), so its stylesheet's
+         hardcoded colors are overridden here — this <style> comes after its <link>, so equal
+         specificity wins. The minimap node fill, mask, and background dots are SVG presentation
+         attributes, which a stylesheet rule overrides but a var() inside the attribute can't
+         reliably replace, so those are themed here rather than via component props. */
+      .react-flow__edge-path { stroke: var(--edge); }
+      .react-flow__handle { background: var(--handle-bg); border-color: var(--handle-border); }
+      .react-flow__background circle { fill: var(--grid-dot); }
+      .react-flow__controls { box-shadow: 0 0 2px 1px var(--shadow); }
+      .react-flow__controls-button {
+        background: var(--surface); border-bottom-color: var(--border); fill: var(--text-control);
+      }
+      .react-flow__controls-button:hover { background: var(--surface-hover); }
+      .react-flow__minimap { background-color: var(--surface); }
+      .react-flow__minimap-mask { fill: var(--minimap-mask); }
+      .react-flow__minimap-node { fill: var(--node-other-bg); }
+      .react-flow__minimap-node.minimap-node--source-sink { fill: var(--node-source-bg); }
+      .react-flow__minimap-node.minimap-node--processing-node { fill: var(--node-processing-bg); }
+      .react-flow__attribution { background: var(--attribution-bg); }
+      .react-flow__attribution a { color: var(--attribution-text); }
     </style>
   </head>
   <body>
@@ -47,32 +132,33 @@
 
       // rowBackground/rowText are a deeper shade of the same hue as background/border — used by
       // a node's stacked consumer rows, so they read as part of the same node rather than an
-      // unrelated color.
+      // unrelated color. Each is a theme token (see the <style> block), so nodes follow the
+      // light/dark preference without this code knowing which one is active.
       const GROUP_COLORS = {
         "source-sink": {
-          background: "#dbeafe",
-          border: "#3b82f6",
-          rowBackground: "#bfdbfe",
-          rowText: "#1e40af",
+          background: "var(--node-source-bg)",
+          border: "var(--node-source-border)",
+          rowBackground: "var(--node-source-row-bg)",
+          rowText: "var(--node-source-row-text)",
         },
         "processing-node": {
-          background: "#dcfce7",
-          border: "#22c55e",
-          rowBackground: "#bbf7d0",
-          rowText: "#166534",
+          background: "var(--node-processing-bg)",
+          border: "var(--node-processing-border)",
+          rowBackground: "var(--node-processing-row-bg)",
+          rowText: "var(--node-processing-row-text)",
         },
       };
       const FALLBACK_COLORS = {
-        background: "#e5e7eb",
-        border: "#6b7280",
-        rowBackground: "#d1d5db",
-        rowText: "#1f2937",
+        background: "var(--node-other-bg)",
+        border: "var(--node-other-border)",
+        rowBackground: "var(--node-other-row-bg)",
+        rowText: "var(--node-other-row-text)",
       };
 
-      // Matches the selected node's own glow (`rgba(29, 78, 216, 0.35)` on StackedNode) — used
-      // to highlight every edge touching the selected node, so "this is connected to what's
+      // Matches the selected node's own glow (`--accent-glow` on StackedNode) — used to
+      // highlight every edge touching the selected node, so "this is connected to what's
       // selected" reads as one consistent color across the graph.
-      const SELECTED_EDGE_COLOR = "#1d4ed8";
+      const SELECTED_EDGE_COLOR = "var(--accent)";
 
       // Type-specific connection details worth surfacing on the node itself.
       function nodeLabel(n) {
@@ -197,8 +283,8 @@
                   style: {
                     position: "absolute",
                     transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
-                    background: "#fff",
-                    border: "1px solid #e5e7eb",
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
                     borderRadius: 4,
                     padding: "2px 6px",
                     fontSize: 10,
@@ -299,6 +385,8 @@
               rows: info.rows,
               headerHeight: info.headerBox.height,
               colors,
+              // Picks the MiniMap's fill via a CSS class (see nodeClassName / the <style> block).
+              group: n.group,
               sourcePosition: Position.Right,
               targetPosition: Position.Left,
             },
@@ -335,7 +423,7 @@
               position: "relative",
               borderRadius: 8,
               overflow: "hidden",
-              boxShadow: isSelected ? "0 0 0 3px rgba(29, 78, 216, 0.35)" : undefined,
+              boxShadow: isSelected ? "0 0 0 3px var(--accent-glow)" : undefined,
               cursor: "pointer",
             },
           },
@@ -363,6 +451,7 @@
                 whiteSpace: "pre-line",
                 lineHeight: NODE_LINE_HEIGHT,
                 fontSize: NODE_FONT_SIZE,
+                color: "var(--node-text)",
               },
             },
             label,
@@ -416,7 +505,7 @@
                 userSelect: "none",
                 fontSize: 11,
                 fontWeight: 700,
-                color: "#6b7280",
+                color: "var(--text-muted)",
                 textTransform: "uppercase",
                 marginBottom: 6,
                 letterSpacing: 0.4,
@@ -493,7 +582,7 @@
               h(
                 "tr",
                 { key: k },
-                h("td", { style: { color: "#6b7280", width: "40%" } }, k),
+                h("td", { style: { color: "var(--text-muted)", width: "40%" } }, k),
                 h("td", null, formatCell(v)),
               ),
             ),
@@ -521,19 +610,19 @@
               "div",
               {
                 key,
-                style: { border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" },
+                style: { border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" },
               },
               h(
                 "div",
                 {
                   style: {
                     padding: "4px 8px",
-                    background: "#f9fafb",
-                    color: "#6b7280",
+                    background: "var(--surface-muted)",
+                    color: "var(--text-muted)",
                     fontSize: 11,
                     fontWeight: 600,
                     fontFamily: "monospace",
-                    borderBottom: "1px solid #e5e7eb",
+                    borderBottom: "1px solid var(--border)",
                   },
                 },
                 key,
@@ -581,13 +670,13 @@
       }
 
       const BUTTON_STYLE = {
-        border: "1px solid #d1d5db",
-        background: "#fff",
+        border: "1px solid var(--border-strong)",
+        background: "var(--surface)",
         borderRadius: 6,
         padding: "4px 10px",
         fontSize: 12,
         cursor: "pointer",
-        color: "#374151",
+        color: "var(--text-control)",
       };
 
       // A bare icon-only button for a table cell — e.g. a per-row "refresh this one" action —
@@ -597,7 +686,7 @@
         background: "transparent",
         cursor: "pointer",
         fontSize: 12,
-        color: "#6b7280",
+        color: "var(--text-muted)",
         padding: "0 4px",
         lineHeight: 1,
       };
@@ -632,8 +721,7 @@
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
-                background: "#fff",
-                boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+                boxShadow: "0 1px 4px var(--shadow)",
               },
             },
             "☰",
@@ -648,10 +736,10 @@
                   top: "calc(100% + 4px)",
                   left: 0,
                   minWidth: 180,
-                  background: "#fff",
-                  border: "1px solid #e5e7eb",
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
                   borderRadius: 6,
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+                  boxShadow: "0 4px 12px var(--shadow-strong)",
                   overflow: "hidden",
                   zIndex: 5,
                 },
@@ -669,8 +757,8 @@
                       padding: "6px 12px",
                       fontSize: 12,
                       cursor: "pointer",
-                      background: f.id === selectedFlowId ? "#eff6ff" : "#fff",
-                      color: f.id === selectedFlowId ? "#1d4ed8" : "#374151",
+                      background: f.id === selectedFlowId ? "var(--accent-soft)" : "var(--surface)",
+                      color: f.id === selectedFlowId ? "var(--accent)" : "var(--text-control)",
                     },
                   },
                   f.name,
@@ -702,10 +790,10 @@
             style: {
               display: "flex",
               alignItems: "center",
-              background: "#fff",
+              background: "var(--surface)",
               borderRadius: 6,
-              border: "1px solid #e5e7eb",
-              boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+              border: "1px solid var(--border)",
+              boxShadow: "0 1px 4px var(--shadow)",
             },
           },
           h(
@@ -713,7 +801,7 @@
             {
               onClick: onRefreshNow,
               title: "Refresh consumer lag now",
-              style: { ...ICON_BUTTON_STYLE, padding: "4px 8px", borderRight: "1px solid #e5e7eb" },
+              style: { ...ICON_BUTTON_STYLE, padding: "4px 8px", borderRight: "1px solid var(--border)" },
             },
             "↻",
           ),
@@ -727,7 +815,7 @@
                 border: "none",
                 background: "transparent",
                 fontSize: 12,
-                color: "#374151",
+                color: "var(--text-control)",
                 padding: "4px 6px",
                 cursor: "pointer",
               },
@@ -787,7 +875,7 @@
             return h("button", { onClick: load, style: BUTTON_STYLE }, "Load latest events");
           }
           if (phase === "loading") {
-            return h("div", { style: { color: "#6b7280" } }, "Loading…");
+            return h("div", { style: { color: "var(--text-muted)" } }, "Loading…");
           }
           return h(
             "div",
@@ -796,7 +884,7 @@
               "div",
               {
                 style: {
-                  color: "#b91c1c",
+                  color: "var(--danger)",
                   fontFamily: "monospace",
                   whiteSpace: "pre-wrap",
                   marginBottom: 8,
@@ -815,7 +903,7 @@
             "div",
             { style: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 8 } },
             phase === "error" &&
-              h("span", { style: { color: "#b91c1c", fontSize: 11 } }, `Refresh failed: ${errorMessage}`),
+              h("span", { style: { color: "var(--danger)", fontSize: 11 } }, `Refresh failed: ${errorMessage}`),
             h(
               "button",
               { onClick: load, disabled: phase === "loading", style: BUTTON_STYLE },
@@ -823,7 +911,7 @@
             ),
           ),
           events.length === 0
-            ? h("div", { style: { color: "#6b7280" } }, "No recent events found.")
+            ? h("div", { style: { color: "var(--text-muted)" } }, "No recent events found.")
             : h(
                 "div",
                 { style: { display: "flex", flexDirection: "column", gap: 8 } },
@@ -832,7 +920,7 @@
                     "div",
                     {
                       key: i,
-                      style: { border: "1px solid #e5e7eb", borderRadius: 6, overflow: "hidden" },
+                      style: { border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" },
                     },
                     h(
                       "div",
@@ -842,8 +930,8 @@
                           flexWrap: "wrap",
                           gap: 8,
                           padding: "4px 8px",
-                          background: "#eef2ff",
-                          color: "#4338ca",
+                          background: "var(--event-header-bg)",
+                          color: "var(--event-header-text)",
                           fontSize: 10,
                           fontFamily: "monospace",
                         },
@@ -858,7 +946,7 @@
                         style: {
                           margin: 0,
                           padding: 8,
-                          background: "#f9fafb",
+                          background: "var(--surface-muted)",
                           fontSize: 11,
                           lineHeight: 1.5,
                           whiteSpace: "pre-wrap",
@@ -895,12 +983,12 @@
         }, [flowId, nodeId]);
 
         if (state.status === "loading") {
-          return h("div", { style: { color: "#6b7280" } }, "Loading…");
+          return h("div", { style: { color: "var(--text-muted)" } }, "Loading…");
         }
         if (state.status === "error") {
           return h(
             "div",
-            { style: { color: "#b91c1c", fontFamily: "monospace", whiteSpace: "pre-wrap" } },
+            { style: { color: "var(--danger)", fontFamily: "monospace", whiteSpace: "pre-wrap" } },
             state.message,
           );
         }
@@ -925,7 +1013,7 @@
           underReplicated &&
             h(
               "div",
-              { style: { color: "#b91c1c", fontSize: 12, marginBottom: 8 } },
+              { style: { color: "var(--danger)", fontSize: 12, marginBottom: 8 } },
               "⚠ under-replicated partition(s)",
             ),
           h(
@@ -934,7 +1022,7 @@
               style: {
                 maxHeight: 160,
                 overflow: "auto",
-                border: "1px solid #e5e7eb",
+                border: "1px solid var(--border)",
                 borderRadius: 6,
                 marginBottom: 12,
               },
@@ -957,7 +1045,7 @@
                 partitions.map((p) =>
                   h(
                     "tr",
-                    { key: p.partition, style: p.under_replicated ? { background: "#fef2f2" } : undefined },
+                    { key: p.partition, style: p.under_replicated ? { background: "var(--danger-row)" } : undefined },
                     h("td", null, p.partition),
                     h("td", null, p.leader),
                     h("td", null, p.replicas.join(", ")),
@@ -969,7 +1057,7 @@
           ),
           configRows.length > 0 && h(KVTable, { rows: configRows }),
           configRows.some(([name]) => name.endsWith(" *")) &&
-            h("div", { style: { fontSize: 11, color: "#6b7280", marginTop: 4 } }, "* differs from broker default"),
+            h("div", { style: { fontSize: 11, color: "var(--text-muted)", marginTop: 4 } }, "* differs from broker default"),
         );
       }
 
@@ -995,7 +1083,7 @@
             style: {
               maxHeight: 160,
               overflow: "auto",
-              border: "1px solid #e5e7eb",
+              border: "1px solid var(--border)",
               borderRadius: 6,
               marginTop: 4,
             },
@@ -1063,7 +1151,7 @@
                   h(
                     "tr",
                     null,
-                    h("td", { style: { color: "#6b7280", width: "40%" } }, label),
+                    h("td", { style: { color: "var(--text-muted)", width: "40%" } }, label),
                     h("td", null, lagStatusText(lagState)),
                     h(
                       "td",
@@ -1097,7 +1185,7 @@
           "div",
           null,
           h("div", { style: { fontSize: 15, fontWeight: 700, marginBottom: 4 } }, node.label),
-          h("div", { style: { color: "#6b7280", fontSize: 12, marginBottom: 16 } }, node.type),
+          h("div", { style: { color: "var(--text-muted)", fontSize: 12, marginBottom: 16 } }, node.type),
           connectionRows.length > 0 &&
             h(Section, { title: "Connection" }, h(KVTable, { rows: connectionRows })),
           configRows.length > 0 &&
@@ -1181,9 +1269,9 @@
               width,
               flexShrink: 0,
               display: "flex",
-              background: "#fff",
-              borderLeft: "1px solid #e5e7eb",
-              boxShadow: "-2px 0 8px rgba(0,0,0,0.04)",
+              background: "var(--surface)",
+              borderLeft: "1px solid var(--border)",
+              boxShadow: "-2px 0 8px var(--shadow-soft)",
             },
           },
           h("div", {
@@ -1193,7 +1281,7 @@
               width: 6,
               flexShrink: 0,
               cursor: "col-resize",
-              background: resizing ? "#3b82f6" : "transparent",
+              background: resizing ? "var(--resize-active)" : "transparent",
             },
           }),
           h(
@@ -1203,7 +1291,7 @@
               ? h(NodeDetails, { flowId, node, edges, lagByEdge, onRefreshLag })
               : h(
                   "div",
-                  { style: { color: "#6b7280", fontSize: 13, marginTop: 24, textAlign: "center" } },
+                  { style: { color: "var(--text-muted)", fontSize: 13, marginTop: 24, textAlign: "center" } },
                   "Select a node to inspect it",
                 ),
           ),
@@ -1433,12 +1521,17 @@
                 edgeTypes: EDGE_TYPES,
                 nodeTypes: NODE_TYPES,
                 fitView: true,
+                // Applied through each arrowhead's inline style, where var() resolves — so an
+                // unhighlighted edge's arrow follows the theme's edge color like its line does.
+                defaultMarkerColor: "var(--edge)",
                 onNodeClick: (_event, node) => setSelectedNodeId(node.id),
                 onPaneClick: () => setSelectedNodeId(null),
               },
               h(Background, null),
               h(Controls, null),
-              h(MiniMap, { nodeColor: (n) => n.data?.colors?.background ?? FALLBACK_COLORS.background }),
+              // Filled by the group's --node-*-bg token via these classes (see the <style>
+              // block) rather than nodeColor, which lands in an SVG attribute var() can't use.
+              h(MiniMap, { nodeClassName: (n) => `minimap-node--${n.data?.group ?? "other"}` }),
               flows.length > 1 &&
                 h(
                   Panel,

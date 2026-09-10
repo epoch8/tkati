@@ -34,6 +34,10 @@ easy to trace at a glance — with its full connection/config/schema details, pl
 edge touching it and that edge's live consumer lag; drag the panel's left edge to
 resize it (the width is remembered across reloads).
 
+The page follows your OS/browser light/dark preference (`prefers-color-scheme`) and switches live
+when it changes — no reload, and the graph keeps its layout and selection. There's no in-page
+toggle; the browser's setting (or DevTools' "Emulate CSS prefers-color-scheme") decides.
+
 ### Try it with the bundled example
 
 [`examples/simple-pipeline`](examples/simple-pipeline) is the smallest interesting dataflow: two
