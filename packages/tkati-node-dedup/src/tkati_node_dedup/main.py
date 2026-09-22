@@ -1,23 +1,34 @@
 import pyarrow as pa
 from loguru import logger
-from tkati_core import Consumer, Producer, build_consumer, build_producer
+from tkati_core import Consumer, LoopStats, Producer, build_consumer, build_producer
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
 
+# Reported in this order, not sorted by duration: a stable field order is what
+# makes two consecutive log lines comparable at a glance. Lives here rather
+# than in tkati-core because these five names are this node's pipeline —
+# tkati-node-el, for instance, has no lookup or write phase.
+_PHASES = ("read", "lookup", "produce", "write", "commit")
+
+
+def _new_stats() -> LoopStats:
+    return LoopStats(name="dedup", phases=_PHASES)
+
 
 def _dedupe_batch(
-    batch: pa.Table, field: str, store: BucketedDedupStore
+    batch: pa.Table, field_name: str, store: BucketedDedupStore
 ) -> tuple[pa.Table, list[bytes]]:
     """Filter out rows whose dedup key was already seen (in-batch or in the store).
 
-    Returns (filtered_batch, keys_to_mark_seen). Null values in `field` always
-    pass through and are never added to the store — we can't dedup on nothing.
+    Returns (filtered_batch, keys_to_mark_seen). Null values in `field_name`
+    always pass through and are never added to the store — we can't dedup on
+    nothing.
 
     Encoding and the store lookup are both batched (one pass over the column,
     one RocksDB round trip per open bucket) rather than done per row.
     """
-    keys = store.encode_keys(batch.column(field))
+    keys = store.encode_keys(batch.column(field_name))
     keep_mask, new_keys = store.filter_duplicates(keys)
     filtered = batch.filter(keep_mask)
     return filtered, new_keys
@@ -28,55 +39,81 @@ def run_one_iteration(
     producer: Producer,
     store: BucketedDedupStore,
     settings: AppSettings,
+    stats: LoopStats | None = None,
 ) -> None:
+    stats = stats if stats is not None else _new_stats()
+
     # Runs first, every iteration (even if no batch arrives), and can never
     # raise. Buckets must be fresh *before* the dedupe check below runs —
     # doing this only after commit would leave a just-expired bucket open and
     # checked against for one extra iteration, and an idle node (no messages,
     # read_arrow returns None below) would never clean up at all.
-    try:
-        store.cleanup_expired()
-    except Exception:
-        logger.exception("dedup store cleanup failed; will retry next iteration")
+    # Timed into the "commit" bucket rather than given a phase of its own:
+    # it is ~0 except once an hour when a bucket is destroyed, so it shows
+    # up as an occasional commit spike instead of a permanent near-zero field.
+    with stats.phase("commit"):
+        try:
+            store.cleanup_expired()
+        except Exception:
+            logger.exception("dedup store cleanup failed; will retry next iteration")
 
-    batch = consumer.read_arrow(
-        num_messages=settings.input.consumer.batch_size,
-        timeout=settings.input.consumer.batch_timeout_sec,
-    )
+    with stats.phase("read"):
+        batch = consumer.read_arrow(
+            num_messages=settings.input.consumer.batch_size,
+            timeout=settings.input.consumer.batch_timeout_sec,
+        )
+    stats.iterations += 1
     if batch is None:
+        stats.starved_iterations += 1
         return
 
-    field = settings.dedup.field
-    if field not in batch.column_names:
+    # A short batch means the node drained the topic and waited out the batch
+    # timeout — it wasn't CPU-bound, so its timings say nothing about whether
+    # this node can keep up.
+    if len(batch) < settings.input.consumer.batch_size:
+        stats.starved_iterations += 1
+    stats.rows_in += len(batch)
+
+    field_name = settings.dedup.field
+    if field_name not in batch.column_names:
         logger.warning(
-            f"Dedup field '{field}' missing from batch schema; passing batch through unfiltered"
+            f"Dedup field '{field_name}' missing from batch schema; "
+            "passing batch through unfiltered"
         )
         filtered, new_keys = batch, []
     else:
-        filtered, new_keys = _dedupe_batch(batch, field, store)
+        # Includes the batch.filter() call, which is Arrow work rather than a
+        # store lookup — cheap enough not to be worth a sixth phase.
+        with stats.phase("lookup"):
+            filtered, new_keys = _dedupe_batch(batch, field_name, store)
 
     dropped = len(batch) - len(filtered)
+    stats.rows_out += len(filtered)
 
     if len(filtered) > 0:
-        producer.produce_arrow(filtered)
+        with stats.phase("produce"):
+            producer.produce_arrow(filtered)
         # Block until actually delivered before marking anything "seen" or
         # committing. Required here even though tkati-node-el's loop skips it:
         # KafkaProducer.produce_arrow() only enqueues (non-blocking), and
         # marking a key seen before it's durably delivered would risk losing
         # the event permanently on a crash. ClickhouseProducer.flush() is a
         # no-op since its inserts are already synchronous.
-        producer.flush()
+        with stats.phase("produce"):
+            producer.flush()
 
     # Only after a confirmed-successful produce: mark these keys seen.
-    store.add_many(new_keys)
+    with stats.phase("write"):
+        store.add_many(new_keys)
 
     # Only after mark-seen: commit. If we crash before this line, the batch is
     # re-read at restart; those keys are already in the store, so re-processing
     # it drops what was already produced — a harmless duplicate at worst, never
     # a lost event.
-    consumer.commit()
+    with stats.phase("commit"):
+        consumer.commit()
 
-    logger.info(
+    logger.debug(
         f"Batch of {len(batch)} rows: produced {len(filtered)}, "
         f"deduped {dropped} ({len(new_keys)} newly marked seen)"
     )
@@ -97,11 +134,14 @@ def main() -> None:
         root_dir=settings.dedup.store_dir,
         window_hours=settings.dedup.window_hours,
         bucket_hours=settings.dedup.bucket_hours,
+        tuning=settings.dedup.rocksdb,
     )
 
+    stats = _new_stats()
     try:
         while True:
-            run_one_iteration(consumer, producer, store, settings)
+            run_one_iteration(consumer, producer, store, settings, stats)
+            stats.report_if_due()
     finally:
         consumer.close()
         if dlq_producer is not None:

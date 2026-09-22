@@ -4,9 +4,78 @@ One entry per jj change, keyed by its change identifier (stable across
 `jj describe`/`jj squash`/rebases — use `jj log -r <change-id>` to look one
 up). Newest first.
 
+Each heading ends with the components the change actually touched, so `grep
+'^###' CHANGELOG.md` shows what moved and where. A component is a workspace
+package, or `repo` for changes to shared, root-level things (docs, CLAUDE.md, CI
+beyond a package's own generated workflows). Because every package's
+`pyproject.toml` is bumped on every release, a version bump alone does **not**
+make a package a component of the change — list only packages whose code, tests,
+config or docs changed.
+
+## 0.4.3
+
+### rsmnyupm — Speed up the dedup store's RocksDB path [tkati-core, tkati-node-dedup]
+
+- `BucketedDedupStore` ran entirely on RocksDB's defaults: **no bloom filter at
+  all** (`filter_policy` is nullptr unless you configure one), an 8MB block
+  cache, no memtable bloom, and Snappy compression. Since duplicates are rare in
+  practice, nearly every lookup is a miss — the exact case a bloom filter exists
+  to make free. Measured on a 5M-key bucket at a 2% hit rate, all in
+  `benchmarks/bench_store.py`: **4.32 → 0.80 µs/key, a 5.4x speedup**, with
+  data-block reads down ~40x. Writes cost ~10% more (1.63 → 1.80 µs/key).
+- **`BlockBasedOptions.set_bloom_filter()` is broken in rocksdict 0.3.29** (the
+  current release) and the store deliberately does not use it. It writes the
+  filter into the SSTs — the on-disk size grows by exactly bits x keys — but the
+  read path never consults it: `rocksdb.bloom.filter.useful` stays at 0 and the
+  data-block read count is identical with the filter on and off. Verified for
+  `raw_mode` on and off, block-based and full filters, format versions 5 and 6,
+  and `get`/batched multi-get/`key_may_exist` alike. The working path is
+  `Options.optimize_for_point_lookup()`, which reaches RocksDB's own helper;
+  note that calling `set_block_based_table_factory()` afterwards silently undoes
+  it. The helper fixes bits-per-key at 10, so there is no knob for it.
+- Memtable whole-key bloom at ratio 0.02. Only measurable against a *warm*
+  memtable (3.23 → 0.85 µs/key); higher ratios are worse, not better, because a
+  larger bloom probes with worse cache locality.
+- Compression defaults to `none`: Snappy measured 2x slower on reads (2.84 vs
+  1.37 µs/key) to save ~30% disk on keys that are high-entropy and barely
+  compress, in a store that is deleted within the hour.
+- WAL disabled for dedup writes, worth ~5% on the write path. The dedup store is
+  now explicitly not crash-durable: a hard kill loses up to one write buffer of
+  state, which forwards some duplicates but can never drop an event. Kafka's
+  committed offset, not RocksDB, is the durability boundary. README updated;
+  `disable_wal = false` restores the old behavior.
+- Two changes that look obviously right for this workload measured **worse** and
+  are documented in `RocksDBSettings` so they don't get "fixed": a 256MB write
+  buffer (25% worse writes, 20% worse reads than 64MB), and disabling
+  auto-compaction (bought nothing on writes, since compaction runs on background
+  threads, while costing 2.2x on reads as L0 files accumulated).
+- New `[dedup.rocksdb]` settings block, all of it performance-only —
+  `test_tuning_variants_do_not_change_semantics` parametrizes the store across
+  every knob and asserts the answers never change.
+- The node now logs where its wall clock went every 10 seconds — `read`,
+  `lookup`, `produce`, `write` and `commit` as seconds and percent of the
+  interval — plus a `starved` count for iterations that were waiting on the
+  broker rather than CPU-bound. Percentages are of the interval rather than of
+  each other, so they don't sum to 100 and unaccounted time stays visible. The
+  former per-batch `INFO` line is now `DEBUG`; its counts are in the interval
+  line. The store itself carries no instrumentation: `bench_store.py` brackets
+  the calls it wants to time, so nothing measures the production hot path.
+- That instrumentation lives in `tkati-core` as `LoopStats`, not in this node:
+  every node's loop has the same shape, and `tkati-node-el`'s differs only in
+  having no lookup or write phase. Phase names, log prefix and cadence are
+  constructor arguments; the dedup node supplies its own five phases. As a
+  consequence of generalizing, the in/out delta is now labelled `dropped`
+  rather than `deduped`, since not every node that filters is deduplicating.
+- Fixed: a bucket that failed to open at startup was never in `_dbs`, so
+  `cleanup_expired` could not reach it and it sat on disk until the next
+  restart. It now sweeps the filesystem too.
+- `encode_keys` casts to `pa.binary()` instead of `.encode()`-ing each row (~25%
+  off that step). The cast stays two-step because pyarrow has no direct
+  int64->binary cast and the dedup field is routinely an integer column.
+
 ## 0.4.2
 
-### rwoxuqpw — Make the dashboard follow the light/dark color scheme
+### rwoxuqpw — Make the dashboard follow the light/dark color scheme [tkati-dashboard]
 
 - Every color in `packages/tkati-dashboard/src/tkati_dashboard/static/index.html` is now a CSS
   custom property defined once in the `<style>` block as a `light-dark(<light>, <dark>)` pair,
@@ -28,7 +97,7 @@ up). Newest first.
 
 ## 0.4.1
 
-### ulyqzzps — Break consumer lag down per partition in the dashboard inspector
+### ulyqzzps — Break consumer lag down per partition in the dashboard inspector [tkati-dashboard]
 
 - The inspector panel's "Consumer lag" section (`ConsumerLagSection` in
   `packages/tkati-dashboard/src/tkati_dashboard/static/index.html`) renders each consuming
@@ -52,7 +121,7 @@ up). Newest first.
 
 ## 0.4.0
 
-### mtxpxzkt — Add tkati-dashboard: multi-flow dataflow graph viewer
+### mtxpxzkt — Add tkati-dashboard: multi-flow dataflow graph viewer [tkati-dashboard, repo]
 
 - New package `tkati-dashboard`: a FastAPI server (`app.py`) plus a single-file React
   18/ReactFlow v11 frontend (`static/index.html`, no build step, ESM imports from esm.sh) that
@@ -95,7 +164,7 @@ up). Newest first.
 
 ## 0.3.1
 
-### xwxxmoms — Preserve timestamp[ms] through Kafka JSON round trip
+### xwxxmoms — Preserve timestamp[ms] through Kafka JSON round trip [tkati-core, tkati-node-dedup, tkati-node-el]
 
 - Fixed `KafkaProducer`'s JSON format silently turning `timestamp[ms]`
   columns into ISO-8601 strings instead of the original epoch-ms int,
@@ -116,7 +185,7 @@ up). Newest first.
 Upgrading from v0.2.0? See [MIGRATION.md](MIGRATION.md) for the full guide
 (settings restructuring, renamed parameters, and the two new node packages).
 
-### twqstomm — Add tkati-node-dedup: Kafka-to-Kafka streaming dedup node
+### twqstomm — Add tkati-node-dedup: Kafka-to-Kafka streaming dedup node [tkati-node-dedup]
 
 - New package `tkati-node-dedup`: reads a Kafka topic and republishes it
   deduplicated by a configurable field over a rolling processing-time window

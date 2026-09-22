@@ -59,6 +59,56 @@ interfaces a node's input and output are built against. `KafkaConsumer` is the o
 implement `Producer`. This is what lets a generic node pick its input/output kind
 from config instead of hardcoding a concrete class.
 
+### `LoopStats` — where a node's wall clock went
+
+`tkati_core.stats.LoopStats` accumulates per-phase timings across a node's loop
+and logs a breakdown on an interval (every 10s by default). The phase names,
+the log prefix and the cadence are all constructor arguments, because nodes
+have different pipelines — a dedup node has lookup and write phases an
+extract/load node does not.
+
+```python
+from tkati_core import LoopStats
+
+PHASES = ("read", "produce", "commit")
+stats = LoopStats(name="my-node", phases=PHASES)
+
+while True:
+    with stats.phase("read"):
+        batch = consumer.read_arrow(...)
+    stats.iterations += 1
+    if batch is None:
+        stats.starved_iterations += 1
+        continue
+    stats.rows_in += len(batch)
+
+    with stats.phase("produce"):
+        producer.produce_arrow(batch)
+    stats.rows_out += len(batch)
+
+    with stats.phase("commit"):
+        consumer.commit()
+
+    stats.report_if_due()
+```
+
+```
+my-node perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
+my-node perf: read=4.91s (49%) produce=3.96s (39%) commit=0.38s (4%)
+```
+
+`phases` is an explicit ordered tuple, not derived from which phases happened
+to fire: a phase that doesn't run during an interval's first iteration would
+otherwise shift the column order between reports, and a stable order is what
+makes two consecutive lines comparable.
+
+Percentages are of the interval rather than of each other, so they do **not**
+sum to 100 — the shortfall is time in none of the named phases, which keeps
+unaccounted work visible. Track `starved_iterations` for iterations that were
+blocked waiting on input: a read phase usually blocks until the batch fills or
+the timeout expires, so on an under-fed node it approaches 100% and nothing
+else on the line means anything.
+
 ### `tkati_core.settings` — generic node settings aliases
 
 `tkati_core.settings` defines `InputSettings`/`OutputSettings` (discriminated unions

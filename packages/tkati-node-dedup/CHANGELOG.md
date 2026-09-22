@@ -1,3 +1,31 @@
+# 0.4.3
+
+* Tuned the embedded RocksDB store for its actual workload — lookups that
+  almost always miss, because duplicates are rare. The store previously ran on
+  RocksDB's defaults, which include **no bloom filter at all**. Measured on a
+  5M-key bucket at a 2% hit rate: **4.32 → 0.80 µs/key on lookups, a 5.4x
+  speedup**; writes cost ~10% more
+* New optional `[dedup.rocksdb]` settings block (bloom filter, memtable bloom,
+  block cache, write buffer, compression, WAL). Every knob is
+  performance-only and tested not to change any answer
+* **The dedup store is no longer crash-durable.** The WAL is disabled by
+  default, so a hard kill loses up to one write buffer of dedup state — that
+  forwards some duplicates, and can never drop an event. A graceful shutdown
+  loses nothing. Set `dedup.rocksdb.disable_wal = false` to revert
+* Note for maintainers: `BlockBasedOptions.set_bloom_filter()` does not work
+  in rocksdict 0.3.29 — it writes the filter but the read path ignores it.
+  The store uses `Options.optimize_for_point_lookup()` instead. See the
+  README and `BucketedDedupStore._build_options`
+* The node now logs where its wall clock went every 10 seconds — `read`,
+  `lookup`, `produce`, `write`, `commit` as seconds and percent of the
+  interval — instead of a count per batch (that line moved to `DEBUG`). The
+  machinery is `LoopStats` from `tkati-core`; this node supplies its own phase
+  names. The in/out delta is labelled `dropped` rather than `deduped`, since
+  `LoopStats` is shared with nodes that don't deduplicate. See the README
+* Added `benchmarks/bench_store.py` for A/B testing store tuning
+* Fixed: a bucket that failed to open at startup was never cleaned up and sat
+  on disk until the next restart
+
 # 0.3.0
 
 * Initial implementation of `tkati-node-dedup`: a Kafka-to-Kafka node that
