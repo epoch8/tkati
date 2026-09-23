@@ -28,9 +28,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # manylinux_2_28 has the perl and make that the vendored OpenSSL and
-      # librdkafka builds need. abi3: one wheel per architecture covers every
-      # supported Python.
+      # manylinux_2_28 has the make and cc the vendored librdkafka build needs.
+      # Vendored OpenSSL would also need `before-script-linux: dnf install -y
+      # perl-IPC-Cmd`; see the rdkafka line in Cargo.toml. abi3: one wheel per
+      # architecture covers every supported Python.
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

@@ -18,7 +18,14 @@ chrono = { version = "0.4", default-features = false }
 pyo3 = { version = "0.29", features = ["abi3-py313"] }
 pyo3-arrow = "0.19"
 rayon = "1.12"
-rdkafka = { version = "0.39", default-features = false, features = ["libz-static", "ssl-vendored", "zstd"] }
+# No TLS for now: `ssl-vendored` builds OpenSSL from source, whose Configure
+# needs Perl's IPC::Cmd, missing from the manylinux_2_28 image the wheels build
+# in. Nothing in tkati's settings configures TLS, but confluent-kafka supported
+# it through `kafka_config` (`security.protocol = "SSL"` / `"SASL_SSL"`).
+# Re-enable by adding "ssl-vendored" below and, in
+# .github/workflow-templates/publish.template.yml's maturin-action step,
+# `before-script-linux: dnf install -y perl-IPC-Cmd`.
+rdkafka = { version = "0.39", default-features = false, features = ["libz-static", "zstd"] }
 serde_json = "1"
 
 [profile.release]

@@ -22,7 +22,7 @@ config or docs changed.
   - Consuming parsed a Python-assembled `BytesIO` as a single block, so on
     one core.
 - `tkati_core._native` is a pyo3 extension. It owns the Kafka client (rdkafka,
-  with librdkafka, OpenSSL and zstd statically linked) and does the heavy work
+  with librdkafka and zstd statically linked, built without TLS for now) and does the heavy work
   with the GIL released. `KafkaConsumer`/`KafkaProducer` keep their Python
   interface as thin wrappers.
 - Encoding: arrow-json per column, rayon over row ranges, one payload per row.

@@ -32,7 +32,7 @@ Run `uv sync --all-packages` afterward to update `uv.lock`. To check nothing was
 
 `tkati-core` is built with **maturin**: `packages/tkati-core/src/` is a pyo3 crate compiled to `tkati_core._native` (librdkafka statically linked, JSON encoding parallelised with rayon). `KafkaConsumer`/`KafkaProducer` are thin Python wrappers over it.
 
-- `uv sync --all-packages` rebuilds the extension whenever `src/**/*.rs`, `Cargo.toml` or `Cargo.lock` change (see `[tool.uv] cache-keys`). The first build compiles librdkafka and OpenSSL from source and takes a couple of minutes.
+- `uv sync --all-packages` rebuilds the extension whenever `src/**/*.rs`, `Cargo.toml` or `Cargo.lock` change (see `[tool.uv] cache-keys`). The first build compiles librdkafka from source and takes a couple of minutes.
 - Rust checks, run in `packages/tkati-core`: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. CI runs them in `test-tkati-core.yml`.
 - `tkati_core/_native.pyi` is the hand-written stub `ty` checks against. Update it with any change to the native API.
 - Codec performance: `uv run python packages/tkati-core/benchmarks/bench_kafka_json.py` (broker-free; compares against the pre-native implementation).

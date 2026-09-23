@@ -26,6 +26,10 @@
     `tkati_core._native.KafkaError`, not `confluent_kafka.KafkaException`.
   * `KafkaConsumer.consumer` / `KafkaProducer.producer` are now the native
     client objects, not confluent-kafka's.
+  * No TLS for now: librdkafka is built without OpenSSL, so a
+    `kafka_config` with `security.protocol` `SSL` or `SASL_SSL` fails at
+    construction. tkati's own settings never configure TLS. See the rdkafka
+    line in `Cargo.toml` to re-enable it.
   * Building tkati-core from source needs a Rust toolchain. Wheels are
     published for manylinux x86_64 and aarch64 (abi3, CPython ≥ 3.13).
 * Behaviour changes:
