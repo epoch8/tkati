@@ -1,3 +1,7 @@
+# Migrating from v0.3.0 to v0.4.0
+
+No breaking changes were introduced.
+
 # Migrating from v0.2.0 to v0.3.0
 
 At v0.2.0 the workspace shipped a single library package, `tkati-core`, plus
