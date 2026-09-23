@@ -1,3 +1,14 @@
+# 0.4.4
+
+* `Consumer.read_arrow` takes an optional `stats: LoopStats` and splits its own
+  wall clock into `poll` (fetching from the broker) and `parse` (decoding into
+  Arrow), so callers can tell broker latency apart from JSON cost
+* Add `CONSUMER_PHASES` (`("poll", "parse")`, re-exported from `tkati_core`) for
+  nodes to splice into their `LoopStats` phase tuple
+* The consumer's per-batch log lines moved from `info` to `debug` — at
+  production throughput they were tens of lines a second and buried the periodic
+  perf report. Row-count mismatches and parse failures are unaffected
+
 # 0.4.3
 
 * Add `LoopStats` (`tkati_core.stats`, re-exported from `tkati_core`): per-phase

@@ -1,15 +1,23 @@
 import pyarrow as pa
 from loguru import logger
-from tkati_core import Consumer, LoopStats, Producer, build_consumer, build_producer
+from tkati_core import (
+    CONSUMER_PHASES,
+    Consumer,
+    LoopStats,
+    Producer,
+    build_consumer,
+    build_producer,
+)
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
 
 # Reported in this order, not sorted by duration: a stable field order is what
-# makes two consecutive log lines comparable at a glance. Lives here rather
-# than in tkati-core because these five names are this node's pipeline —
-# tkati-node-el, for instance, has no lookup or write phase.
-_PHASES = ("read", "lookup", "produce", "write", "commit")
+# makes two consecutive log lines comparable at a glance. The tail lives here
+# rather than in tkati-core because these four names are this node's pipeline —
+# tkati-node-el, for instance, has no lookup or write phase. The head is spliced
+# in from the consumer, which owns the names it times itself against.
+_PHASES = (*CONSUMER_PHASES, "lookup", "produce", "write", "commit")
 
 
 def _new_stats() -> LoopStats:
@@ -57,11 +65,15 @@ def run_one_iteration(
         except Exception:
             logger.exception("dedup store cleanup failed; will retry next iteration")
 
-    with stats.phase("read"):
-        batch = consumer.read_arrow(
-            num_messages=settings.input.consumer.batch_size,
-            timeout=settings.input.consumer.batch_timeout_sec,
-        )
+    # No phase block here: the consumer splits its own time into `poll` and
+    # `parse`. Wrapping it in an umbrella phase as well would double-count that
+    # time, and the percentages are of the interval — they are meant to fall
+    # short of 100%, with the shortfall being genuinely unaccounted work.
+    batch = consumer.read_arrow(
+        num_messages=settings.input.consumer.batch_size,
+        timeout=settings.input.consumer.batch_timeout_sec,
+        stats=stats,
+    )
     stats.iterations += 1
     if batch is None:
         stats.starved_iterations += 1

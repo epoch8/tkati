@@ -73,24 +73,34 @@ Every 10 seconds the node logs where its wall clock went, using
 
 ```
 dedup perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-dedup perf: read=4.91s (49%) lookup=0.52s (5%) produce=3.96s (39%) write=0.21s (2%) commit=0.38s (4%)
+dedup perf: poll=4.43s (44%) parse=0.48s (5%) lookup=0.52s (5%) produce=3.96s (39%) write=0.21s (2%) commit=0.38s (4%)
 ```
 
 `dropped` is the rows this node deduplicated away.
 
-* `read` — fetching from Kafka *and* JSON-parsing into Arrow
+* `poll` — fetching message batches from the broker. Mostly broker round trips,
+  but it also includes librdkafka handing each message to Python, which has a
+  floor of roughly 0.8 us/message no matter how fast the broker is
+* `parse` — JSON-decoding those payloads into an Arrow table, and casting to
+  the internal schema
 * `lookup` — encoding keys, resolving in-batch duplicates, querying the store
 * `produce` — serializing and producing, including the blocking `flush`
 * `write` — marking the surviving keys seen
 * `commit` — the synchronous offset commit (and bucket cleanup, which is ~0
   except once an hour when a bucket is destroyed)
 
+`poll` and `parse` come from `tkati-core`'s consumer rather than from this
+node, which splices them in from `CONSUMER_PHASES`. They are split apart
+because their fixes are unrelated: a large `poll` points at batch sizing,
+broker latency or an under-fed topic, while a large `parse` points at the JSON
+decode and is what a faster wire format would address.
+
 Percentages are of the interval, not of each other, so they **do not sum to
 100** — the remainder is time in none of the named phases.
 
 `input-starved` counts iterations where the node drained the topic and waited
-out the batch timeout. Those iterations were not CPU-bound, and because `read`
-blocks for the whole wait, a mostly-starved interval will show `read` at close
+out the batch timeout. Those iterations were not CPU-bound, and because `poll`
+blocks for the whole wait, a mostly-starved interval will show `poll` at close
 to 100% and tells you nothing about whether the node can keep up.
 
 `benchmarks/bench_store.py` A/B tests the store in isolation. It populates in

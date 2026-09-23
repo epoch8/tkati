@@ -12,6 +12,33 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.4.4
+
+### wqmmyrsz — Split the consumer's read time into poll and parse [tkati-core, tkati-node-dedup]
+
+- The dedup node's perf report showed `read` as its largest phase (~49%), but
+  that single number covered both waiting on the Kafka broker and JSON-parsing
+  the batch into Arrow — two things with unrelated fixes. `Consumer.read_arrow`
+  now takes an optional `stats: LoopStats` and attributes its own time to
+  **`poll`** and **`parse`** separately, so the next optimization has something
+  to aim at.
+- `tkati_core.CONSUMER_PHASES` is the ordered pair of names, exported so nodes
+  splice it into their phase tuple instead of restating it — a rename in core
+  would otherwise leave a node's column silently reading `0.00s`.
+- `read` is **replaced** by `poll`/`parse` in `tkati-node-dedup`'s report, not
+  nested inside them. An umbrella phase would double-count that time and break
+  the property that phase percentages fall short of 100%, with the shortfall
+  being genuinely unaccounted work.
+- Note when reading `poll`: it is not pure broker wait. Handing each message
+  from librdkafka to Python costs ~0.8 us even against a fully pre-buffered
+  topic, so a batch of 2000 carries ~1.6ms of floor. Measured live, that was
+  about a tenth of `poll`.
+- The consumer's per-batch `logger.info` lines are now `logger.debug`. At
+  production throughput they were tens of lines a second, which buried the
+  perf report; the cost itself was only ~0.1% of wall clock. Row-count
+  mismatches and parse failures still log at `warning`/`error`. **This changes
+  `tkati-node-el`'s log output too**, which is otherwise untouched.
+
 ## 0.4.3
 
 ### rsmnyupm — Speed up the dedup store's RocksDB path [tkati-core, tkati-node-dedup]

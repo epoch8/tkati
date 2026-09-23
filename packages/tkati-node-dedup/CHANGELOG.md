@@ -1,3 +1,10 @@
+# 0.4.4
+
+* The perf report now breaks the old `read` phase into `poll` and `parse`,
+  separating time spent waiting on the broker from time spent JSON-decoding
+  into Arrow. `read` is gone rather than kept as an umbrella, so the
+  percentages still don't double-count. See the README
+
 # 0.4.3
 
 * Tuned the embedded RocksDB store for its actual workload — lookups that
