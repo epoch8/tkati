@@ -1,3 +1,48 @@
+# 0.5.0
+
+* `KafkaConsumer` and `KafkaProducer` run on a native (Rust) extension,
+  `tkati_core._native`, with librdkafka linked in statically. Their
+  constructors, `from_*` classmethods, attributes, methods and `stats` phases
+  are unchanged.
+  * `produce_arrow` with `format="json"` encodes rows straight from the Arrow
+    columns, in parallel across all cores, instead of via `to_pylist()` +
+    orjson. This makes it about 30x faster, e.g. 7.4 s → 0.24 s per 1M rows of
+    tkati-node-el's schema. Output is byte-identical for strings, integers,
+    booleans, nulls, nested lists/structs and timestamps; float formatting
+    differs (see below).
+  * `read_arrow` builds its batch buffer natively as messages arrive and hands
+    it to pyarrow's JSON reader zero-copy, split into blocks so that every core
+    parses a share. It is 1.7–2.8x faster, e.g. 0.43 s → 0.23 s per 1M rows,
+    and parsing semantics are unchanged.
+  * Polling and enqueueing loop natively rather than calling into
+    confluent-kafka once per message.
+  * `read_pylist` and `produce_pylist` still use orjson. Building or reading
+    Python dicts needs the GIL either way, and a native parse benchmarked
+    slower.
+  * The JSON encoder's parallelism follows `RAYON_NUM_THREADS` (default: all
+    available cores).
+* **Breaking:**
+  * Kafka errors from `commit`, construction etc. raise
+    `tkati_core._native.KafkaError`, not `confluent_kafka.KafkaException`.
+  * `KafkaConsumer.consumer` / `KafkaProducer.producer` are now the native
+    client objects, not confluent-kafka's.
+  * Building tkati-core from source needs a Rust toolchain. Wheels are
+    published for manylinux x86_64 and aarch64 (abi3, CPython ≥ 3.13).
+* Behaviour changes:
+  * `produce_*` no longer raises `BufferError` when librdkafka's local queue
+    is full: it waits for the queue to drain and retries.
+  * A tombstone (message with no value) in a `read_arrow` batch raises a
+    `ValueError` naming how many there were, instead of a `TypeError`.
+    `read_pylist` still skips and logs it.
+  * `produce_arrow` JSON: floats are written in the shortest round-trip form
+    with a `1.0e16`-style exponent (orjson wrote `1e+16`), and float32 values
+    are no longer widened to float64 first. Decimal and binary columns are
+    encoded, as a JSON number and a hex string respectively, where orjson
+    raised `TypeError`.
+* librdkafka logs still go to stderr, as with confluent-kafka.
+* confluent-kafka remains a dependency, for `tkati_core.kafka.testing`'s
+  `AdminClient`.
+
 # 0.4.5
 
 * `Producer.produce_arrow`, `produce_pylist` and `flush` take an optional

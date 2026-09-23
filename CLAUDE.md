@@ -24,5 +24,16 @@ All packages in this workspace share one version number, **and so does the works
 - the root `pyproject.toml`'s `version` (the `tkati` workspace project itself — easy to miss, since nothing depends on it)
 - every `packages/*/pyproject.toml`'s `version`
 - every exact-pinned inter-package dependency (`tkati-core==X.Y.Z` appears in `tkati-node-el`, `tkati-node-dedup` and `tkati-dashboard`)
+- `packages/tkati-core/Cargo.toml`'s `version` (the Rust crate behind `tkati_core._native`; maturin takes the wheel version from `pyproject.toml`, but keep them equal)
 
-Run `uv sync --all-packages` afterward to update `uv.lock`. To check nothing was missed, `grep -h '^version' pyproject.toml packages/*/pyproject.toml | sort -u` should print exactly one line.
+Run `uv sync --all-packages` afterward to update `uv.lock`. To check nothing was missed, `grep -h '^version' pyproject.toml packages/*/pyproject.toml packages/tkati-core/Cargo.toml | sort -u` should print exactly one line.
+
+## Rust extension (tkati-core)
+
+`tkati-core` is built with **maturin**: `packages/tkati-core/src/` is a pyo3 crate compiled to `tkati_core._native` (librdkafka statically linked, JSON encoding parallelised with rayon). `KafkaConsumer`/`KafkaProducer` are thin Python wrappers over it.
+
+- `uv sync --all-packages` rebuilds the extension whenever `src/**/*.rs`, `Cargo.toml` or `Cargo.lock` change (see `[tool.uv] cache-keys`). The first build compiles librdkafka and OpenSSL from source and takes a couple of minutes.
+- Rust checks, run in `packages/tkati-core`: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. CI runs them in `test-tkati-core.yml`.
+- `tkati_core/_native.pyi` is the hand-written stub `ty` checks against. Update it with any change to the native API.
+- Codec performance: `uv run python packages/tkati-core/benchmarks/bench_kafka_json.py` (broker-free; compares against the pre-native implementation).
+- Which packages get the maturin CI variant is the `maturin` list at the top of `.github/workflow-templates/{test,publish}.template.yml`. The variant is kept inside those templates, not in separate template types, because the generated filename is `<template_type>-<package>.yml` and PyPI trusted publishing is pinned to `publish-tkati-core.yml`.

@@ -1,0 +1,26 @@
+[package]
+name = "tkati_core_native"
+# Kept equal to the workspace's shared Python version (see CLAUDE.md).
+version = "0.5.0-alpha.1"
+edition = "2024"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arrow-array = { version = "59", features = ["chrono-tz"] }
+arrow-buffer = "59"
+arrow-json = "59"
+arrow-schema = "59"
+chrono = { version = "0.4", default-features = false }
+pyo3 = { version = "0.29", features = ["abi3-py313"] }
+pyo3-arrow = "0.19"
+rayon = "1.12"
+rdkafka = { version = "0.39", default-features = false, features = ["libz-static", "ssl-vendored", "zstd"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

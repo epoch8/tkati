@@ -1,6 +1,6 @@
 [project]
 name = "tkati-core"
-version = "0.4.5"
+version = "0.5.0-alpha.1"
 description = "Core abstractions for Kafka/ClickHouse streaming pipeline nodes"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -32,11 +32,25 @@ Repository = "https://github.com/epoch8/tkati"
 dev = ["pytest>=9.0.1"]
 
 [build-system]
-requires = ["uv_build>=0.11.21,<0.12"]
-build-backend = "uv_build"
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
 
-[tool.uv.build-backend]
-module-root = ""
+[tool.maturin]
+# The Rust crate in src/ builds tkati_core._native; the pure-Python package
+# sits next to Cargo.toml in tkati_core/.
+module-name = "tkati_core._native"
+features = ["pyo3/extension-module"]
+exclude = ["benchmarks/**"]
+
+[tool.uv]
+# Rebuild the extension on `uv sync` whenever the Rust side changes, not only
+# when pyproject.toml does.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
 
 [tool.uv-workspace-codegen]
 generate = true

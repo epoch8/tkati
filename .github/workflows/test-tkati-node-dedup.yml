@@ -61,7 +61,13 @@ jobs:
 
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
-      
+
+      # tkati-core is a Rust extension, compiled by `uv sync` below.
+      - name: Cache tkati-core's Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/tkati-core -> target"
+
       - name: Install deps
         run: uv sync --package tkati-node-dedup
 

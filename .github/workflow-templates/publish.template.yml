@@ -1,3 +1,7 @@
+{#- Packages with a Rust extension built by maturin (Cargo.toml next to
+    pyproject.toml). Kept in this template rather than a separate one so their
+    workflow file keeps its name: PyPI trusted publishing is pinned to it. #}
+{%- set maturin = package.name in ["tkati-core"] -%}
 name: Publish {{ package.name }}
 
 on:
@@ -7,6 +11,74 @@ on:
       - 'v*'
 
 jobs:
+{%- if maturin %}
+  # manylinux wheels per architecture plus an sdist, merged into the same
+  # artifact the publish jobs below take.
+  wheels:
+    runs-on: ${{ '{{' }} matrix.runner {{ '}}' }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+          - target: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # manylinux_2_28 has the perl and make that the vendored OpenSSL and
+      # librdkafka builds need. abi3: one wheel per architecture covers every
+      # supported Python.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ '{{' }} matrix.target {{ '}}' }}
+          manylinux: "2_28"
+          args: --release --out dist
+          working-directory: {{ package.path }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ '{{' }} matrix.target {{ '}}' }}
+          path: {{ package.path }}/dist/
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: {{ package.path }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-sdist
+          path: {{ package.path }}/dist/
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [wheels, sdist]
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Store the distribution packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+{%- else %}
   build:
     runs-on: ubuntu-latest
     steps:
@@ -26,6 +98,7 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
+{%- endif %}
 
   publish-to-test-pypi:
     environment:

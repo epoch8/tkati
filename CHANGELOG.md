@@ -12,6 +12,43 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.5.0
+
+### rmmvtyxs — Native Kafka consumer and producer [tkati-core, repo]
+
+- The nodes were bottlenecked on JSON:
+  - Producing Arrow as JSON built a Python dict per row (`to_pylist()`) and
+    then ran orjson on each one: 7.4 s per 1M rows.
+  - Consuming parsed a Python-assembled `BytesIO` as a single block, so on
+    one core.
+- `tkati_core._native` is a pyo3 extension. It owns the Kafka client (rdkafka,
+  with librdkafka, OpenSSL and zstd statically linked) and does the heavy work
+  with the GIL released. `KafkaConsumer`/`KafkaProducer` keep their Python
+  interface as thin wrappers.
+- Encoding: arrow-json per column, rayon over row ranges, one payload per row.
+  It is 29–44x faster (0.24 s per 1M rows), and its output is byte-identical to
+  the old path except for float formatting. Timestamps get a custom encoder so
+  that their ISO strings keep `datetime.isoformat()`'s shape.
+- Decoding stays on pyarrow's C++ reader, which benchmarked faster per core
+  than arrow-json. What changed is its input: one contiguous NDJSON buffer,
+  assembled natively while polling and exported zero-copy through the buffer
+  protocol, with block sizes chosen so that every core gets a share. It is
+  1.7–2.8x faster, with unchanged parsing semantics.
+- `read_pylist`/`produce_pylist` stay on orjson, because building Python
+  objects is GIL-bound.
+- Broker-free parity tests (`tests/test_native_codec.py`) pin the old and new
+  paths against each other. `benchmarks/bench_kafka_json.py` measures them.
+- Packaging: tkati-core builds with maturin, as abi3 wheels for manylinux
+  x86_64 and aarch64. The `test`/`publish` workflow templates gained a maturin
+  variant: Rust caching, fmt/clippy/test, and a `maturin-action` wheel
+  matrix. Dependent packages' test workflows cache tkati-core's Rust build.
+  The variant lives inside the existing templates, not new template types, so
+  that `publish-tkati-core.yml` keeps the filename PyPI trusted publishing is
+  pinned to.
+- The devcontainer gets `build-essential` and `perl` for the vendored C
+  builds. CLAUDE.md covers the Rust workflow and adds `Cargo.toml` to the
+  version bump checklist.
+
 ## 0.4.5
 
 ### nltnrvuo — Export LoopStats as Prometheus metrics [tkati-core, tkati-node-dedup]

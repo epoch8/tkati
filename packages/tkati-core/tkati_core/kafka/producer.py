@@ -4,9 +4,9 @@ from typing import TYPE_CHECKING, Literal
 
 import orjson
 import pyarrow as pa
-from confluent_kafka import Producer
 from loguru import logger
 
+from tkati_core._native import EncodedBatch, NativeProducer, encode_arrow
 from tkati_core.producer import Producer as ProducerBase
 from tkati_core.stats import LoopStats
 from tkati_core.type_mapping import TYPE_MAPPING
@@ -16,6 +16,19 @@ if TYPE_CHECKING:
         KafkaConnectionSettings,
         KafkaOutputSettings,
         KafkaTopicSettings,
+    )
+
+
+def native_key_type(dtype: pa.DataType) -> bool:
+    """Whether ``encode_arrow`` can render keys from a column of this type
+    exactly as Python's ``str()`` would."""
+    return (
+        pa.types.is_integer(dtype)
+        or pa.types.is_boolean(dtype)
+        or pa.types.is_null(dtype)
+        or pa.types.is_string(dtype)
+        or pa.types.is_large_string(dtype)
+        or pa.types.is_string_view(dtype)
     )
 
 
@@ -43,7 +56,8 @@ class KafkaProducer(ProducerBase):
 
     For Arrow-based production, two serialization formats are controlled by the
     topic's ``format`` setting:
-    - ``"json"``: produces one Kafka message per row, serialized with orjson.
+    - ``"json"``: produces one Kafka message per row, encoded natively from the
+      Arrow columns across all cores.
     - ``"arrow-batch"``: produces the entire table as a single Arrow IPC message.
 
     The optional ``key_column`` setting (from ``KafkaTopicSettings``) names the
@@ -58,7 +72,7 @@ class KafkaProducer(ProducerBase):
         key_column: str | None = None,
         output_schema: dict[str, str] | None = None,
     ) -> None:
-        self.producer = Producer(kafka_config)
+        self.producer = NativeProducer(kafka_config, topic_name)
         self.topic_name = topic_name
         self.format = format
         self.key_column = key_column
@@ -98,8 +112,9 @@ class KafkaProducer(ProducerBase):
         """
         Produce data to the configured topic.
 
-        For ``"json"`` format each row becomes a separate Kafka message serialized
-        with orjson. If ``key_column`` is set, its value is used as the message key.
+        For ``"json"`` format each row becomes a separate Kafka message: a JSON
+        object with every column, nulls included. If ``key_column`` is set,
+        ``str()`` of its value is used as the message key.
 
         For ``"arrow-batch"`` format the entire table is serialized as a single
         Arrow IPC stream message.
@@ -112,10 +127,11 @@ class KafkaProducer(ProducerBase):
 
         if self.format == "json":
             with stats.phase("producer/serialize"):
-                rows = _to_wire_table(data, self.wire_type_overrides).to_pylist()
-                messages = self._serialize_rows(rows)
+                messages = self._serialize_arrow(
+                    _to_wire_table(data, self.wire_type_overrides)
+                )
             with stats.phase("producer/enqueue"):
-                self._enqueue(messages)
+                self.producer.enqueue(messages)
         elif self.format == "arrow-batch":
             with stats.phase("producer/serialize"):
                 table = (
@@ -127,9 +143,11 @@ class KafkaProducer(ProducerBase):
                 with pa.ipc.new_stream(buf, table.schema) as writer:
                     for batch in table.to_batches():
                         writer.write_batch(batch)
-                value = buf.getvalue().to_pybytes()
+                messages = EncodedBatch.from_payloads(
+                    [(buf.getvalue().to_pybytes(), None)]
+                )
             with stats.phase("producer/enqueue"):
-                self.producer.produce(self.topic_name, value=value)
+                self.producer.enqueue(messages)
 
     def produce_pylist(self, rows: list[dict], stats: LoopStats | None = None) -> None:
         """
@@ -142,14 +160,28 @@ class KafkaProducer(ProducerBase):
         stats = stats if stats is not None else LoopStats(name="unreported", phases=())
 
         with stats.phase("producer/serialize"):
-            messages = self._serialize_rows(rows)
+            messages = EncodedBatch.from_payloads(self._serialize_rows(rows))
         with stats.phase("producer/enqueue"):
-            self._enqueue(messages)
+            self.producer.enqueue(messages)
+
+    def _serialize_arrow(self, data: pa.Table | pa.RecordBatch) -> EncodedBatch:
+        """Encode every row natively, in parallel, with no per-row Python
+        objects. Keys are derived natively too, unless the key column's type
+        is one whose ``str()`` only Python knows how to render (floats,
+        timestamps, ...)."""
+        key_column = self.key_column
+        if key_column is None or key_column not in data.schema.names:
+            return encode_arrow(data)
+        if native_key_type(data.schema.field(key_column).type):
+            return encode_arrow(data, key_column)
+        keys = [str(v) for v in data.column(key_column).to_pylist()]
+        return encode_arrow(data, keys=keys)
 
     def _serialize_rows(self, rows: list[dict]) -> list[tuple[bytes, str | None]]:
         """Encode every row up front rather than interleaving it with
-        ``produce()`` calls, so the two can be timed as separate phases. Holds
-        one batch of encoded payloads at once, which a batch already is."""
+        enqueueing, so the two can be timed as separate phases. Stays in
+        Python: reading dicts needs the GIL, so there is nothing for native
+        code to parallelise."""
         return [
             (
                 orjson.dumps(row),
@@ -159,10 +191,6 @@ class KafkaProducer(ProducerBase):
             )
             for row in rows
         ]
-
-    def _enqueue(self, messages: list[tuple[bytes, str | None]]) -> None:
-        for value, key in messages:
-            self.producer.produce(self.topic_name, value=value, key=key)
 
     def flush(self, stats: LoopStats | None = None) -> None:
         """
