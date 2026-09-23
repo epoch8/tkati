@@ -12,6 +12,32 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.4.5
+
+### lkpyyqzq — Split the producer's time into serialize, enqueue and deliver; prefix core phases [tkati-core, tkati-node-dedup]
+
+- Follows 0.4.4's consumer split. The dedup node's `produce` phase (~39%) was
+  still one number covering three things with unrelated fixes: encoding rows
+  (Python CPU), one `produce()` call per message into librdkafka (message
+  count), and the blocking `flush` (broker acks). `Producer.produce_arrow`,
+  `produce_pylist` and `flush` now take an optional `stats: LoopStats` and
+  record **`producer/serialize`**, **`producer/enqueue`** and
+  **`producer/deliver`**. `tkati_core.PRODUCER_PHASES` names them, for nodes to
+  splice in.
+- `KafkaProducer` used to encode each row and enqueue it in the same loop.
+  It now encodes the whole batch first and then enqueues it, so the two can be
+  timed separately. The messages produced are unchanged.
+- `ClickhouseProducer` records its whole insert as `producer/deliver`, because
+  `clickhouse_connect` encodes and sends in a single call. Its DLQ producer is
+  not handed `stats`: the fallback already runs inside that block.
+- `KafkaConsumer.read_pylist` now takes `stats` too, split like `read_arrow`.
+- **Report format change:** every phase timed inside core is now prefixed with
+  its component. `poll`/`parse` from 0.4.4 are renamed
+  `consumer/poll`/`consumer/parse`, and `produce` is replaced (not wrapped) by
+  the three `producer/` phases. Node-owned phases (`lookup`, `write`, `commit`)
+  stay unprefixed. Anything that searches logs for `poll=` or `produce=` needs
+  updating.
+
 ## 0.4.4
 
 ### wqmmyrsz — Split the consumer's read time into poll and parse [tkati-core, tkati-node-dedup]

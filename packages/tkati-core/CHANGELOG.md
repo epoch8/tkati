@@ -1,3 +1,16 @@
+# 0.4.5
+
+* `Producer.produce_arrow`, `produce_pylist` and `flush` take an optional
+  `stats: LoopStats` and split their time into `producer/serialize`,
+  `producer/enqueue` and `producer/deliver`. `KafkaProducer` now encodes a
+  batch fully before enqueueing it. `ClickhouseProducer` records everything as
+  `producer/deliver`
+* Add `PRODUCER_PHASES`, re-exported from `tkati_core`
+* `KafkaConsumer.read_pylist` takes `stats`, split like `read_arrow`
+* **Breaking for log parsers:** `CONSUMER_PHASES` is now
+  `("consumer/poll", "consumer/parse")`. Phases timed inside core are prefixed
+  with their component
+
 # 0.4.4
 
 * `Consumer.read_arrow` takes an optional `stats: LoopStats` and splits its own

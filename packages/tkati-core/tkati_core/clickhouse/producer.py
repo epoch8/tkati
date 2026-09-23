@@ -6,6 +6,7 @@ from tenacity import RetryCallState, retry, stop_after_attempt, wait_fixed
 
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.producer import Producer
+from tkati_core.stats import LoopStats
 
 
 def log_retry_attempt(retry_state: RetryCallState) -> None:
@@ -91,32 +92,44 @@ class ClickhouseProducer(Producer):
             split_factor=settings.dlq_split_factor,
         )
 
-    def produce_arrow(self, data: pa.Table) -> None:
-        try:
-            _insert_with_retry(
-                ch_client=self._ch_client, table=self._table, arrow_table=data
-            )
-        except Exception as err:
-            if self._dlq_producer is None:
-                raise
-            logger.warning(
-                f"Batch of {len(data)} rows failed ({err}), "
-                f"switching to recursive fallback with split_factor={self._split_factor}"
-            )
-            _insert_with_dlq_fallback(
-                table=data,
-                ch_client=self._ch_client,
-                ch_table=self._table,
-                dlq_producer=self._dlq_producer,
-                split_factor=self._split_factor,
-            )
-            self._dlq_producer.flush()
+    def produce_arrow(self, data: pa.Table, stats: LoopStats | None = None) -> None:
+        # All of it is `deliver`: clickhouse_connect serializes and sends inside
+        # one call, so there is no seam to put `serialize`/`enqueue` on. That
+        # includes the retry and DLQ fallback, whose own producer is deliberately
+        # not handed `stats` — its time is already inside this block, and
+        # recording it again would count it twice.
+        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
 
-    def produce_pylist(self, rows: list[dict]) -> None:
-        self.produce_arrow(pa.Table.from_pylist(rows))
+        with stats.phase("producer/deliver"):
+            try:
+                _insert_with_retry(
+                    ch_client=self._ch_client, table=self._table, arrow_table=data
+                )
+            except Exception as err:
+                if self._dlq_producer is None:
+                    raise
+                logger.warning(
+                    f"Batch of {len(data)} rows failed ({err}), "
+                    f"switching to recursive fallback with split_factor={self._split_factor}"
+                )
+                _insert_with_dlq_fallback(
+                    table=data,
+                    ch_client=self._ch_client,
+                    ch_table=self._table,
+                    dlq_producer=self._dlq_producer,
+                    split_factor=self._split_factor,
+                )
+                self._dlq_producer.flush()
 
-    def flush(self) -> None:
-        """No-op: ClickHouse inserts are synchronous, nothing to flush."""
+    def produce_pylist(self, rows: list[dict], stats: LoopStats | None = None) -> None:
+        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        with stats.phase("producer/serialize"):
+            table = pa.Table.from_pylist(rows)
+        self.produce_arrow(table, stats=stats)
+
+    def flush(self, stats: LoopStats | None = None) -> None:
+        """No-op: ClickHouse inserts are synchronous, nothing to flush. Their
+        wait is recorded as `producer/deliver` by produce_arrow instead."""
 
     def close(self) -> None:
         self._ch_client.close()

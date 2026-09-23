@@ -68,13 +68,14 @@ have different pipelines — a dedup node has lookup and write phases an
 extract/load node does not.
 
 ```python
-from tkati_core import CONSUMER_PHASES, LoopStats
+from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, LoopStats
 
-PHASES = (*CONSUMER_PHASES, "produce", "commit")
+PHASES = (*CONSUMER_PHASES, *PRODUCER_PHASES, "commit")
 stats = LoopStats(name="my-node", phases=PHASES)
 
 while True:
-    # Pass `stats` down and the consumer times its own phases — see below.
+    # Pass `stats` down and the consumer and producer time their own phases —
+    # see below.
     batch = consumer.read_arrow(..., stats=stats)
     stats.iterations += 1
     if batch is None:
@@ -82,8 +83,8 @@ while True:
         continue
     stats.rows_in += len(batch)
 
-    with stats.phase("produce"):
-        producer.produce_arrow(batch)
+    producer.produce_arrow(batch, stats=stats)
+    producer.flush(stats=stats)
     stats.rows_out += len(batch)
 
     with stats.phase("commit"):
@@ -94,19 +95,39 @@ while True:
 
 ```
 my-node perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-my-node perf: poll=4.43s (44%) parse=0.48s (5%) produce=3.96s (39%) commit=0.38s (4%)
+my-node perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) commit=0.38s (4%)
 ```
 
-`Consumer.read_arrow` takes an optional `stats` and splits its own time into
-the two phases named by `CONSUMER_PHASES` — **`poll`**, fetching from the
-broker, and **`parse`**, turning the raw payloads into an Arrow table. These
-have unrelated fixes (batch sizing and broker latency versus JSON decoding
-cost), so they are worth telling apart. Splice `CONSUMER_PHASES` into your
-phase tuple rather than writing `"poll", "parse"` out by hand, so a rename in
-core can't leave your column silently reading `0.00s`.
+`Consumer.read_arrow` and `KafkaConsumer.read_pylist` take an optional `stats`
+and split their own time into the two phases named by `CONSUMER_PHASES`:
+**`consumer/poll`**, fetching from the broker, and **`consumer/parse`**, turning
+the raw payloads into an Arrow table or dicts. These have unrelated fixes
+(batch sizing and broker latency versus JSON decoding cost), so they are worth
+telling apart.
 
-Do **not** also wrap the call in a phase of your own: that would count the same
-time twice and break the invariant below.
+`Producer.produce_arrow`, `produce_pylist` and `flush` do the same with the
+three `PRODUCER_PHASES`:
+
+* **`producer/serialize`**: encoding rows into the wire format (the wire-type
+  cast, `to_pylist` and `orjson.dumps`, or the Arrow IPC write for
+  `arrow-batch`). This is CPU time in Python.
+* **`producer/enqueue`**: the per-message `produce()` calls that hand the
+  encoded bytes to librdkafka. It scales with message count, so `arrow-batch`
+  (one message per batch) all but removes it.
+* **`producer/deliver`**: waiting for the sink to accept. For Kafka that is
+  `flush()`. librdkafka starts sending in the background during `enqueue`, so
+  this is the *remaining* wait for broker acks, not the batch's total network
+  time. `ClickhouseProducer` records its whole insert here, retries and DLQ
+  fallback included, because `clickhouse_connect` encodes and sends in a
+  single call.
+
+The prefixes mark these figures as timed inside `tkati-core`. A node's own
+phases stay unprefixed. Splice the tuples into your phase tuple rather than
+writing the names out by hand, so a rename in core can't leave your column
+silently reading `0.00s`.
+
+Do **not** also wrap these calls in a phase of your own: that would count the
+same time twice and break the invariant below.
 
 `phases` is an explicit ordered tuple, not derived from which phases happened
 to fire: a phase that doesn't run during an interval's first iteration would
@@ -116,7 +137,7 @@ makes two consecutive lines comparable.
 Percentages are of the interval rather than of each other, so they do **not**
 sum to 100 — the shortfall is time in none of the named phases, which keeps
 unaccounted work visible. Track `starved_iterations` for iterations that were
-blocked waiting on input: `poll` blocks until the batch fills or the timeout
+blocked waiting on input: `consumer/poll` blocks until the batch fills or the timeout
 expires, so on an under-fed node it approaches 100% and nothing else on the
 line means anything.
 

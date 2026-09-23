@@ -1,8 +1,11 @@
 import time
+from typing import Literal
 
 import orjson
 import pyarrow as pa
+import pytest
 from confluent_kafka import Consumer
+from tkati_core import PRODUCER_PHASES, LoopStats
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import (
     KafkaConnectionSettings,
@@ -232,3 +235,52 @@ def test_produce_pylist_with_key_column(
     assert len(messages) == 2
     keys = {m.key().decode() for m in messages}
     assert keys == {"u1", "u2"}
+
+
+@pytest.mark.parametrize("format", ["json", "arrow-batch"])
+def test_produce_arrow_and_flush_split_their_time_into_producer_phases(
+    kafka_output_topic: str,
+    raw_consumer: Consumer,
+    format: Literal["json", "arrow-batch"],
+):
+    """Encoding, handing off to librdkafka and waiting for acks are attributed
+    separately, so a node's perf report can say which one a slow produce is."""
+    settings = KafkaOutputSettings(
+        connection=KafkaConnectionSettings(broker="localhost:9092"),
+        topic=KafkaTopicSettings(name=kafka_output_topic, format=format),
+    )
+    table = pa.table({"id": [f"k{i}" for i in range(50)], "n": list(range(50))})
+
+    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    producer = KafkaProducer.from_output_settings(settings)
+    try:
+        producer.produce_arrow(table, stats=stats)
+        assert "producer/deliver" not in stats.phase_sec
+        producer.flush(stats=stats)
+    finally:
+        producer.close()
+
+    assert stats.phase_sec["producer/serialize"] > 0
+    assert stats.phase_sec["producer/enqueue"] > 0
+    assert stats.phase_sec["producer/deliver"] > 0
+
+
+def test_produce_pylist_splits_its_time_into_serialize_and_enqueue(
+    output_settings: KafkaOutputSettings,
+    kafka_output_topic: str,
+    raw_consumer: Consumer,
+):
+    rows = [{"name": "alice", "score": 10}, {"name": "bob", "score": 20}]
+
+    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    producer = KafkaProducer.from_output_settings(output_settings)
+    try:
+        producer.produce_pylist(rows, stats=stats)
+        producer.flush()
+    finally:
+        producer.close()
+
+    assert stats.phase_sec["producer/serialize"] > 0
+    assert stats.phase_sec["producer/enqueue"] > 0
+    assert "producer/deliver" not in stats.phase_sec
+    assert len(_consume_all(raw_consumer, kafka_output_topic, count=2)) == 2

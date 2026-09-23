@@ -161,8 +161,8 @@ class KafkaConsumer(ConsumerBase):
             timeout: Maximum time in seconds to consume messages.
             num_messages: Maximum number of events to consume.
             stats: Optional LoopStats to attribute this read's wall clock to,
-                split into `poll` (waiting on the broker) and `parse` (turning
-                the raw payloads into an Arrow table). These have different
+                split into `consumer/poll` (waiting on the broker) and
+                `consumer/parse` (turning the raw payloads into an Arrow table). These have different
                 fixes — batch sizing and broker latency on one side, JSON
                 decoding cost on the other — so a caller that only sees a
                 single combined figure cannot tell which to chase.
@@ -181,7 +181,7 @@ class KafkaConsumer(ConsumerBase):
         # against a read that takes milliseconds at minimum.
         stats = stats if stats is not None else LoopStats(name="unreported", phases=())
 
-        with stats.phase("poll"):
+        with stats.phase("consumer/poll"):
             valid_messages, events_read = self._consume_batch(timeout, num_messages)
 
         if events_read == 0:
@@ -191,7 +191,7 @@ class KafkaConsumer(ConsumerBase):
         # Covers buffer assembly as well as the JSON decode: concatenating the
         # payloads is a memcpy of the batch, negligible next to parsing it, so
         # it doesn't earn a phase of its own.
-        with stats.phase("parse"):
+        with stats.phase("consumer/parse"):
             buffer = BytesIO()
             for msg in valid_messages:
                 buffer.write(msg.value())
@@ -227,6 +227,7 @@ class KafkaConsumer(ConsumerBase):
         self,
         timeout: int,
         num_messages: int,
+        stats: LoopStats | None = None,
     ) -> list[dict] | None:
         """
         Read messages from subscribed topics into a list of dicts.
@@ -234,24 +235,34 @@ class KafkaConsumer(ConsumerBase):
         Same batching semantics as read_arrow (time + count limits).
         Messages that fail JSON parsing are skipped (logged as errors).
 
+        Args:
+            timeout: Maximum time in seconds to consume messages.
+            num_messages: Maximum number of events to consume.
+            stats: Optional LoopStats, split into `consumer/poll` and
+                `consumer/parse` exactly as in read_arrow.
+
         Returns:
             A list of parsed event dicts, or None if no data was consumed.
 
         Notes:
             - Does NOT commit offsets. The caller is responsible for managing consumer lifecycle.
         """
-        valid_messages, events_read = self._consume_batch(timeout, num_messages)
+        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+
+        with stats.phase("consumer/poll"):
+            valid_messages, events_read = self._consume_batch(timeout, num_messages)
 
         if events_read == 0:
             logger.debug("No data consumed from topic.")
             return None
 
-        rows = []
-        for msg in valid_messages:
-            try:
-                rows.append(orjson.loads(msg.value()))
-            except Exception as e:
-                logger.error(f"Error parsing message from topic {msg.topic()}: {e}")
+        with stats.phase("consumer/parse"):
+            rows = []
+            for msg in valid_messages:
+                try:
+                    rows.append(orjson.loads(msg.value()))
+                except Exception as e:
+                    logger.error(f"Error parsing message from topic {msg.topic()}: {e}")
 
         logger.debug(f"Successfully parsed {len(rows)} rows")
         return rows if rows else None
