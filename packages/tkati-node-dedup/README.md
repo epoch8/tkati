@@ -73,6 +73,9 @@ turn it off, set `[metrics] enabled = false` or the env var
 `METRICS__ENABLED=false`; `METRICS__PORT` moves it. The metrics are the same
 numbers as the perf log line described below; see `tkati-core`'s README for
 the metric names and the PromQL that reproduces the log line's percentages.
+On top of those, `tkati_node_dedup_dropped_rows_total` counts the rows this
+node deduplicated away (the log line's `dropped`), once their batch is
+committed.
 
 Output and DLQ follow the same `OutputSettings` shape as `tkati-node-el`
 (`"kafka"` or `"clickhouse"`) — see that package's README for the full

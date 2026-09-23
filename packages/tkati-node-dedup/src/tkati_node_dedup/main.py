@@ -1,5 +1,6 @@
 import pyarrow as pa
 from loguru import logger
+from prometheus_client import Counter
 from tkati_core import (
     CONSUMER_PHASES,
     PRODUCER_PHASES,
@@ -21,6 +22,14 @@ from tkati_node_dedup.store import BucketedDedupStore
 # producer's phases are spliced in from tkati-core, which owns the names it
 # times itself against.
 _PHASES = (*CONSUMER_PHASES, "lookup", *PRODUCER_PHASES, "write", "commit")
+
+
+# Exposed as tkati_node_dedup_dropped_rows_total. The perf log line's "dropped",
+# as a counter of its own rather than left to rows_in - rows_out in PromQL.
+_DROPPED_ROWS = Counter(
+    "tkati_node_dedup_dropped_rows",
+    "Rows dropped as duplicates, seen earlier in the batch or in the dedup window.",
+)
 
 
 def _new_stats() -> LoopStats:
@@ -128,6 +137,11 @@ def run_one_iteration(
     # a lost event.
     with stats.phase("commit"):
         consumer.commit()
+
+    # Counted only once committed: a batch that fails before this point is
+    # re-read after restart, and counting its drops here too would count them
+    # twice.
+    _DROPPED_ROWS.inc(dropped)
 
     logger.debug(
         f"Batch of {len(batch)} rows: produced {len(filtered)}, "

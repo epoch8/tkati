@@ -14,6 +14,18 @@ config or docs changed.
 
 ## 0.5.0
 
+### qxsutmsp — Explicit dropped-rows metric for the dedup node [tkati-node-dedup]
+
+- New Prometheus counter `tkati_node_dedup_dropped_rows_total`: the rows the
+  dedup node drops as duplicates, i.e. the perf log line's `dropped`. Before
+  this it was only derivable in PromQL as
+  `tkati_rows_in_total - tkati_rows_out_total`.
+- It is a plain `prometheus_client.Counter` on the default registry, which
+  `start_metrics_server` already serves, so tkati-core is unchanged.
+- It is incremented only after the batch's offsets are committed. A batch that
+  fails before that point is re-read after restart, so counting it earlier
+  would count its drops twice. Tests cover both cases.
+
 ### rmmvtyxs — Native Kafka consumer and producer [tkati-core, repo]
 
 - The nodes were bottlenecked on JSON:

@@ -6,6 +6,7 @@ import pyarrow as pa
 import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
+from prometheus_client import REGISTRY
 from tkati_core import LoopStats
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
@@ -251,6 +252,57 @@ def test_iteration_hands_its_stats_to_the_consumer_and_producer(tmp_path) -> Non
     assert consumer.read_arrow.call_args.kwargs["stats"] is stats
     assert producer.produce_arrow.call_args.kwargs["stats"] is stats
     assert producer.flush.call_args.kwargs["stats"] is stats
+
+    store.close()
+
+
+def _dropped_rows_total() -> float:
+    value = REGISTRY.get_sample_value("tkati_node_dedup_dropped_rows_total")
+    assert value is not None
+    return value
+
+
+def _mock_iteration_args(
+    tmp_path, batch: pa.Table
+) -> tuple[MagicMock, MagicMock, BucketedDedupStore, MagicMock]:
+    consumer = MagicMock()
+    consumer.read_arrow.return_value = batch
+    producer = MagicMock()
+    store = BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
+    settings = MagicMock()
+    settings.input.consumer.batch_size = 100
+    settings.input.consumer.batch_timeout_sec = 5
+    settings.dedup.field = "uid"
+    return consumer, producer, store, settings
+
+
+def test_dropped_rows_are_counted(tmp_path) -> None:
+    """The counter is process-global, so assert on the delta."""
+    batch = pa.table({"uid": ["a", "a", "b"], "val": [1, 2, 3]})
+    consumer, producer, store, settings = _mock_iteration_args(tmp_path, batch)
+
+    before = _dropped_rows_total()
+    run_one_iteration(consumer, producer, store, settings)
+    assert _dropped_rows_total() - before == 1
+
+    # Same batch again: every row is now a cross-batch duplicate.
+    run_one_iteration(consumer, producer, store, settings)
+    assert _dropped_rows_total() - before == 4
+
+    store.close()
+
+
+def test_failed_iteration_does_not_count_dropped_rows(tmp_path) -> None:
+    """A batch that fails before commit is re-read after restart; counting its
+    drops on the failed attempt would count them twice."""
+    batch = pa.table({"uid": ["a", "a"], "val": [1, 2]})
+    consumer, producer, store, settings = _mock_iteration_args(tmp_path, batch)
+    producer.flush.side_effect = RuntimeError("boom")
+
+    before = _dropped_rows_total()
+    with pytest.raises(RuntimeError, match="boom"):
+        run_one_iteration(consumer, producer, store, settings)
+    assert _dropped_rows_total() == before
 
     store.close()
 
