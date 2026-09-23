@@ -143,6 +143,52 @@ blocked waiting on input: `consumer/poll` blocks until the batch fills or the ti
 expires, so on an under-fed node it approaches 100% and nothing else on the
 line means anything.
 
+### Prometheus metrics
+
+`tkati_core.metrics` exposes a `LoopStats` as Prometheus counters: the same
+numbers as the log line, but monotonic, so they don't reset at each report.
+
+```python
+from tkati_core import MetricsSettings, start_metrics_server
+
+stats = LoopStats(name="my-node", phases=PHASES)
+start_metrics_server(MetricsSettings(), stats)  # :8000/metrics, daemon thread
+```
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `tkati_phase_seconds_total` | `node`, `phase` | wall clock spent in each phase |
+| `tkati_wall_seconds_total` | `node` | wall clock since the `LoopStats` was created, the 100% denominator |
+| `tkati_rows_in_total` / `tkati_rows_out_total` | `node` | rows read / written |
+| `tkati_iterations_total` | `node` | loop iterations |
+| `tkati_starved_iterations_total` | `node` | iterations that waited on input |
+
+`node` is `LoopStats.name`. `phase` is the phase name exactly as it appears in
+the log line. Every declared phase is exported from the first scrape, at 0 if it
+hasn't run yet.
+
+The log line's "% of the interval", and its unaccounted remainder, in PromQL:
+
+```promql
+rate(tkati_phase_seconds_total[1m])
+  / ignoring(phase) group_left rate(tkati_wall_seconds_total[1m])
+
+1 - sum by (node) (rate(tkati_phase_seconds_total[1m]))
+  / rate(tkati_wall_seconds_total[1m])
+```
+
+Wall clock is its own metric rather than a `phase="total"` series, because
+`sum by (node)` over phases would otherwise count it twice. Throughput is
+`rate(tkati_rows_in_total[1m])`. The starved share is
+`rate(tkati_starved_iterations_total[1m]) / rate(tkati_iterations_total[1m])`.
+
+Values are read from `LoopStats.totals()` when Prometheus scrapes, so exporting
+adds nothing to the loop. `MetricsSettings` (`enabled`, `port`, `addr`) is meant
+to be embedded as a `metrics` section in a node's settings. It is on by default,
+and `enabled = false` makes `start_metrics_server` a no-op. The collector,
+`LoopStatsCollector`, can also be registered on your own `CollectorRegistry`
+if you serve metrics yourself.
+
 ### `tkati_core.settings` — generic node settings aliases
 
 `tkati_core.settings` defines `InputSettings`/`OutputSettings` (discriminated unions

@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, field_validator
+from tkati_core import MetricsSettings
 from tkati_core.settings import InputSettings, OutputSettings, TomlBaseSettings
 
 
@@ -87,3 +88,4 @@ class AppSettings(TomlBaseSettings):
     output: OutputSettings
     dlq: OutputSettings | None = None
     dedup: DedupSettings
+    metrics: MetricsSettings = MetricsSettings()

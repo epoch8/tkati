@@ -253,3 +253,9 @@ def test_iteration_hands_its_stats_to_the_consumer_and_producer(tmp_path) -> Non
     assert producer.flush.call_args.kwargs["stats"] is stats
 
     store.close()
+
+
+def test_metrics_are_served_by_default(test_settings: AppSettings) -> None:
+    """On unless a deployment opts out, on the port the README documents."""
+    assert test_settings.metrics.enabled is True
+    assert test_settings.metrics.port == 8000

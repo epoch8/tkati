@@ -10,6 +10,13 @@
 * `read_pylist` is now an abstract method on the base `Consumer`, so it can be
   called on whatever `build_consumer` returns. **Breaking** for any
   out-of-tree `Consumer` subclass, which must now implement it
+* Add `tkati_core.metrics`: `LoopStatsCollector` exports a `LoopStats` as
+  Prometheus counters (`tkati_phase_seconds_total{node,phase}`,
+  `tkati_wall_seconds_total`, rows in/out, iterations, starved iterations), and
+  `start_metrics_server(MetricsSettings, stats)` serves them. New dependency:
+  `prometheus-client`
+* `LoopStats.totals()` returns everything counted since creation, across
+  reports. `report()`/`reset()` still restart the interval as before
 * **Breaking for log parsers:** `CONSUMER_PHASES` is now
   `("consumer/poll", "consumer/parse")`. Phases timed inside core are prefixed
   with their component

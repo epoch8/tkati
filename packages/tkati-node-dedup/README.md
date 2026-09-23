@@ -60,7 +60,19 @@ compression              = "none"  # "none" | "lz4" | "zstd" | "snappy"
 disable_wal              = true
 disable_auto_compactions = false   # benchmarking only; see below
 enable_statistics        = false   # costs ~5-10%; diagnosis only
+
+# Optional. Prometheus endpoint, ON by default; these are the defaults.
+[metrics]
+enabled = true
+port    = 8000
+addr    = "0.0.0.0"
 ```
+
+The node serves Prometheus metrics at `:8000/metrics` unless told not to. To
+turn it off, set `[metrics] enabled = false` or the env var
+`METRICS__ENABLED=false`; `METRICS__PORT` moves it. The metrics are the same
+numbers as the perf log line described below; see `tkati-core`'s README for
+the metric names and the PromQL that reproduces the log line's percentages.
 
 Output and DLQ follow the same `OutputSettings` shape as `tkati-node-el`
 (`"kafka"` or `"clickhouse"`) — see that package's README for the full

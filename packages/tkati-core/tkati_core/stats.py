@@ -10,12 +10,28 @@ the reporting cadence are all constructor arguments, because different nodes
 have different pipelines.
 """
 
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from loguru import logger
+
+
+@dataclass(frozen=True)
+class LoopStatsTotals:
+    """Everything a `LoopStats` has counted since it was created, across all
+    reports. Monotonic, which is what a Prometheus counter requires."""
+
+    phase_sec: dict[str, float]
+    rows_in: int
+    rows_out: int
+    iterations: int
+    starved_iterations: int
+    # Wall clock since the LoopStats was created: the denominator that turns
+    # phase seconds into a share of time, as the log line's percentages do.
+    wall_sec: float
 
 
 @dataclass
@@ -41,6 +57,29 @@ class LoopStats:
     phase_sec: dict[str, float] = field(default_factory=dict)
     started: float = field(default_factory=time.monotonic)
 
+    # Totals from intervals already reported, folded in by `reset()`. The
+    # fields above restart every interval; these never do, so `totals()` can
+    # back monotonic counters.
+    _created: float = field(default_factory=time.monotonic, init=False, repr=False)
+    _total_phase_sec: dict[str, float] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _total_rows_in: int = field(default=0, init=False, repr=False)
+    _total_rows_out: int = field(default=0, init=False, repr=False)
+    _total_iterations: int = field(default=0, init=False, repr=False)
+    _total_starved: int = field(default=0, init=False, repr=False)
+    # Taken by `reset()` and `totals()` only — `totals()` is called from a
+    # metrics server thread. Without it a scrape could land between the fold
+    # and the zeroing in `reset()` and see an interval counted twice or not at
+    # all, and a counter that jumps backwards reads as a restart to
+    # Prometheus. `record()` and the `+=` on the counters above deliberately
+    # don't take it: each is a single dict or int update the GIL already makes
+    # atomic, so a scrape sees either the old value or the new one, and the hot
+    # path stays lock-free.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
     def record(self, phase: str, seconds: float) -> None:
         self.phase_sec[phase] = self.phase_sec.get(phase, 0.0) + seconds
 
@@ -54,12 +93,38 @@ class LoopStats:
             self.record(name, time.perf_counter() - started)
 
     def reset(self) -> None:
-        self.iterations = 0
-        self.starved_iterations = 0
-        self.rows_in = 0
-        self.rows_out = 0
-        self.phase_sec = {}
-        self.started = time.monotonic()
+        """Start a new interval. What the old one counted is kept in the
+        running totals behind `totals()`."""
+        with self._lock:
+            for name, sec in self.phase_sec.items():
+                self._total_phase_sec[name] = self._total_phase_sec.get(name, 0.0) + sec
+            self._total_rows_in += self.rows_in
+            self._total_rows_out += self.rows_out
+            self._total_iterations += self.iterations
+            self._total_starved += self.starved_iterations
+
+            self.iterations = 0
+            self.starved_iterations = 0
+            self.rows_in = 0
+            self.rows_out = 0
+            self.phase_sec = {}
+            self.started = time.monotonic()
+
+    def totals(self) -> LoopStatsTotals:
+        """Everything counted since creation, including the interval that
+        hasn't been reported yet. Safe to call from another thread."""
+        with self._lock:
+            phase_sec = dict(self._total_phase_sec)
+            for name, sec in dict(self.phase_sec).items():
+                phase_sec[name] = phase_sec.get(name, 0.0) + sec
+            return LoopStatsTotals(
+                phase_sec=phase_sec,
+                rows_in=self._total_rows_in + self.rows_in,
+                rows_out=self._total_rows_out + self.rows_out,
+                iterations=self._total_iterations + self.iterations,
+                starved_iterations=self._total_starved + self.starved_iterations,
+                wall_sec=time.monotonic() - self._created,
+            )
 
     def report(self) -> None:
         """Log one interval's breakdown, then reset.

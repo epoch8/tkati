@@ -8,6 +8,7 @@ from tkati_core import (
     Producer,
     build_consumer,
     build_producer,
+    start_metrics_server,
 )
 
 from tkati_node_dedup.settings import AppSettings
@@ -153,6 +154,8 @@ def main() -> None:
     )
 
     stats = _new_stats()
+    # Same numbers as the periodic perf log line, as Prometheus counters.
+    start_metrics_server(settings.metrics, stats)
     try:
         while True:
             run_one_iteration(consumer, producer, store, settings, stats)

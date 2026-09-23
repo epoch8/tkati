@@ -95,3 +95,46 @@ def test_phases_render_in_declared_order_even_when_some_never_fired() -> None:
     assert phase_line.index("read=") < phase_line.index("work=")
     assert phase_line.index("work=") < phase_line.index("write=")
     assert "work=0.00s" in phase_line
+
+
+def test_totals_keep_growing_across_reports_while_the_interval_resets() -> None:
+    """The log line restarts every interval; the Prometheus counters built on
+    totals() must not, or every report would look like a node restart."""
+    stats = _stats()
+    stats.rows_in = 10
+    stats.iterations = 2
+    stats.record("work", 1.5)
+    stats.report()
+
+    stats.rows_in = 5
+    stats.iterations = 1
+    stats.record("work", 0.5)
+    stats.report()
+
+    assert stats.rows_in == 0 and stats.phase_sec == {}
+    totals = stats.totals()
+    assert totals.rows_in == 15
+    assert totals.iterations == 3
+    assert totals.phase_sec == {"work": 2.0}
+
+
+def test_totals_include_the_interval_not_yet_reported() -> None:
+    stats = _stats()
+    stats.record("work", 1.0)
+    stats.report()
+    stats.record("work", 0.25)
+    stats.rows_out = 7
+    stats.starved_iterations = 1
+
+    totals = stats.totals()
+    assert totals.phase_sec == {"work": 1.25}
+    assert totals.rows_out == 7
+    assert totals.starved_iterations == 1
+
+
+def test_totals_wall_clock_is_not_restarted_by_reports() -> None:
+    stats = _stats()
+    time.sleep(0.02)
+    stats.report()
+
+    assert stats.totals().wall_sec >= 0.02
