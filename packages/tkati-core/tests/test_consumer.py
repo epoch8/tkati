@@ -2,6 +2,7 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
+from tkati_core import CONSUMER_PHASES, LoopStats
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.settings import KafkaInputSettings
 
@@ -177,3 +178,44 @@ def test_read_pylist_reads_json_messages(
     assert len(rows) == 3
     assert sorted(r["id"] for r in rows) == ["a", "b", "c"]
     assert sorted(r["value"] for r in rows) == [1, 2, 3]
+
+
+def test_read_arrow_splits_its_time_into_poll_and_parse(
+    input_settings: KafkaInputSettings,
+    kafka_input_topic: str,
+    raw_producer: Producer,
+):
+    """Both halves of a read are attributed separately, so a node's perf report
+    can say whether it is waiting on the broker or decoding JSON."""
+    for i in range(50):
+        raw_producer.produce(
+            kafka_input_topic, value=orjson.dumps({"id": f"k{i}", "value": i})
+        )
+    raw_producer.flush()
+
+    stats = LoopStats(name="test", phases=CONSUMER_PHASES)
+    consumer = KafkaConsumer.from_input_settings(input_settings)
+    try:
+        table = consumer.read_arrow(timeout=5, num_messages=50, stats=stats)
+    finally:
+        consumer.close()
+
+    assert table is not None and len(table) == 50
+    assert stats.phase_sec["poll"] > 0
+    assert stats.phase_sec["parse"] > 0
+
+
+def test_read_arrow_records_only_poll_when_nothing_arrives(
+    input_settings: KafkaInputSettings, kafka_input_topic: str
+):
+    """An empty read returns before the parse block. Charging that wait to
+    `parse` would make a starved node look like it was CPU-bound on JSON."""
+    stats = LoopStats(name="test", phases=CONSUMER_PHASES)
+    consumer = KafkaConsumer.from_input_settings(input_settings)
+    try:
+        assert consumer.read_arrow(timeout=2, num_messages=10, stats=stats) is None
+    finally:
+        consumer.close()
+
+    assert stats.phase_sec["poll"] > 0
+    assert "parse" not in stats.phase_sec

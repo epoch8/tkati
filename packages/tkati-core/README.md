@@ -68,14 +68,14 @@ have different pipelines — a dedup node has lookup and write phases an
 extract/load node does not.
 
 ```python
-from tkati_core import LoopStats
+from tkati_core import CONSUMER_PHASES, LoopStats
 
-PHASES = ("read", "produce", "commit")
+PHASES = (*CONSUMER_PHASES, "produce", "commit")
 stats = LoopStats(name="my-node", phases=PHASES)
 
 while True:
-    with stats.phase("read"):
-        batch = consumer.read_arrow(...)
+    # Pass `stats` down and the consumer times its own phases — see below.
+    batch = consumer.read_arrow(..., stats=stats)
     stats.iterations += 1
     if batch is None:
         stats.starved_iterations += 1
@@ -94,8 +94,19 @@ while True:
 
 ```
 my-node perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-my-node perf: read=4.91s (49%) produce=3.96s (39%) commit=0.38s (4%)
+my-node perf: poll=4.43s (44%) parse=0.48s (5%) produce=3.96s (39%) commit=0.38s (4%)
 ```
+
+`Consumer.read_arrow` takes an optional `stats` and splits its own time into
+the two phases named by `CONSUMER_PHASES` — **`poll`**, fetching from the
+broker, and **`parse`**, turning the raw payloads into an Arrow table. These
+have unrelated fixes (batch sizing and broker latency versus JSON decoding
+cost), so they are worth telling apart. Splice `CONSUMER_PHASES` into your
+phase tuple rather than writing `"poll", "parse"` out by hand, so a rename in
+core can't leave your column silently reading `0.00s`.
+
+Do **not** also wrap the call in a phase of your own: that would count the same
+time twice and break the invariant below.
 
 `phases` is an explicit ordered tuple, not derived from which phases happened
 to fire: a phase that doesn't run during an interval's first iteration would
@@ -105,9 +116,9 @@ makes two consecutive lines comparable.
 Percentages are of the interval rather than of each other, so they do **not**
 sum to 100 — the shortfall is time in none of the named phases, which keeps
 unaccounted work visible. Track `starved_iterations` for iterations that were
-blocked waiting on input: a read phase usually blocks until the batch fills or
-the timeout expires, so on an under-fed node it approaches 100% and nothing
-else on the line means anything.
+blocked waiting on input: `poll` blocks until the batch fills or the timeout
+expires, so on an under-fed node it approaches 100% and nothing else on the
+line means anything.
 
 ### `tkati_core.settings` — generic node settings aliases
 

@@ -11,6 +11,7 @@ from loguru import logger
 from pyarrow import json as pa_json
 
 from tkati_core.consumer import Consumer as ConsumerBase
+from tkati_core.stats import LoopStats
 from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
@@ -99,12 +100,15 @@ class KafkaConsumer(ConsumerBase):
         Returns a tuple of (messages, events_read) where messages is a list of
         confluent_kafka Message objects (without errors).
         """
+        # DEBUG rather than INFO: this runs once per loop iteration, which at
+        # production throughput is tens of lines a second — enough to bury the
+        # periodic perf report that is the actual signal.
         if self.topic_name:
-            logger.info(
+            logger.debug(
                 f"Consuming events from topic(s): {self.topic_name} for up to {timeout}s or {num_messages} events"
             )
         else:
-            logger.info(
+            logger.debug(
                 f"Consuming events for up to {timeout}s or {num_messages} events"
             )
 
@@ -118,7 +122,7 @@ class KafkaConsumer(ConsumerBase):
             remaining_time = timeout - elapsed
 
             if remaining_time <= 0:
-                logger.info(f"Reached time limit of {timeout}s")
+                logger.debug(f"Reached time limit of {timeout}s")
                 break
 
             remaining_messages = num_messages - events_read
@@ -139,7 +143,7 @@ class KafkaConsumer(ConsumerBase):
                 events_read += 1
 
         elapsed_total = time.time() - start_time
-        logger.info(f"Consumed {events_read} events in {elapsed_total:.2f}s")
+        logger.debug(f"Consumed {events_read} events in {elapsed_total:.2f}s")
         return valid_messages, events_read
 
     # WARNING: This function breaks if any single message is malformed JSON. We may
@@ -148,6 +152,7 @@ class KafkaConsumer(ConsumerBase):
         self,
         timeout: int,
         num_messages: int,
+        stats: LoopStats | None = None,
     ) -> pa.Table | None:
         """
         Read messages from subscribed topics into a PyArrow table.
@@ -155,6 +160,12 @@ class KafkaConsumer(ConsumerBase):
         Args:
             timeout: Maximum time in seconds to consume messages.
             num_messages: Maximum number of events to consume.
+            stats: Optional LoopStats to attribute this read's wall clock to,
+                split into `poll` (waiting on the broker) and `parse` (turning
+                the raw payloads into an Arrow table). These have different
+                fixes — batch sizing and broker latency on one side, JSON
+                decoding cost on the other — so a caller that only sees a
+                single combined figure cannot tell which to chase.
 
         Returns:
             A PyArrow Table containing the parsed events, or None if no data was consumed.
@@ -165,40 +176,50 @@ class KafkaConsumer(ConsumerBase):
             - Raises exceptions on JSON parsing errors.
             - Uses permissive parsing that ignores unexpected fields in JSON messages.
         """
-        valid_messages, events_read = self._consume_batch(timeout, num_messages)
+        # Discarded when the caller isn't measuring, so the body below never has
+        # to branch on `stats is None`. Allocating one per call costs ~1us
+        # against a read that takes milliseconds at minimum.
+        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+
+        with stats.phase("poll"):
+            valid_messages, events_read = self._consume_batch(timeout, num_messages)
 
         if events_read == 0:
-            logger.info("No data consumed from topic.")
+            logger.debug("No data consumed from topic.")
             return None
 
-        buffer = BytesIO()
-        for msg in valid_messages:
-            buffer.write(msg.value())
-            buffer.write(b"\n")
-        buffer.seek(0)
+        # Covers buffer assembly as well as the JSON decode: concatenating the
+        # payloads is a memcpy of the batch, negligible next to parsing it, so
+        # it doesn't earn a phase of its own.
+        with stats.phase("parse"):
+            buffer = BytesIO()
+            for msg in valid_messages:
+                buffer.write(msg.value())
+                buffer.write(b"\n")
+            buffer.seek(0)
 
-        parse_options = pa_json.ParseOptions(
-            explicit_schema=self.wire_schema,
-            unexpected_field_behavior="ignore",
-        )
+            parse_options = pa_json.ParseOptions(
+                explicit_schema=self.wire_schema,
+                unexpected_field_behavior="ignore",
+            )
 
-        try:
-            table = pa_json.read_json(buffer, parse_options=parse_options)
-            table = table.cast(self.internal_schema)
-            actual_rows = len(table)
+            try:
+                table = pa_json.read_json(buffer, parse_options=parse_options)
+                table = table.cast(self.internal_schema)
+                actual_rows = len(table)
 
-            if actual_rows != events_read:
-                logger.warning(
-                    f"Row count mismatch: consumed {events_read} messages, but parsed {actual_rows} rows. {events_read - actual_rows} messages may have been skipped."
-                )
-            else:
-                logger.info(
-                    f"Successfully parsed {actual_rows} rows matching {events_read} consumed messages"
-                )
+                if actual_rows != events_read:
+                    logger.warning(
+                        f"Row count mismatch: consumed {events_read} messages, but parsed {actual_rows} rows. {events_read - actual_rows} messages may have been skipped."
+                    )
+                else:
+                    logger.debug(
+                        f"Successfully parsed {actual_rows} rows matching {events_read} consumed messages"
+                    )
 
-        except Exception as e:
-            logger.error(f"Failed to parse JSON with PyArrow: {e}")
-            raise
+            except Exception as e:
+                logger.error(f"Failed to parse JSON with PyArrow: {e}")
+                raise
 
         return table
 
@@ -222,7 +243,7 @@ class KafkaConsumer(ConsumerBase):
         valid_messages, events_read = self._consume_batch(timeout, num_messages)
 
         if events_read == 0:
-            logger.info("No data consumed from topic.")
+            logger.debug("No data consumed from topic.")
             return None
 
         rows = []
@@ -232,7 +253,7 @@ class KafkaConsumer(ConsumerBase):
             except Exception as e:
                 logger.error(f"Error parsing message from topic {msg.topic()}: {e}")
 
-        logger.info(f"Successfully parsed {len(rows)} rows")
+        logger.debug(f"Successfully parsed {len(rows)} rows")
         return rows if rows else None
 
     def commit(self) -> None:
