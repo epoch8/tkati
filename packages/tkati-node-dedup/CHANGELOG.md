@@ -1,3 +1,13 @@
+# 0.4.5
+
+* The perf report breaks the old `produce` phase into `producer/serialize`,
+  `producer/enqueue` and `producer/deliver`, and renames `poll`/`parse` to
+  `consumer/poll`/`consumer/parse`. `produce` is gone rather than kept as an
+  umbrella. See the README
+* **Now listens on port 8000 by default**, serving the perf report's numbers
+  as Prometheus metrics at `/metrics`. Disable with `[metrics] enabled = false`
+  or `METRICS__ENABLED=false`
+
 # 0.4.4
 
 * The perf report now breaks the old `read` phase into `poll` and `parse`,

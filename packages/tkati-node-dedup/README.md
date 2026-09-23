@@ -60,7 +60,19 @@ compression              = "none"  # "none" | "lz4" | "zstd" | "snappy"
 disable_wal              = true
 disable_auto_compactions = false   # benchmarking only; see below
 enable_statistics        = false   # costs ~5-10%; diagnosis only
+
+# Optional. Prometheus endpoint, ON by default; these are the defaults.
+[metrics]
+enabled = true
+port    = 8000
+addr    = "0.0.0.0"
 ```
+
+The node serves Prometheus metrics at `:8000/metrics` unless told not to. To
+turn it off, set `[metrics] enabled = false` or the env var
+`METRICS__ENABLED=false`; `METRICS__PORT` moves it. The metrics are the same
+numbers as the perf log line described below; see `tkati-core`'s README for
+the metric names and the PromQL that reproduces the log line's percentages.
 
 Output and DLQ follow the same `OutputSettings` shape as `tkati-node-el`
 (`"kafka"` or `"clickhouse"`) — see that package's README for the full
@@ -73,34 +85,47 @@ Every 10 seconds the node logs where its wall clock went, using
 
 ```
 dedup perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-dedup perf: poll=4.43s (44%) parse=0.48s (5%) lookup=0.52s (5%) produce=3.96s (39%) write=0.21s (2%) commit=0.38s (4%)
+dedup perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) write=0.21s (2%) commit=0.38s (4%)
 ```
 
 `dropped` is the rows this node deduplicated away.
 
-* `poll` — fetching message batches from the broker. Mostly broker round trips,
-  but it also includes librdkafka handing each message to Python, which has a
-  floor of roughly 0.8 us/message no matter how fast the broker is
-* `parse` — JSON-decoding those payloads into an Arrow table, and casting to
-  the internal schema
-* `lookup` — encoding keys, resolving in-batch duplicates, querying the store
-* `produce` — serializing and producing, including the blocking `flush`
-* `write` — marking the surviving keys seen
-* `commit` — the synchronous offset commit (and bucket cleanup, which is ~0
-  except once an hour when a bucket is destroyed)
+* `consumer/poll`: fetching message batches from the broker. Mostly broker
+  round trips, but it also includes librdkafka handing each message to Python,
+  which costs at least about 0.8 us per message however fast the broker is.
+* `consumer/parse`: JSON-decoding those payloads into an Arrow table and
+  casting to the internal schema.
+* `lookup`: encoding keys, resolving in-batch duplicates, querying the store.
+* `producer/serialize`: converting the surviving rows to JSON (or to Arrow IPC
+  for `arrow-batch`).
+* `producer/enqueue`: handing each encoded message to librdkafka.
+* `producer/deliver`: the blocking `flush`, i.e. waiting for broker acks that
+  hadn't arrived by the end of `enqueue`. A ClickHouse output records its
+  whole insert here.
+* `write`: marking the surviving keys seen.
+* `commit`: the synchronous offset commit, plus bucket cleanup, which is ~0
+  except once an hour when a bucket is destroyed.
 
-`poll` and `parse` come from `tkati-core`'s consumer rather than from this
-node, which splices them in from `CONSUMER_PHASES`. They are split apart
-because their fixes are unrelated: a large `poll` points at batch sizing,
-broker latency or an under-fed topic, while a large `parse` points at the JSON
-decode and is what a faster wire format would address.
+The `consumer/` and `producer/` phases are timed by `tkati-core` rather than by
+this node, which splices them in from `CONSUMER_PHASES` and `PRODUCER_PHASES`.
+They are split apart because their fixes are unrelated:
+
+* A large `consumer/poll` points at batch sizing, broker latency or an
+  under-fed topic.
+* A large `consumer/parse` points at the JSON decode, which a faster wire
+  format would address.
+* A large `producer/serialize` is Python-side encoding cost.
+* A large `producer/enqueue` means too many small messages.
+* A large `producer/deliver` points at the broker, or at the output's acks and
+  `linger.ms` settings.
 
 Percentages are of the interval, not of each other, so they **do not sum to
 100** — the remainder is time in none of the named phases.
 
 `input-starved` counts iterations where the node drained the topic and waited
-out the batch timeout. Those iterations were not CPU-bound, and because `poll`
-blocks for the whole wait, a mostly-starved interval will show `poll` at close
+out the batch timeout. Those iterations were not CPU-bound, and because
+`consumer/poll` blocks for the whole wait, a mostly-starved interval will show
+`consumer/poll` at close
 to 100% and tells you nothing about whether the node can keep up.
 
 `benchmarks/bench_store.py` A/B tests the store in isolation. It populates in

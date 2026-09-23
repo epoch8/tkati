@@ -6,6 +6,7 @@ import pyarrow as pa
 import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
+from tkati_core import LoopStats
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
@@ -226,3 +227,35 @@ def test_crash_before_flush_does_not_mark_seen_or_commit(tmp_path) -> None:
     assert store.contains(b"crash-uid") is True
 
     store.close()
+
+
+def test_iteration_hands_its_stats_to_the_consumer_and_producer(tmp_path) -> None:
+    """The node times no read or produce phase of its own; it relies on the
+    consumer and producer to fill in theirs. If it stopped passing `stats`
+    down, those report columns would silently read 0.00s."""
+    batch = pa.table({"uid": ["a", "b"], "val": [1, 2]})
+
+    consumer = MagicMock()
+    consumer.read_arrow.return_value = batch
+    producer = MagicMock()
+
+    store = BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
+    settings = MagicMock()
+    settings.input.consumer.batch_size = 100
+    settings.input.consumer.batch_timeout_sec = 5
+    settings.dedup.field = "uid"
+
+    stats = LoopStats(name="test", phases=())
+    run_one_iteration(consumer, producer, store, settings, stats)
+
+    assert consumer.read_arrow.call_args.kwargs["stats"] is stats
+    assert producer.produce_arrow.call_args.kwargs["stats"] is stats
+    assert producer.flush.call_args.kwargs["stats"] is stats
+
+    store.close()
+
+
+def test_metrics_are_served_by_default(test_settings: AppSettings) -> None:
+    """On unless a deployment opts out, on the port the README documents."""
+    assert test_settings.metrics.enabled is True
+    assert test_settings.metrics.port == 8000

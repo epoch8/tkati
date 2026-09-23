@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
+from tkati_core import PRODUCER_PHASES, LoopStats
 from tkati_core.clickhouse.producer import (
     ClickhouseProducer,
     _insert_with_dlq_fallback,
@@ -212,3 +213,45 @@ def test_ch_producer_close() -> None:
     ch_client = MagicMock()
     ClickhouseProducer(ch_client=ch_client, table="traffic_event").close()
     ch_client.close.assert_called_once()
+
+
+def test_ch_producer_records_the_whole_insert_as_deliver() -> None:
+    """clickhouse_connect serializes and sends in one call, so there is no seam
+    for serialize/enqueue — all of it lands in deliver, and flush adds nothing."""
+    ch_client = MagicMock()
+    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+
+    producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event")
+    producer.produce_arrow(_make_arrow_table(3), stats=stats)
+    producer.flush(stats=stats)
+
+    assert set(stats.phase_sec) == {"producer/deliver"}
+
+
+def test_ch_producer_produce_pylist_records_serialize_and_deliver() -> None:
+    ch_client = MagicMock()
+    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+
+    producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event")
+    producer.produce_pylist([{"uid": "uid-0", "traffic_in": 100}], stats=stats)
+
+    assert set(stats.phase_sec) == {"producer/serialize", "producer/deliver"}
+
+
+def test_ch_producer_does_not_pass_stats_to_its_dlq() -> None:
+    """The DLQ fallback runs inside the primary's deliver block. Handing the
+    DLQ the same stats would count that time twice."""
+    ch_client = MagicMock()
+    ch_client.insert_arrow.side_effect = Exception("CH down")
+    dlq_producer = MagicMock()
+    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+
+    producer = ClickhouseProducer(
+        ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer
+    )
+    with patch("time.sleep"):
+        producer.produce_arrow(_make_arrow_table(1), stats=stats)
+
+    assert "stats" not in dlq_producer.produce_arrow.call_args.kwargs
+    assert "stats" not in dlq_producer.flush.call_args.kwargs
+    assert set(stats.phase_sec) == {"producer/deliver"}

@@ -2,22 +2,25 @@ import pyarrow as pa
 from loguru import logger
 from tkati_core import (
     CONSUMER_PHASES,
+    PRODUCER_PHASES,
     Consumer,
     LoopStats,
     Producer,
     build_consumer,
     build_producer,
+    start_metrics_server,
 )
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
 
 # Reported in this order, not sorted by duration: a stable field order is what
-# makes two consecutive log lines comparable at a glance. The tail lives here
-# rather than in tkati-core because these four names are this node's pipeline —
-# tkati-node-el, for instance, has no lookup or write phase. The head is spliced
-# in from the consumer, which owns the names it times itself against.
-_PHASES = (*CONSUMER_PHASES, "lookup", "produce", "write", "commit")
+# makes two consecutive log lines comparable at a glance. The unprefixed names
+# live here rather than in tkati-core because they are this node's pipeline —
+# tkati-node-el, for instance, has no lookup or write phase. The consumer's and
+# producer's phases are spliced in from tkati-core, which owns the names it
+# times itself against.
+_PHASES = (*CONSUMER_PHASES, "lookup", *PRODUCER_PHASES, "write", "commit")
 
 
 def _new_stats() -> LoopStats:
@@ -95,7 +98,7 @@ def run_one_iteration(
         filtered, new_keys = batch, []
     else:
         # Includes the batch.filter() call, which is Arrow work rather than a
-        # store lookup — cheap enough not to be worth a sixth phase.
+        # store lookup — cheap enough not to be worth a phase of its own.
         with stats.phase("lookup"):
             filtered, new_keys = _dedupe_batch(batch, field_name, store)
 
@@ -103,16 +106,17 @@ def run_one_iteration(
     stats.rows_out += len(filtered)
 
     if len(filtered) > 0:
-        with stats.phase("produce"):
-            producer.produce_arrow(filtered)
+        # No phase blocks here either: the producer splits its own time into
+        # `serialize`, `enqueue` and `deliver`, for the same reason as the
+        # consumer above.
+        producer.produce_arrow(filtered, stats=stats)
         # Block until actually delivered before marking anything "seen" or
         # committing. Required here even though tkati-node-el's loop skips it:
         # KafkaProducer.produce_arrow() only enqueues (non-blocking), and
         # marking a key seen before it's durably delivered would risk losing
         # the event permanently on a crash. ClickhouseProducer.flush() is a
         # no-op since its inserts are already synchronous.
-        with stats.phase("produce"):
-            producer.flush()
+        producer.flush(stats=stats)
 
     # Only after a confirmed-successful produce: mark these keys seen.
     with stats.phase("write"):
@@ -150,6 +154,8 @@ def main() -> None:
     )
 
     stats = _new_stats()
+    # Same numbers as the periodic perf log line, as Prometheus counters.
+    start_metrics_server(settings.metrics, stats)
     try:
         while True:
             run_one_iteration(consumer, producer, store, settings, stats)

@@ -1,6 +1,6 @@
 [project]
 name = "tkati-core"
-version = "0.4.4.post1"
+version = "0.4.5"
 description = "Core abstractions for Kafka/ClickHouse streaming pipeline nodes"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -19,6 +19,7 @@ dependencies = [
     "confluent-kafka>=2.11.0",
     "loguru>=0.7.3",
     "orjson>=3.9.0",
+    "prometheus-client>=0.21",
     "pyarrow>=21.0.0",
     "pydantic-settings>=2.11.0",
     "tenacity>=9.0.0",

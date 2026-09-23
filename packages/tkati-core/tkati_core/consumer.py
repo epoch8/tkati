@@ -10,8 +10,9 @@ from tkati_core.stats import LoopStats
 # The phases a consumer decomposes its read into, in report order. Exported so
 # nodes can splice them into their own phase tuple instead of restating the
 # names — a rename here would otherwise leave a node's column silently reading
-# 0.00s forever.
-CONSUMER_PHASES = ("poll", "parse")
+# 0.00s forever. Prefixed so a report line shows at a glance which figures were
+# timed inside tkati-core rather than by the node itself.
+CONSUMER_PHASES = ("consumer/poll", "consumer/parse")
 
 
 class Consumer(ABC):
@@ -29,7 +30,24 @@ class Consumer(ABC):
         When `stats` is given, the time spent is attributed to the
         `CONSUMER_PHASES` — waiting on the source versus decoding what came
         back. Implementations that cannot tell the two apart should record all
-        of it as `poll`.
+        of it as `consumer/poll`.
+        """
+
+    @abstractmethod
+    def read_pylist(
+        self,
+        timeout: int,
+        num_messages: int,
+        stats: LoopStats | None = None,
+    ) -> list[dict] | None:
+        """Read a batch as a list of dicts, or None if nothing was available.
+
+        Unlike `read_arrow`, a message that fails to decode is skipped (and
+        logged) rather than failing the whole batch — so the list can be
+        shorter than what was consumed, and None if nothing decoded at all.
+
+        `stats` is attributed to the `CONSUMER_PHASES` exactly as in
+        `read_arrow`.
         """
 
     @abstractmethod

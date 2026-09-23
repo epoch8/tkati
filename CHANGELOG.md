@@ -12,6 +12,72 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.4.5
+
+### nltnrvuo — Export LoopStats as Prometheus metrics [tkati-core, tkati-node-dedup]
+
+- The perf breakdown was only a log line every 10s, which can't be graphed or
+  alerted on. `tkati_core.metrics.LoopStatsCollector` exposes the same numbers
+  as Prometheus counters:
+  - `tkati_phase_seconds_total{node,phase}`
+  - `tkati_wall_seconds_total{node}`
+  - `tkati_rows_in_total` and `tkati_rows_out_total`
+  - `tkati_iterations_total` and `tkati_starved_iterations_total`
+
+  `start_metrics_server(MetricsSettings, stats)` serves them from a daemon
+  thread.
+- Everything is a monotonic counter, and rates and shares are left to PromQL.
+  `tkati_wall_seconds_total` is the 100% denominator, so a phase's share is
+  `rate(phase) / ignoring(phase) group_left rate(wall)`, which is exactly the
+  log line's percentage. It is a separate metric rather than a `phase="total"`
+  series, because a total inside the phase metric would be counted twice by
+  `sum by (node)`.
+- `LoopStats` keeps running totals that `reset()` folds each interval into, and
+  `totals()` reads them at scrape time. A lock covers only the fold and the
+  read, so a scrape can never catch a counter going backwards. The hot path
+  (`record()`, `+=`) takes no lock and pays nothing for being exported.
+- **`tkati-node-dedup` now listens on port 8000 by default.** This is visible
+  to deployments. Opt out with `[metrics] enabled = false` or
+  `METRICS__ENABLED=false`.
+- New `tkati-core` dependency: `prometheus-client`.
+
+### rzvtzzns — Promote read_pylist to the base Consumer [tkati-core]
+
+- `read_pylist` was defined only on `KafkaConsumer`, so a caller holding the
+  `Consumer` that `build_consumer` returns had to cast to call it. An app
+  outside this repo calls it. It is now an abstract method on `Consumer`, next
+  to `read_arrow`, with the same `stats` attribution. This matches `Producer`,
+  which has always declared `produce_pylist`.
+- The base docstring states how it differs from `read_arrow`: a message that
+  fails to decode is skipped and logged instead of failing the batch.
+- **Breaking** for any `Consumer` subclass outside this repo, which must now
+  implement `read_pylist`. `KafkaConsumer`, the only implementation here, is
+  unchanged.
+
+### lkpyyqzq — Split the producer's time into serialize, enqueue and deliver; prefix core phases [tkati-core, tkati-node-dedup]
+
+- Follows 0.4.4's consumer split. The dedup node's `produce` phase (~39%) was
+  still one number covering three things with unrelated fixes: encoding rows
+  (Python CPU), one `produce()` call per message into librdkafka (message
+  count), and the blocking `flush` (broker acks). `Producer.produce_arrow`,
+  `produce_pylist` and `flush` now take an optional `stats: LoopStats` and
+  record **`producer/serialize`**, **`producer/enqueue`** and
+  **`producer/deliver`**. `tkati_core.PRODUCER_PHASES` names them, for nodes to
+  splice in.
+- `KafkaProducer` used to encode each row and enqueue it in the same loop.
+  It now encodes the whole batch first and then enqueues it, so the two can be
+  timed separately. The messages produced are unchanged.
+- `ClickhouseProducer` records its whole insert as `producer/deliver`, because
+  `clickhouse_connect` encodes and sends in a single call. Its DLQ producer is
+  not handed `stats`: the fallback already runs inside that block.
+- `KafkaConsumer.read_pylist` now takes `stats` too, split like `read_arrow`.
+- **Report format change:** every phase timed inside core is now prefixed with
+  its component. `poll`/`parse` from 0.4.4 are renamed
+  `consumer/poll`/`consumer/parse`, and `produce` is replaced (not wrapped) by
+  the three `producer/` phases. Node-owned phases (`lookup`, `write`, `commit`)
+  stay unprefixed. Anything that searches logs for `poll=` or `produce=` needs
+  updating.
+
 ## 0.4.4
 
 ### wqmmyrsz — Split the consumer's read time into poll and parse [tkati-core, tkati-node-dedup]
