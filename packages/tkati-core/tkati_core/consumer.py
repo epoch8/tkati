@@ -34,6 +34,23 @@ class Consumer(ABC):
         """
 
     @abstractmethod
+    def read_pylist(
+        self,
+        timeout: int,
+        num_messages: int,
+        stats: LoopStats | None = None,
+    ) -> list[dict] | None:
+        """Read a batch as a list of dicts, or None if nothing was available.
+
+        Unlike `read_arrow`, a message that fails to decode is skipped (and
+        logged) rather than failing the whole batch — so the list can be
+        shorter than what was consumed, and None if nothing decoded at all.
+
+        `stats` is attributed to the `CONSUMER_PHASES` exactly as in
+        `read_arrow`.
+        """
+
+    @abstractmethod
     def commit(self) -> None: ...
 
     @abstractmethod

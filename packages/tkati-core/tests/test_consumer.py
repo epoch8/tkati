@@ -2,7 +2,7 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
-from tkati_core import CONSUMER_PHASES, LoopStats
+from tkati_core import CONSUMER_PHASES, Consumer, LoopStats, build_consumer
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.settings import KafkaInputSettings
 
@@ -257,3 +257,22 @@ def test_read_pylist_records_only_poll_when_nothing_arrives(
 
     assert stats.phase_sec["consumer/poll"] > 0
     assert "consumer/parse" not in stats.phase_sec
+
+
+def test_read_pylist_is_callable_through_the_base_consumer(
+    input_settings: KafkaInputSettings,
+    kafka_input_topic: str,
+    raw_producer: Producer,
+):
+    """Callers that only hold the abstract Consumer from build_consumer can
+    read dicts without casting to KafkaConsumer."""
+    raw_producer.produce(kafka_input_topic, value=orjson.dumps({"id": "a", "value": 1}))
+    raw_producer.flush()
+
+    consumer: Consumer = build_consumer(input_settings)
+    try:
+        rows = consumer.read_pylist(timeout=5, num_messages=1)
+    finally:
+        consumer.close()
+
+    assert rows == [{"id": "a", "value": 1}]

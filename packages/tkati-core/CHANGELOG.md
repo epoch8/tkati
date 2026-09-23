@@ -7,6 +7,9 @@
   `producer/deliver`
 * Add `PRODUCER_PHASES`, re-exported from `tkati_core`
 * `KafkaConsumer.read_pylist` takes `stats`, split like `read_arrow`
+* `read_pylist` is now an abstract method on the base `Consumer`, so it can be
+  called on whatever `build_consumer` returns. **Breaking** for any
+  out-of-tree `Consumer` subclass, which must now implement it
 * **Breaking for log parsers:** `CONSUMER_PHASES` is now
   `("consumer/poll", "consumer/parse")`. Phases timed inside core are prefixed
   with their component

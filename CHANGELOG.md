@@ -14,6 +14,19 @@ config or docs changed.
 
 ## 0.4.5
 
+### rzvtzzns — Promote read_pylist to the base Consumer [tkati-core]
+
+- `read_pylist` was defined only on `KafkaConsumer`, so a caller holding the
+  `Consumer` that `build_consumer` returns had to cast to call it. An app
+  outside this repo calls it. It is now an abstract method on `Consumer`, next
+  to `read_arrow`, with the same `stats` attribution. This matches `Producer`,
+  which has always declared `produce_pylist`.
+- The base docstring states how it differs from `read_arrow`: a message that
+  fails to decode is skipped and logged instead of failing the batch.
+- **Breaking** for any `Consumer` subclass outside this repo, which must now
+  implement `read_pylist`. `KafkaConsumer`, the only implementation here, is
+  unchanged.
+
 ### lkpyyqzq — Split the producer's time into serialize, enqueue and deliver; prefix core phases [tkati-core, tkati-node-dedup]
 
 - Follows 0.4.4's consumer split. The dedup node's `produce` phase (~39%) was

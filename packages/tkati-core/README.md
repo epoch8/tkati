@@ -54,7 +54,9 @@ broker = "localhost:9092"
 ### `Consumer` / `Producer` base classes
 
 `tkati_core.consumer.Consumer` and `tkati_core.producer.Producer` are the abstract
-interfaces a node's input and output are built against. `KafkaConsumer` is the only
+interfaces a node's input and output are built against. A `Consumer` reads a batch
+with `read_arrow` (an Arrow table, which fails the batch on a malformed message) or
+`read_pylist` (a list of dicts, which skips and logs one). `KafkaConsumer` is the only
 `Consumer` implementation today; `KafkaProducer` and `ClickhouseProducer` both
 implement `Producer`. This is what lets a generic node pick its input/output kind
 from config instead of hardcoding a concrete class.
@@ -98,7 +100,7 @@ my-node perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations
 my-node perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) commit=0.38s (4%)
 ```
 
-`Consumer.read_arrow` and `KafkaConsumer.read_pylist` take an optional `stats`
+`Consumer.read_arrow` and `Consumer.read_pylist` take an optional `stats`
 and split their own time into the two phases named by `CONSUMER_PHASES`:
 **`consumer/poll`**, fetching from the broker, and **`consumer/parse`**, turning
 the raw payloads into an Arrow table or dicts. These have unrelated fixes
