@@ -1,3 +1,11 @@
+# 0.4.3
+
+* Add `LoopStats` (`tkati_core.stats`, re-exported from `tkati_core`): per-phase
+  wall-clock accounting for a node's main loop, logged on an interval (10s by
+  default) as seconds and percent. Phase names, log prefix and cadence are
+  constructor arguments so each node can describe its own pipeline. Moved here
+  from `tkati-node-dedup`, which had it inline
+
 # 0.3.0
 
 * Add shared `Producer` base class implemented by `KafkaProducer` and `ClickhouseProducer`
