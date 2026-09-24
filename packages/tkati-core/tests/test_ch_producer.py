@@ -219,7 +219,7 @@ def test_ch_producer_records_the_whole_insert_as_deliver() -> None:
     """clickhouse_connect serializes and sends in one call, so there is no seam
     for serialize/enqueue — all of it lands in deliver, and flush adds nothing."""
     ch_client = MagicMock()
-    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    stats = LoopStats(phases=PRODUCER_PHASES)
 
     producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event")
     producer.produce_arrow(_make_arrow_table(3), stats=stats)
@@ -230,7 +230,7 @@ def test_ch_producer_records_the_whole_insert_as_deliver() -> None:
 
 def test_ch_producer_produce_pylist_records_serialize_and_deliver() -> None:
     ch_client = MagicMock()
-    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    stats = LoopStats(phases=PRODUCER_PHASES)
 
     producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event")
     producer.produce_pylist([{"uid": "uid-0", "traffic_in": 100}], stats=stats)
@@ -244,7 +244,7 @@ def test_ch_producer_does_not_pass_stats_to_its_dlq() -> None:
     ch_client = MagicMock()
     ch_client.insert_arrow.side_effect = Exception("CH down")
     dlq_producer = MagicMock()
-    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    stats = LoopStats(phases=PRODUCER_PHASES)
 
     producer = ClickhouseProducer(
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer

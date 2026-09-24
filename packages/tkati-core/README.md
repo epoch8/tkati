@@ -73,7 +73,7 @@ extract/load node does not.
 from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, LoopStats
 
 PHASES = (*CONSUMER_PHASES, *PRODUCER_PHASES, "commit")
-stats = LoopStats(name="my-node", phases=PHASES)
+stats = LoopStats(phases=PHASES)
 
 while True:
     # Pass `stats` down and the consumer and producer time their own phases —
@@ -96,8 +96,8 @@ while True:
 ```
 
 ```
-my-node perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-my-node perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) commit=0.38s (4%)
+perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
+perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) commit=0.38s (4%)
 ```
 
 `Consumer.read_arrow` and `Consumer.read_pylist` take an optional `stats`
@@ -151,21 +151,22 @@ numbers as the log line, but monotonic, so they don't reset at each report.
 ```python
 from tkati_core import MetricsSettings, start_metrics_server
 
-stats = LoopStats(name="my-node", phases=PHASES)
+stats = LoopStats(phases=PHASES)
 start_metrics_server(MetricsSettings(), stats)  # :8000/metrics, daemon thread
 ```
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `tkati_phase_seconds_total` | `node`, `phase` | wall clock spent in each phase |
-| `tkati_wall_seconds_total` | `node` | wall clock since the `LoopStats` was created, the 100% denominator |
-| `tkati_rows_in_total` / `tkati_rows_out_total` | `node` | rows read / written |
-| `tkati_iterations_total` | `node` | loop iterations |
-| `tkati_starved_iterations_total` | `node` | iterations that waited on input |
+| `tkati_phase_seconds_total` | `phase` | wall clock spent in each phase |
+| `tkati_wall_seconds_total` | — | wall clock since the `LoopStats` was created, the 100% denominator |
+| `tkati_rows_in_total` / `tkati_rows_out_total` | — | rows read / written |
+| `tkati_iterations_total` | — | loop iterations |
+| `tkati_starved_iterations_total` | — | iterations that waited on input |
 
-`node` is `LoopStats.name`. `phase` is the phase name exactly as it appears in
-the log line. Every declared phase is exported from the first scrape, at 0 if it
-hasn't run yet.
+There is no node label: each node serves its own `/metrics`, so the scrape
+target's `job`/`instance` already says which node a series came from. `phase`
+is the phase name exactly as it appears in the log line. Every declared phase
+is exported from the first scrape, at 0 if it hasn't run yet.
 
 The log line's "% of the interval", and its unaccounted remainder, in PromQL:
 
@@ -173,12 +174,12 @@ The log line's "% of the interval", and its unaccounted remainder, in PromQL:
 rate(tkati_phase_seconds_total[1m])
   / ignoring(phase) group_left rate(tkati_wall_seconds_total[1m])
 
-1 - sum by (node) (rate(tkati_phase_seconds_total[1m]))
+1 - sum without (phase) (rate(tkati_phase_seconds_total[1m]))
   / rate(tkati_wall_seconds_total[1m])
 ```
 
 Wall clock is its own metric rather than a `phase="total"` series, because
-`sum by (node)` over phases would otherwise count it twice. Throughput is
+`sum without (phase)` over phases would otherwise count it twice. Throughput is
 `rate(tkati_rows_in_total[1m])`. The starved share is
 `rate(tkati_starved_iterations_total[1m]) / rate(tkati_iterations_total[1m])`.
 

@@ -9,8 +9,8 @@ Prometheus convention and is what survives scrape gaps and restarts. The
       / ignoring(phase) group_left rate(tkati_wall_seconds_total[1m])
 
 Wall clock is its own metric rather than a `phase="total"` series: with a
-total inside the phase metric, `sum by (node)` over phases would count it
-twice.
+total inside the phase metric, `sum without (phase)` over phases would count
+it twice.
 """
 
 from collections.abc import Iterator
@@ -37,12 +37,11 @@ class LoopStatsCollector:
 
     def collect(self) -> Iterator[Metric]:
         totals = self._stats.totals()
-        node = self._stats.name
 
         phases = CounterMetricFamily(
             "tkati_phase_seconds",
             "Wall-clock seconds spent in each phase of the node loop.",
-            labels=["node", "phase"],
+            labels=["phase"],
         )
         # Every declared phase, in declared order, even before it has fired —
         # so each series exists from the first scrape with a known starting
@@ -50,7 +49,7 @@ class LoopStatsCollector:
         names = list(self._stats.phases)
         names += [name for name in totals.phase_sec if name not in names]
         for name in names:
-            phases.add_metric([node, name], totals.phase_sec.get(name, 0.0))
+            phases.add_metric([name], totals.phase_sec.get(name, 0.0))
         yield phases
 
         for metric, documentation, value in (
@@ -74,9 +73,7 @@ class LoopStatsCollector:
                 totals.starved_iterations,
             ),
         ):
-            family = CounterMetricFamily(metric, documentation, labels=["node"])
-            family.add_metric([node], value)
-            yield family
+            yield CounterMetricFamily(metric, documentation, value=value)
 
 
 class MetricsSettings(BaseModel):

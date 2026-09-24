@@ -5,7 +5,7 @@ from tkati_core import LoopStats
 
 
 def _stats(**kwargs) -> LoopStats:
-    return LoopStats(name="test", phases=("read", "work", "write"), **kwargs)
+    return LoopStats(phases=("read", "work", "write"), **kwargs)
 
 
 def test_phase_timings_accumulate_across_blocks() -> None:

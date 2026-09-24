@@ -98,7 +98,7 @@ class ClickhouseProducer(Producer):
         # includes the retry and DLQ fallback, whose own producer is deliberately
         # not handed `stats` — its time is already inside this block, and
         # recording it again would count it twice.
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
 
         with stats.phase("producer/deliver"):
             try:
@@ -122,7 +122,7 @@ class ClickhouseProducer(Producer):
                 self._dlq_producer.flush()
 
     def produce_pylist(self, rows: list[dict], stats: LoopStats | None = None) -> None:
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
         with stats.phase("producer/serialize"):
             table = pa.Table.from_pylist(rows)
         self.produce_arrow(table, stats=stats)

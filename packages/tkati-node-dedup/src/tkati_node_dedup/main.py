@@ -33,7 +33,7 @@ _DROPPED_ROWS = Counter(
 
 
 def _new_stats() -> LoopStats:
-    return LoopStats(name="dedup", phases=_PHASES)
+    return LoopStats(phases=_PHASES)
 
 
 def _dedupe_batch(

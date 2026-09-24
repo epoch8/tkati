@@ -123,7 +123,7 @@ class KafkaProducer(ProducerBase):
         and handing the messages to librdkafka as ``producer/enqueue``. Neither
         waits on the broker — that is ``flush``'s ``producer/deliver``.
         """
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
 
         if self.format == "json":
             with stats.phase("producer/serialize"):
@@ -157,7 +157,7 @@ class KafkaProducer(ProducerBase):
         If ``key_column`` is set, its value is used as the Kafka message key.
         ``stats`` is split as in ``produce_arrow``.
         """
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
 
         with stats.phase("producer/serialize"):
             messages = EncodedBatch.from_payloads(self._serialize_rows(rows))
@@ -200,7 +200,7 @@ class KafkaProducer(ProducerBase):
         background as soon as messages are enqueued, so this is the *residual*
         wait for broker acks, not the batch's total time on the network.
         """
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
 
         with stats.phase("producer/deliver"):
             self.producer.flush()

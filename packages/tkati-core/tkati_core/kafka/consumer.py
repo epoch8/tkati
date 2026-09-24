@@ -166,7 +166,7 @@ class KafkaConsumer(ConsumerBase):
         # Discarded when the caller isn't measuring, so the body below never has
         # to branch on `stats is None`. Allocating one per call costs ~1us
         # against a read that takes milliseconds at minimum.
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
 
         # Also covers assembling the payloads into one buffer, which happens
         # as they arrive, natively and outside the GIL.
@@ -226,7 +226,7 @@ class KafkaConsumer(ConsumerBase):
         Notes:
             - Does NOT commit offsets. The caller is responsible for managing consumer lifecycle.
         """
-        stats = stats if stats is not None else LoopStats(name="unreported", phases=())
+        stats = stats if stats is not None else LoopStats(phases=())
 
         with stats.phase("consumer/poll"):
             batch = self._consume_batch(timeout, num_messages)

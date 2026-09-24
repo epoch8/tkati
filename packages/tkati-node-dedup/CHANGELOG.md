@@ -1,3 +1,8 @@
+# 0.5.1
+
+* The perf log lines no longer start with `dedup`, and the tkati-core metrics
+  no longer carry `node="dedup"` (see tkati-core).
+
 # 0.5.0
 
 * New Prometheus counter `tkati_node_dedup_dropped_rows_total`: rows dropped

@@ -87,8 +87,8 @@ Every 10 seconds the node logs where its wall clock went, using
 `LoopStats` from `tkati-core`:
 
 ```
-dedup perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-dedup perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) write=0.21s (2%) commit=0.38s (4%)
+perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
+perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) write=0.21s (2%) commit=0.38s (4%)
 ```
 
 `dropped` is the rows this node deduplicated away.

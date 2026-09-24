@@ -12,6 +12,17 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.5.1
+
+### nqzmolxt — Drop the node label and LoopStats.name [tkati-core, tkati-node-dedup]
+
+- `LoopStatsCollector` exports its counters without a `node` label. The scrape
+  target's `job`/`instance` already identifies the node. PromQL in the README
+  and in `metrics.py` uses `sum without (phase)` instead of `sum by (node)`.
+- `LoopStats.name` is removed. Its only other use was the prefix on the perf log
+  lines, which now start with `perf`. All callers and README examples are
+  updated.
+
 ## 0.5.0
 
 ### qxsutmsp — Explicit dropped-rows metric for the dedup node [tkati-node-dedup]

@@ -246,7 +246,7 @@ def test_iteration_hands_its_stats_to_the_consumer_and_producer(tmp_path) -> Non
     settings.input.consumer.batch_timeout_sec = 5
     settings.dedup.field = "uid"
 
-    stats = LoopStats(name="test", phases=())
+    stats = LoopStats(phases=())
     run_one_iteration(consumer, producer, store, settings, stats)
 
     assert consumer.read_arrow.call_args.kwargs["stats"] is stats

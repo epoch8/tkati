@@ -251,7 +251,7 @@ def test_produce_arrow_and_flush_split_their_time_into_producer_phases(
     )
     table = pa.table({"id": [f"k{i}" for i in range(50)], "n": list(range(50))})
 
-    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    stats = LoopStats(phases=PRODUCER_PHASES)
     producer = KafkaProducer.from_output_settings(settings)
     try:
         producer.produce_arrow(table, stats=stats)
@@ -272,7 +272,7 @@ def test_produce_pylist_splits_its_time_into_serialize_and_enqueue(
 ):
     rows = [{"name": "alice", "score": 10}, {"name": "bob", "score": 20}]
 
-    stats = LoopStats(name="test", phases=PRODUCER_PHASES)
+    stats = LoopStats(phases=PRODUCER_PHASES)
     producer = KafkaProducer.from_output_settings(output_settings)
     try:
         producer.produce_pylist(rows, stats=stats)

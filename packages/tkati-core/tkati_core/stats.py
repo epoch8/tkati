@@ -5,9 +5,9 @@ parsing, how much to each processing step, and how much to producing? Nodes
 time their phases against a `LoopStats` and let it log a breakdown on an
 interval.
 
-Deliberately not tied to any one node — the phase names, the log prefix and
-the reporting cadence are all constructor arguments, because different nodes
-have different pipelines.
+Deliberately not tied to any one node — the phase names and the reporting
+cadence are constructor arguments, because different nodes have different
+pipelines.
 """
 
 import threading
@@ -46,7 +46,6 @@ class LoopStats:
     lines comparable at a glance.
     """
 
-    name: str
     phases: tuple[str, ...]
     report_interval_sec: float = 10.0
 
@@ -141,7 +140,7 @@ class LoopStats:
         elapsed = max(time.monotonic() - self.started, 1e-9)
 
         logger.info(
-            f"{self.name} perf over {elapsed:.3g}s: {self.rows_in} rows in, "
+            f"perf over {elapsed:.3g}s: {self.rows_in} rows in, "
             f"{self.rows_out} out ({self.rows_in - self.rows_out} dropped), "
             f"{self.iterations} iterations ({self.starved_iterations} input-starved)"
         )
@@ -149,7 +148,7 @@ class LoopStats:
             f"{name}={(sec := self.phase_sec.get(name, 0.0)):.2f}s ({sec / elapsed * 100:.0f}%)"
             for name in self.phases
         )
-        logger.info(f"{self.name} perf: {phases}")
+        logger.info(f"perf: {phases}")
         self.reset()
 
     def report_if_due(self) -> None:
