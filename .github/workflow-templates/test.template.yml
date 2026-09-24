@@ -1,3 +1,5 @@
+{#- Packages with a Rust extension built by maturin; see publish.template.yml. #}
+{%- set maturin = package.name in ["tkati-core"] -%}
 name: Test {{ package.name }}
 
 on:
@@ -19,6 +21,13 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      {%- if maturin %}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "{{ package.path }} -> target"
+      {%- endif %}
 
       - name: Build wheel
         run: uv build
@@ -59,9 +68,44 @@ jobs:
 
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
-      
+      {%- if maturin %}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "{{ package.path }} -> target"
+      {%- endif %}
+      {%- for dependency in package.workspace_dependencies %}
+      {%- if dependency.name in ["tkati-core"] %}
+
+      # {{ dependency.name }} is a Rust extension, compiled by `uv sync` below.
+      - name: Cache {{ dependency.name }}'s Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "{{ dependency.path }} -> target"
+      {%- endif %}
+      {%- endfor %}
+
       - name: Install deps
         run: uv sync --package {{ package.name }}
+      {%- if maturin %}
+
+      # After `uv sync` and through `uv run`: pyo3's build script needs a
+      # Python matching the crate's abi3 floor, and would otherwise pick up the
+      # runner's older system python3. `uv run` points it at the synced venv
+      # via VIRTUAL_ENV.
+      - name: Check Rust formatting
+        run: uv run --no-sync cargo fmt --check
+        working-directory: {{ package.path }}
+
+      - name: Lint Rust
+        run: uv run --no-sync cargo clippy --all-targets -- -D warnings
+        working-directory: {{ package.path }}
+
+      - name: Run Rust tests
+        run: uv run --no-sync cargo test
+        working-directory: {{ package.path }}
+      {%- endif %}
 
       - name: Check formatting
         run: uvx ruff check {{ package.path }}

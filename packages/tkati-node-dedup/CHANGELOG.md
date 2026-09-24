@@ -1,3 +1,9 @@
+# 0.5.0
+
+* New Prometheus counter `tkati_node_dedup_dropped_rows_total`: rows dropped
+  as duplicates. The same number was only derivable before as
+  `tkati_rows_in_total - tkati_rows_out_total`
+
 # 0.4.5
 
 * The perf report breaks the old `produce` phase into `producer/serialize`,

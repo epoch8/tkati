@@ -9,22 +9,23 @@
 		},
 		"ghcr.io/ProxayFox/devcontainer-features/clickhouse-local:1": {},
 		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
-			"packages": "git git-lfs curl ssh make less"
-		}
+			"packages": "git git-lfs curl ssh make less build-essential perl"
+		},
+		"ghcr.io/devcontainers/features/rust:1": {}
 	},
 	"customizations": {
 		"vscode": {
 			"extensions": [
 				"Anthropic.claude-code",
 				"charliermarsh.ruff",
-				"ms-python.mypy-type-checker",
 				"ms-python.python",
 				"ms-python.vscode-pylance",
 				"mtxr.sqltools",
 				"tamasfe.even-better-toml",
 				"typespec.typespec-vscode",
 				"ultram4rine.sqltools-clickhouse-driver",
-				"visualjj.visualjj"
+				"visualjj.visualjj",
+				"astral-sh.ty"
 			],
 			"settings": {
 				"python.defaultInterpreterPath": ".venv/bin/python",

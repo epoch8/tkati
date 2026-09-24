@@ -1,21 +1,46 @@
 """Kafka consumer utilities for reading messages into PyArrow tables."""
 
-import time
-from io import BytesIO
+import os
 from typing import TYPE_CHECKING
 
 import orjson
 import pyarrow as pa
-from confluent_kafka import Consumer
 from loguru import logger
 from pyarrow import json as pa_json
 
+from tkati_core._native import NativeConsumer, RawBatch
 from tkati_core.consumer import Consumer as ConsumerBase
 from tkati_core.stats import LoopStats
 from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import KafkaInputSettings
+
+
+def parse_ndjson(
+    batch: RawBatch, wire_schema: pa.Schema, internal_schema: pa.Schema
+) -> pa.Table:
+    """Parse a consumed batch into `internal_schema` with pyarrow's JSON reader.
+
+    The batch's buffer is read in place, and split into blocks small enough
+    that every core gets a share of a typical batch: at the reader's default
+    1 MiB, a batch of a few thousand messages is a single block and parses on
+    one thread. Blocks much smaller than 128 KiB cost more in per-block
+    overhead than the parallelism wins back.
+    """
+    size = len(memoryview(batch))
+    block_size = min(
+        max(size // (2 * (os.process_cpu_count() or 1)), 128 << 10), 1 << 20
+    )
+    table = pa_json.read_json(
+        pa.BufferReader(batch),
+        read_options=pa_json.ReadOptions(block_size=block_size, use_threads=True),
+        parse_options=pa_json.ParseOptions(
+            explicit_schema=wire_schema,
+            unexpected_field_behavior="ignore",
+        ),
+    )
+    return table.cast(internal_schema)
 
 
 class KafkaConsumer(ConsumerBase):
@@ -63,11 +88,9 @@ class KafkaConsumer(ConsumerBase):
                          - 'auto.offset.reset': Offset reset behavior
                          - 'enable.auto.commit': Whether to auto-commit offsets
         """
-        self.consumer = Consumer(kafka_config)
+        self.consumer = NativeConsumer(kafka_config, topic_name)
         self.topic_name = topic_name
         self.input_schema = input_schema
-
-        self.consumer.subscribe([self.topic_name])
 
         # Create PyArrow schemas based on input_schema
         wire_schema_fields = []
@@ -89,62 +112,26 @@ class KafkaConsumer(ConsumerBase):
             f"Initialized KafkaConsumer with config: {kafka_config} and topic: {topic_name}"
         )
 
-    def _consume_batch(
-        self,
-        timeout: int,
-        num_messages: int,
-    ) -> tuple[list, int]:
+    def _consume_batch(self, timeout: int, num_messages: int) -> RawBatch:
         """
         Consume raw messages from Kafka within the given time and count limits.
 
-        Returns a tuple of (messages, events_read) where messages is a list of
-        confluent_kafka Message objects (without errors).
+        The payloads stay in native memory; consumer errors met along the way
+        are logged and skipped.
         """
         # DEBUG rather than INFO: this runs once per loop iteration, which at
         # production throughput is tens of lines a second — enough to bury the
         # periodic perf report that is the actual signal.
-        if self.topic_name:
-            logger.debug(
-                f"Consuming events from topic(s): {self.topic_name} for up to {timeout}s or {num_messages} events"
-            )
-        else:
-            logger.debug(
-                f"Consuming events for up to {timeout}s or {num_messages} events"
-            )
+        logger.debug(
+            f"Consuming events from topic(s): {self.topic_name} for up to {timeout}s or {num_messages} events"
+        )
 
-        start_time = time.time()
-        events_read = 0
-        poll_timeout = 10
-        valid_messages = []
+        batch = self.consumer.poll_batch(timeout, num_messages)
+        for error in batch.errors:
+            logger.info(f"Consumer error: {error}")
 
-        while events_read < num_messages:
-            elapsed = time.time() - start_time
-            remaining_time = timeout - elapsed
-
-            if remaining_time <= 0:
-                logger.debug(f"Reached time limit of {timeout}s")
-                break
-
-            remaining_messages = num_messages - events_read
-            batch_timeout = min(poll_timeout, remaining_time)
-            messages = self.consumer.consume(
-                num_messages=min(remaining_messages, 1_000_000),
-                timeout=batch_timeout,
-            )
-
-            if not messages:
-                continue
-
-            for msg in messages:
-                if msg.error():
-                    logger.info(f"Consumer error: {msg.error()}")
-                    continue
-                valid_messages.append(msg)
-                events_read += 1
-
-        elapsed_total = time.time() - start_time
-        logger.debug(f"Consumed {events_read} events in {elapsed_total:.2f}s")
-        return valid_messages, events_read
+        logger.debug(f"Consumed {len(batch)} events")
+        return batch
 
     # WARNING: This function breaks if any single message is malformed JSON. We may
     # want to enhance it to handle individual message errors more gracefully.
@@ -181,31 +168,23 @@ class KafkaConsumer(ConsumerBase):
         # against a read that takes milliseconds at minimum.
         stats = stats if stats is not None else LoopStats(name="unreported", phases=())
 
+        # Also covers assembling the payloads into one buffer, which happens
+        # as they arrive, natively and outside the GIL.
         with stats.phase("consumer/poll"):
-            valid_messages, events_read = self._consume_batch(timeout, num_messages)
+            batch = self._consume_batch(timeout, num_messages)
+        events_read = len(batch)
 
         if events_read == 0:
             logger.debug("No data consumed from topic.")
             return None
 
-        # Covers buffer assembly as well as the JSON decode: concatenating the
-        # payloads is a memcpy of the batch, negligible next to parsing it, so
-        # it doesn't earn a phase of its own.
         with stats.phase("consumer/parse"):
-            buffer = BytesIO()
-            for msg in valid_messages:
-                buffer.write(msg.value())
-                buffer.write(b"\n")
-            buffer.seek(0)
-
-            parse_options = pa_json.ParseOptions(
-                explicit_schema=self.wire_schema,
-                unexpected_field_behavior="ignore",
-            )
-
             try:
-                table = pa_json.read_json(buffer, parse_options=parse_options)
-                table = table.cast(self.internal_schema)
+                if batch.tombstones:
+                    raise ValueError(
+                        f"{batch.tombstones} of {events_read} messages have no value"
+                    )
+                table = parse_ndjson(batch, self.wire_schema, self.internal_schema)
                 actual_rows = len(table)
 
                 if actual_rows != events_read:
@@ -250,19 +229,27 @@ class KafkaConsumer(ConsumerBase):
         stats = stats if stats is not None else LoopStats(name="unreported", phases=())
 
         with stats.phase("consumer/poll"):
-            valid_messages, events_read = self._consume_batch(timeout, num_messages)
+            batch = self._consume_batch(timeout, num_messages)
 
-        if events_read == 0:
+        if len(batch) == 0:
             logger.debug("No data consumed from topic.")
             return None
 
+        # orjson rather than native parsing: building Python objects needs the
+        # GIL either way, and orjson does it in the same pass as parsing — a
+        # native parse in parallel followed by a serial build benchmarked
+        # slower.
         with stats.phase("consumer/parse"):
             rows = []
-            for msg in valid_messages:
+            for payload in batch.payloads():
                 try:
-                    rows.append(orjson.loads(msg.value()))
+                    if payload is None:
+                        raise ValueError("message has no value")
+                    rows.append(orjson.loads(payload))
                 except Exception as e:
-                    logger.error(f"Error parsing message from topic {msg.topic()}: {e}")
+                    logger.error(
+                        f"Error parsing message from topic {self.topic_name}: {e}"
+                    )
 
         logger.debug(f"Successfully parsed {len(rows)} rows")
         return rows if rows else None

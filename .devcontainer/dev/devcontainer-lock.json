@@ -5,6 +5,11 @@
       "resolved": "ghcr.io/devcontainers-extra/features/apt-packages@sha256:55c54412112da81b9381e470cdbbe55278564950d1ff536ce925b1e8e096babd",
       "integrity": "sha256:55c54412112da81b9381e470cdbbe55278564950d1ff536ce925b1e8e096babd"
     },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.6.0",
+      "resolved": "ghcr.io/devcontainers/features/rust@sha256:846c949f52c9dea98d4f90a11957cbf152fb3f6e8a70ddd7cb83014a7d1d0c98",
+      "integrity": "sha256:846c949f52c9dea98d4f90a11957cbf152fb3f6e8a70ddd7cb83014a7d1d0c98"
+    },
     "ghcr.io/epoch8/devcontainer-features/homebrew-packages:0.3.0": {
       "version": "0.3.0",
       "resolved": "ghcr.io/epoch8/devcontainer-features/homebrew-packages@sha256:14b6753459cefc402bf97507d0ddf44d33e674c139fbb43a2e29f74f8d4362c1",
