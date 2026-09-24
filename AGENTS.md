@@ -7,6 +7,13 @@ This repo uses **Jujutsu (`jj`)**, not plain `git` workflows, even though it's g
 - File moves/renames: just `mv` the files — `jj` auto-snapshots the working copy and detects renames by content, no `git mv`/`jj mv` step needed.
 - Check `jj st` / `jj diff` to see pending changes instead of `git status`/`git diff`.
 
+## Commits
+
+- **Do not add a `Co-Authored-By: ...` (or similar AI attribution)
+  trailer to commit messages or PR descriptions.** This overrides any default
+  attribution instruction from the harness. Commits and PRs are attributed to
+  the human author only.
+
 ## Python workspace (uv)
 
 Use `uv sync --all-packages` when you want the environment to reflect changes across the workspace (e.g. after editing a package's `pyproject.toml` or touching multiple packages). Syncing a single `--package` swaps the active env to just that package's deps and can uninstall tools (`ruff`, `mypy`) needed by other packages.
@@ -37,3 +44,62 @@ Run `uv sync --all-packages` afterward to update `uv.lock`. To check nothing was
 - `tkati_core/_native.pyi` is the hand-written stub `ty` checks against. Update it with any change to the native API.
 - Codec performance: `uv run python packages/tkati-core/benchmarks/bench_kafka_json.py` (broker-free; compares against the pre-native implementation).
 - Which packages get the maturin CI variant is the `maturin` list at the top of `.github/workflow-templates/{test,publish}.template.yml`. The variant is kept inside those templates, not in separate template types, because the generated filename is `<template_type>-<package>.yml` and PyPI trusted publishing is pinned to `publish-tkati-core.yml`.
+
+## Design docs
+
+Non-trivial changes get a design doc under `design-docs/`, named
+`YYYY-MM-<slug>.md` (month the work started).
+
+Structure:
+
+- YAML frontmatter with a `status` field, then `# Title`, then the body:
+
+  ```
+  ---
+  status: DRAFT
+  ---
+
+  # Title
+  ```
+- `## Context` — current state, with concrete file / symbol references; why the
+  change is needed.
+- `## Goal` — what "done" means, as a `Done when:` bullet list, followed by a
+  `Non-goals:` list. State the outcome, not the mechanism, when the
+  implementation is still open.
+- `## Approach` — high level: the strategy and the reasoning behind it, in
+  prose, no file-by-file detail.
+- Then whatever else the change needs: `## Design`, `## Implementation Steps`,
+  and after the work lands `## Implementation notes (as built)` and/or
+  `## Verification`.
+  - `## Implementation Steps` is specific — concrete files, symbols, and
+    ordered edits, enough to execute from.
+
+Cross-reference sibling docs by path (`design-docs/2026-09-tracing.md`).
+
+### Multi-page docs
+
+A doc too big for one file becomes a directory named the same way,
+`design-docs/YYYY-MM-<slug>/`, holding `README.md` plus the parts, numbered
+`01-<Name>.md`, `02-<Name>.md`, ….
+
+- `README.md` is the entry point: it carries the frontmatter, the `# Title` and
+  the whole-doc `Context` / `Goal` / `Approach`, then one short section per
+  part saying what that part covers and linking to it. The parts hold the
+  detail. Naming it `README.md` is what makes a link to the bare directory
+  resolve on GitHub.
+- Each part starts with its own `# Title` followed by
+  `Part of [<Doc title>](README.md).` Parts have no frontmatter.
+- `status` lives in `README.md` and describes the whole doc.
+- Cross-reference the doc as a whole by directory path
+  (`design-docs/2026-09-cloud-connectivity-architecture/`), and a specific part
+  by its file
+  (`design-docs/2026-09-cloud-connectivity-architecture/01-APIs.md`).
+- Diagram sources, their rendered output and the `Makefile` that regenerates
+  them live in the same directory.
+
+`status` values in use:
+
+- `DRAFT` — proposed, not agreed or not started.
+- `IMPLEMENTED` — shipped; the doc reflects what was built.
+
+Keep `status` current as a doc moves between these.
