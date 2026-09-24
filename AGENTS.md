@@ -48,7 +48,7 @@ Run `uv sync --all-packages` afterward to update `uv.lock`. To check nothing was
 ## Design docs
 
 Non-trivial changes get a design doc under `design-docs/`, named
-`YYYY-MM-<slug>.md` (month the work started).
+`YYYY-MM-DD-<slug>.md` (month the work started).
 
 Structure:
 
