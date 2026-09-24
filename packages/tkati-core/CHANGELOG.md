@@ -1,3 +1,11 @@
+# 0.5.1
+
+* Prometheus metrics no longer carry a `node` label. Each node serves its own
+  `/metrics`, so the scrape target's `job`/`instance` identifies it. Queries
+  that grouped with `sum by (node)` should use `sum without (phase)` instead.
+* `LoopStats.name` is removed. Callers drop the `name=` argument, and the perf
+  log lines no longer start with it (`perf over 10s: ...`, `perf: ...`).
+
 # 0.5.0
 
 * `KafkaConsumer` and `KafkaProducer` run on a native (Rust) extension,

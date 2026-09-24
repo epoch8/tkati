@@ -193,7 +193,7 @@ def test_read_arrow_splits_its_time_into_poll_and_parse(
         )
     raw_producer.flush()
 
-    stats = LoopStats(name="test", phases=CONSUMER_PHASES)
+    stats = LoopStats(phases=CONSUMER_PHASES)
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         table = consumer.read_arrow(timeout=5, num_messages=50, stats=stats)
@@ -210,7 +210,7 @@ def test_read_arrow_records_only_poll_when_nothing_arrives(
 ):
     """An empty read returns before the parse block. Charging that wait to
     `parse` would make a starved node look like it was CPU-bound on JSON."""
-    stats = LoopStats(name="test", phases=CONSUMER_PHASES)
+    stats = LoopStats(phases=CONSUMER_PHASES)
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         assert consumer.read_arrow(timeout=2, num_messages=10, stats=stats) is None
@@ -233,7 +233,7 @@ def test_read_pylist_splits_its_time_into_poll_and_parse(
         )
     raw_producer.flush()
 
-    stats = LoopStats(name="test", phases=CONSUMER_PHASES)
+    stats = LoopStats(phases=CONSUMER_PHASES)
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         rows = consumer.read_pylist(timeout=5, num_messages=50, stats=stats)
@@ -248,7 +248,7 @@ def test_read_pylist_splits_its_time_into_poll_and_parse(
 def test_read_pylist_records_only_poll_when_nothing_arrives(
     input_settings: KafkaInputSettings, kafka_input_topic: str
 ):
-    stats = LoopStats(name="test", phases=CONSUMER_PHASES)
+    stats = LoopStats(phases=CONSUMER_PHASES)
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         assert consumer.read_pylist(timeout=2, num_messages=10, stats=stats) is None
