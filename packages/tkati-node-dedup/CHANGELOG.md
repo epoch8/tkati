@@ -1,3 +1,8 @@
+# 0.5.2
+
+* The output producer is closed on shutdown. Before, only the DLQ producer
+  was
+
 # 0.5.1
 
 * The perf log lines no longer start with `dedup`, and the tkati-core metrics

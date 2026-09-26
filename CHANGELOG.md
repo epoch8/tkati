@@ -12,6 +12,21 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.5.2
+
+### ovpxopzr — node-el loop stats, metrics and flush-before-commit [tkati-node-el, tkati-node-dedup, repo]
+
+- `tkati-node-el` flushes the producer before committing the input offset.
+  Before, a Kafka output only enqueued the batch before the commit, so a crash
+  could lose rows despite the documented at-least-once guarantee.
+- `tkati-node-el` times its loop with `LoopStats`, as `tkati-node-dedup` does.
+  It passes `stats` to the consumer and producer, times `commit` itself, logs
+  the perf report every 10s and serves it on `:8000/metrics` through a new
+  `[metrics]` settings section. The per-batch log line moved to `DEBUG`.
+- Both nodes close their output producer on shutdown, before the DLQ
+  producer. Before, only the DLQ producer was closed.
+- Design doc: `design-docs/2026-09-26-node-el-loop-stats.md`.
+
 ## 0.5.1
 
 ### nqzmolxt — Drop the node label and LoopStats.name [tkati-core, tkati-node-dedup]

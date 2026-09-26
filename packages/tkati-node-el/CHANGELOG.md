@@ -1,3 +1,20 @@
+# 0.5.2
+
+* **Fixed at-least-once delivery for a Kafka output.** The node committed the
+  input offset as soon as the batch was enqueued, so a crash could lose rows
+  that had not reached the broker. It now waits for delivery (`flush`) before
+  committing. A ClickHouse output is unaffected, since its inserts were already
+  synchronous
+* The node logs where its wall clock went every 10 seconds, in the same format
+  as `tkati-node-dedup`: `consumer/poll`, `consumer/parse`,
+  `producer/serialize`, `producer/enqueue`, `producer/deliver` and `commit`.
+  The per-batch `Produced N rows` line moved to `DEBUG`. See the README
+* **Now listens on port 8000 by default**, serving the perf report's numbers
+  as Prometheus metrics at `/metrics`. Disable with `[metrics] enabled = false`
+  or `METRICS__ENABLED=false`
+* The output producer is closed on shutdown. Before, only the DLQ producer
+  was
+
 # 0.3.0
 
 * Initial implementation of `tkati-node-el`: a generic extract/load node that reads

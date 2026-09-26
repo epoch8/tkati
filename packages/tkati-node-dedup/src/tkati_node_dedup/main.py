@@ -176,6 +176,8 @@ def main() -> None:
             stats.report_if_due()
     finally:
         consumer.close()
+        # Before the DLQ producer: the output can still route rows to it.
+        producer.close()
         if dlq_producer is not None:
             dlq_producer.close()
         store.close()

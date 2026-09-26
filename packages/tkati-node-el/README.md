@@ -1,6 +1,6 @@
 # tkati-node-el — generic extract/load node
 
-Reads batches from a configurable input and writes them to a configurable output. Offsets are committed only after a successful write (at-least-once delivery).
+Reads batches from a configurable input and writes them to a configurable output. Offsets are committed only after the batch is written and confirmed delivered (`produce_arrow` followed by a blocking `flush`), so delivery is at-least-once.
 
 Input and output kinds are selected via the `type` field in each section — pick from whatever `tkati-core` supports. Every backend's settings split a **`connection`** tier (server-specific: how to reach the broker/database) from the resource tier (`topic` for Kafka, `table` for ClickHouse) and, where relevant, a tier local to this reader/writer instance (Kafka's `consumer` settings).
 
@@ -57,6 +57,12 @@ broker = "redpanda:29092"
 
 [dlq.topic]
 name = "node-el-dlq"
+
+# Optional. Prometheus endpoint, ON by default; these are the defaults.
+[metrics]
+enabled = true
+port    = 8000
+addr    = "0.0.0.0"
 ```
 
 A Kafka output instead looks like:
@@ -91,6 +97,39 @@ secure   = false
 database = "default"
 name     = "traffic_event_dlq"
 ```
+
+## Metrics and perf log
+
+Every 10 seconds the node logs where its wall clock went, using `LoopStats`
+from `tkati-core`:
+
+```
+perf over 10s: 157000 rows in, 157000 out (0 dropped), 157 iterations (0 input-starved)
+perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) commit=0.38s (4%)
+```
+
+This node never drops rows, so `dropped` is always 0.
+
+* `consumer/poll`, `consumer/parse`: fetching message batches from the broker,
+  and decoding them into an Arrow table.
+* `producer/serialize`, `producer/enqueue`: encoding rows into the output's
+  wire format, and handing them to librdkafka.
+* `producer/deliver`: the blocking `flush`, i.e. waiting for broker acks. A
+  ClickHouse output records its whole insert here, retries and DLQ fallback
+  included.
+* `commit`: the synchronous offset commit.
+
+Percentages are of the interval, so they **do not sum to 100**; the remainder
+is time in none of the named phases. `input-starved` counts iterations that
+drained the topic and waited out the batch timeout. A mostly-starved interval
+shows `consumer/poll` near 100% and says nothing about whether the node can
+keep up. `tkati-core`'s README covers the phases in more depth.
+
+The same numbers are served as Prometheus metrics at `:8000/metrics`. To turn
+that off, set `[metrics] enabled = false` or the env var
+`METRICS__ENABLED=false`; `METRICS__PORT` moves it. See `tkati-core`'s README
+for the metric names and the PromQL that reproduces the log line's
+percentages.
 
 ## DLQ semantics
 
