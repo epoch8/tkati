@@ -163,13 +163,16 @@ benchmark:
 
 ## Delivery & dedup guarantees
 
-**Delivery: at-least-once.** Offsets are committed only after (1) the
-filtered batch is produced and confirmed delivered (`produce_arrow` followed
-by a blocking `flush`), and (2) the surviving keys are recorded in the current
-RocksDB bucket. If the process crashes between steps, the same input batch is
-re-read at restart; because the keys from a completed produce are already
-marked seen, re-processing that batch is a no-op (or reproduces only the
-genuinely-new subset) rather than losing data.
+**Delivery: at-least-once.** For each batch the node (1) produces the
+filtered batch and waits until it is confirmed delivered, (2) commits the
+input offsets, and only then (3) records the surviving keys in the current
+RocksDB bucket. A key is never marked seen before its row is delivered, which
+is what guarantees no event is lost. A crash before (2) re-reads the batch at
+restart and produces it again, which is a duplicate at worst. A crash between
+(2) and (3) leaves those keys unmarked, so a later duplicate of one of them is
+forwarded, which is also a duplicate at worst. That window is one memtable
+write wide, much narrower than the loss the WAL-off store already accepts
+(below).
 
 **The dedup store is not crash-durable, by design.** With `disable_wal`
 (the default) writes go to a volatile memtable, so a hard kill can lose up to
@@ -177,8 +180,11 @@ one write buffer's worth of dedup state — those keys stop being recognized as
 seen, and later duplicates of them are forwarded. It can never cause an event
 to be dropped, which is the tradeoff this node makes everywhere: Kafka is the
 source of truth and the committed offset, not RocksDB, is the durability
-boundary. A *graceful* shutdown flushes and loses nothing. Set
-`dedup.rocksdb.disable_wal = false` to trade throughput for crash durability.
+boundary. A *graceful* shutdown flushes and loses nothing. SIGTERM, which is
+what a pod gets on termination, is graceful, and so is SIGINT: the node
+finishes the batch in hand, commits it, closes the store and exits. A second
+signal forces an exit. Set `dedup.rocksdb.disable_wal = false` to trade
+throughput for crash durability.
 
 **On any internal dedup-store failure — a bucket won't open, a lookup errors,
 a disk I/O error — the node treats the event as NOT a duplicate and forwards

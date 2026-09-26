@@ -2,6 +2,8 @@
 
 Reads batches from a configurable input and writes them to a configurable output. Offsets are committed only after the batch is written and confirmed delivered (`produce_arrow` followed by a blocking `flush`), so delivery is at-least-once.
 
+On SIGTERM or SIGINT the node finishes the batch in hand, commits it and exits. A second signal forces an exit, leaving that batch uncommitted, so it is read again on restart. The loop itself is `tkati-core`'s `Node`.
+
 Input and output kinds are selected via the `type` field in each section — pick from whatever `tkati-core` supports. Every backend's settings split a **`connection`** tier (server-specific: how to reach the broker/database) from the resource tier (`topic` for Kafka, `table` for ClickHouse) and, where relevant, a tier local to this reader/writer instance (Kafka's `consumer` settings).
 
 - **Input**: `"kafka"` (JSON or Arrow-batch messages from a Kafka/Redpanda topic)

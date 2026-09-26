@@ -1,3 +1,27 @@
+# 0.7.0
+
+* New `Node` (`tkati_core.node`): the worker loop harness.
+  * Used as `with Node.from_settings(settings) as node: for event in node:`.
+    It yields a `Batch` (`.data`, `.short`) for each batch read and `Idle` for
+    an empty poll.
+  * The node finishes each batch with `node.done(event, output=table)`. It
+    sends the output, waits for delivery and commits the batch, and returns
+    once the commit is made. Asking for the next event without it raises and
+    rewinds the batch. An exception before `done()` rewinds the batch too.
+    `break` and `KeyboardInterrupt` leave it uncommitted.
+  * `phase` and `stop` are the other calls node code makes.
+  * It builds and closes the consumer, output and DLQ, runs `LoopStats` and
+    the metrics server, and turns SIGTERM/SIGINT into a stop after the current
+    batch.
+  * The producer is optional, for nodes that deliver their output themselves.
+* New `NodeSettings`: the `input`/`output`/`dlq`/`metrics` sections
+  `Node.from_settings` reads. `output` is optional, and `dlq` without `output`
+  fails validation.
+* New `tkati_core.testing`: `MemoryConsumer`, `MemoryProducer` and
+  `memory_node`, for testing nodes without a broker.
+* New exports: `Batch`, `Idle`, `Event`, `Node`, `NodeSettings`,
+  `DEFAULT_PHASES`, `SINK_PHASES`.
+
 # 0.6.0
 
 * **Breaking:** explicit per-batch commit.

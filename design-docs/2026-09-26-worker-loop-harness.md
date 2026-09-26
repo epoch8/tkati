@@ -1,5 +1,5 @@
 ---
-status: DRAFT
+status: IMPLEMENTED
 ---
 
 # Worker loop harness
@@ -109,7 +109,7 @@ Done when:
 - A node doesn't have to have an output producer. A node that reads Kafka and
   writes to a cloud API through its own client still gets the harness's
   read, commit, rewind, stats and lifecycle. It is then responsible for
-  making its own writes durable before it asks for the next event.
+  making its own writes durable before it marks the batch done.
 - A node can do periodic or idle work, such as `cleanup_expired`, as an
   ordinary part of its loop, whether or not a batch arrived.
 - SIGTERM and SIGINT both stop the node at a batch boundary. Finished work is
@@ -162,9 +162,9 @@ event. The body of the loop is the node's logic, in the order the node wants
 it.
 
 We use an iterator rather than a callback API (`harness.run(process_batch)`).
-The ordering that matters most in these nodes is send, then delivery, then the
-node's side effect, then commit. In a loop that order is visible from top to
-bottom in the node's own code. State the node keeps between batches is just
+The ordering that matters most in these nodes is send, then delivery and
+commit, then the node's side effects. In a loop that order is visible from top
+to bottom in the node's own code. State the node keeps between batches is just
 local variables. Idle work is an `if`/`match` branch instead of a second
 callback. The harness still owns everything that surrounds that ordering.
 
@@ -180,22 +180,35 @@ Stopping is not an event. When the harness is asked to stop, the iterator ends
 and the `for` loop exits. dora needs a STOP event because its nodes have no
 other place to clean up. In Python, `with` blocks around the loop handle that.
 
-**Commit.** Requesting the next event acknowledges the previous one. When the
-node asks for the next event, the harness flushes the producer, if there is
-one, and then calls
-`consumer.commit(batch)` with the `ConsumedBatch` it handed out last. The
-harness keeps that object, and the node only sees its data, so what gets
-committed is always the batch as read, whatever the node filtered out of it.
-Every node gets the guarantee by default. A node that needs rows delivered
-before one of its own side effects, like dedup marking keys seen, calls an
-explicit flush in its loop body. The harness's flush before commit then has
-nothing left to do. A node without a producer writes to its destination
-itself, so for that node "done" means its own writes have finished when the
-loop body returns. If the body raises, the harness calls
+**Commit.** The node says explicitly when a batch is finished, and what it
+produced, in one call: `node.done(event, output=table)`. `done()` sends the
+output, flushes the producer, and then calls `consumer.commit(batch)` with
+the `ConsumedBatch` it handed out. It returns once the commit is made. There
+is no separate send, so every output is tied to the input batch it came from.
+That tie is what a pipelined harness needs, to know which delivery lets which
+batch commit. The harness keeps that object, and
+the node only sees its data, so what gets committed is always the batch as
+read, whatever the node filtered out of it.
+
+For now `done()` is synchronous, so work that must follow delivery, or must
+not repeat when a batch is re-read, simply goes on the lines after it. Dedup
+marking keys seen and counting dropped rows are both examples. A node
+without a producer writes to its destination itself, and calls
+`done(event, rows_out=n)` once its own writes have finished.
+
+Asking for the next event while a batch isn't done is a bug in the node, and
+raises. If the body raises before `done()`, the harness calls
 `consumer.rewind(batch)` and lets the exception out of the `for` loop. That
 is what both nodes' `try`/`except` blocks do today, so the node code no longer
-needs them. A `break` also leaves the current batch uncommitted, because the
-harness can't tell a finished batch from an abandoned one.
+needs them. A `break` before `done()` leaves the batch uncommitted.
+
+The first draft of this design committed implicitly, whenever the node asked
+for the next event. That kept node code shorter, but it hid the most
+important step of each iteration, and it had no point after the commit for
+code that must run only then. An explicit `done()` states that step where it
+happens. It is also the shape that grows into pipelining: `done()` will
+return before delivery and take callbacks for the work after it (see
+**Later: asynchronous `done()`** below).
 
 **Lifecycle.** The harness is a context manager built from settings. It builds
 the consumer, and also the output producer and the DLQ producer when the
@@ -204,7 +217,7 @@ closes all of them, in the order today's `finally` blocks use: consumer,
 output, then DLQ, because the output can still route rows to the DLQ. It
 installs a SIGTERM handler that works like SIGINT: a stop requested
 while the node is processing takes effect at the next request for an event,
-after that batch has been acknowledged. A stop requested while the harness is
+after the node has finished that batch with `done()`. A stop requested while the harness is
 blocked in `poll_batch` or `flush` interrupts the wait through the
 `check_signals` calls those functions already make. The node's own resources
 go in the same `with` statement as the harness, so they are closed on every
@@ -212,7 +225,7 @@ exit path. There is no separate lifecycle-hook API.
 
 **Stats and metrics.** The harness owns the `LoopStats`. It passes it to the
 consumer and producer calls it makes, and it counts iterations, starved
-iterations, rows in (per batch) and rows out (per send) from the data it
+iterations, rows in (per batch) and rows out (per `done()`) from the data it
 handles. It also calls `report_if_due` and starts the metrics server from a
 `metrics` settings section. A node declares its extra phases when it builds
 the harness and times them through the harness. Node-specific counters, such
@@ -246,16 +259,13 @@ DEFAULT_PHASES = (*CONSUMER_PHASES, *PRODUCER_PHASES, "commit")
 SINK_PHASES = (*CONSUMER_PHASES, "commit")
 
 
+@dataclass(frozen=True, slots=True, eq=False)
 class Batch:
     """A batch read from the input. The harness keeps the ConsumedBatch; the
     node only sees what it needs."""
 
     data: pa.Table
     short: bool  # fewer rows than batch_size: the poll drained the input
-
-    def after_commit(self, fn: Callable[[], object]) -> None:
-        """Run `fn` once this batch is committed. It does not run if the batch
-        fails or is abandoned."""
 
 
 class Idle:
@@ -290,9 +300,13 @@ class Node:
     def __iter__(self) -> Iterator[Event]: ...
     def __next__(self) -> Event: ...
 
-    def send(self, table: pa.Table) -> None: ...
-    def flush(self) -> None: ...
-    def add_rows_out(self, n: int) -> None: ...
+    def done(
+        self,
+        event: Batch,
+        *,
+        output: pa.Table | None = None,
+        rows_out: int | None = None,
+    ) -> None: ...
     def phase(self, name: str) -> AbstractContextManager[None]: ...
     def stop(self) -> None: ...
 
@@ -310,7 +324,7 @@ The open questions from the Approach, settled:
 - **A batch event carries only `data` and `short`.** Offsets stay inside the
   harness. Neither node needs them, and exposing them would invite nodes to
   commit on their own.
-- **`send` takes Arrow only.** Both nodes use `read_arrow`/`produce_arrow`.
+- **`output` is Arrow only.** Both nodes use `read_arrow`/`produce_arrow`.
   The harness reads with `read_arrow`, so there is no `list[dict]` path to
   mirror.
 - **Nodes time their phases through `node.phase(name)`.** `phases` is the
@@ -326,24 +340,43 @@ The open questions from the Approach, settled:
 - **The output producer is optional.** `producer=None` is for nodes that
   deliver their output themselves, for example through a cloud API client.
   Such a node owns delivery: everything it wrote for a batch must be durable
-  before the loop body asks for the next event, because that request commits
-  the batch. See **Nodes without an output producer**.
-- **Code that must run after commit goes in `Batch.after_commit`.** Dedup's
-  `_DROPPED_ROWS.inc` moves there. The hooks run inside the next `__next__`,
-  right after the commit and in the order they were registered. If a hook
-  raises, the exception comes out of the `for` loop; the batch is already
-  committed, so there is nothing to rewind.
+  before it calls `done()`, which commits the batch. See **Nodes without an
+  output producer**.
+- **A batch is finished explicitly, with a synchronous
+  `node.done(event, output=table)`.** It sends the output, flushes, commits,
+  adds the batch's rows to `rows_out`, and returns. Code after it runs after
+  the commit, so there are no hooks. There is no `send` and no public
+  `flush`, which keeps the interface minimal: every current node sends one
+  table per batch, and none needs to wait for delivery without also
+  committing. A node that needs multi-part output would bring back a
+  lower-level send.
+- **A node without a producer reports its rows with
+  `done(event, rows_out=n)`.** `output` and `rows_out` are mutually
+  exclusive: sent rows are already counted. `output` without a producer
+  raises.
+  - Asking for the next event while a batch isn't done raises
+    `RuntimeError`. It is raised out of the `for` loop, so `__exit__`
+    rewinds the batch.
+  - `done()` twice raises too, and so does `done()` with an event that isn't
+    the current batch.
+  - An exception after `done()` propagates with nothing to rewind.
+
+### Later: asynchronous `done()`
+
+A later change will pipeline the loop. `done()` will then only mark the batch
+finished and return, and delivery and commit will happen in the background.
+The work that today sits on the lines after `done()` moves into callbacks on
+it: `on_delivered` for what must follow delivery, and `after_commit` for what
+must follow the commit. Until then, "the commit has been made when `done()`
+returns" holds. Nodes written against it (dedup's mark-seen and counter) will
+move their tail lines into those callbacks as part of that change.
 
 ### One step of the iteration
 
 `Node.__next__` does the following, in order:
 
-1. If a batch is outstanding, the harness:
-   - calls `producer.flush(stats=stats)` if there is a producer,
-   - calls `consumer.commit(batch)` inside the `commit` phase,
-   - adds the batch's sent rows to `stats.rows_out`,
-   - runs the batch's `after_commit` hooks,
-   - clears the outstanding batch.
+1. If a batch is outstanding, meaning the node didn't call `done()`, raises
+   `RuntimeError`.
 2. `stats.report_if_due()`.
 3. If a stop was requested, ends the iteration (`StopIteration`, which it
    raises again on every later call).
@@ -362,19 +395,19 @@ The open questions from the Approach, settled:
    - the batch becomes the outstanding one, and the harness returns
      `Batch(data, short)`.
 
-`send(table)` raises `RuntimeError` if there is no producer, or if no batch
-is outstanding. Sending
-during `Idle` would produce rows that no input offset covers. `send` skips
-empty tables, which covers dedup's "everything was a duplicate" case. For a
-non-empty table it calls `producer.produce_arrow(table, stats=stats)` and
-counts the rows toward the outstanding batch. `rows_out` is added only at
-commit, which matches what both nodes do today. `flush()` calls
-`producer.flush(stats=stats)`, and does nothing when there is no producer.
-`add_rows_out(n)` counts `n` rows toward the outstanding batch without
-producing anything. A node without a producer calls it for the rows it wrote
-itself, so that `rows_out` and the perf line's "dropped" figure stay
-meaningful. It raises `RuntimeError` if no batch is outstanding, as `send`
-does.
+`Node.done(event, output=, rows_out=)` does the finishing:
+- checks that `event` is the outstanding batch;
+- if `output` is a non-empty table, calls
+  `producer.produce_arrow(output, stats=stats)`. An empty table or `None`
+  sends nothing, which covers dedup's "everything was a duplicate" case;
+- calls `producer.flush(stats=stats)` if there is a producer;
+- calls `consumer.commit(batch)` inside the `commit` phase;
+- adds `len(output)`, or `rows_out`, to `stats.rows_out`. This happens only
+  at commit, which matches what both nodes do today;
+- clears the outstanding batch.
+
+If the send, flush or commit raises, the batch stays outstanding, and
+`__exit__` rewinds it.
 
 ### Exit
 
@@ -484,7 +517,7 @@ def run(node: Node, client: ApiClient) -> None:
         if isinstance(event, Batch):
             with node.phase("upload"):
                 client.upload(event.data)  # returns once the API accepted it
-            node.add_rows_out(len(event.data))
+            node.done(event, rows_out=len(event.data))
 
 
 def main() -> None:
@@ -497,8 +530,7 @@ def main() -> None:
 ```
 
 A client that buffers or sends in the background must wait for its writes
-before the loop body ends, by calling something like `client.flush()` as the
-body's last statement. The harness can't flush a client it doesn't know
+before `done()`, by calling something like `client.flush()` just before it. The harness can't flush a client it doesn't know
 about. An API error raised in the body rewinds the batch like any other
 exception.
 
@@ -510,7 +542,7 @@ tkati-node-el:
 def run(node: Node) -> None:
     for event in node:
         if isinstance(event, Batch):
-            node.send(event.data)
+            node.done(event, output=event.data)
             logger.debug(f"Produced {len(event.data)} rows")
 
 
@@ -534,11 +566,10 @@ def run(node: Node, store: BucketedDedupStore, field: str) -> None:
             continue
         table = event.data
         ...  # missing-field check and _dedupe_batch under node.phase("lookup")
-        node.send(filtered)
-        node.flush()  # delivered before marking seen
+        node.done(event, output=filtered)  # sent, delivered, then committed
         with node.phase("write"):
-            store.add_many(new_keys)
-        event.after_commit(partial(_DROPPED_ROWS.inc, len(table) - len(filtered)))
+            store.add_many(new_keys)  # mark seen: after delivery
+        _DROPPED_ROWS.inc(len(table) - len(filtered))  # after commit
 
 
 def main() -> None:
@@ -547,6 +578,22 @@ def main() -> None:
     with closing(store), Node.from_settings(settings, phases=_PHASES) as node:
         run(node, store, settings.dedup.field)
 ```
+
+Dedup's order changes from deliver → mark seen → commit to deliver → commit →
+mark seen. Both are safe: a key is never marked seen before its row is
+delivered, which is the only order that could lose an event. They differ
+only in which crash window lets a duplicate through:
+
+- A crash between delivery and the next step re-reads and re-sends the
+  batch, under both orders.
+- A crash between the second and third steps:
+  - old order: re-reads the batch and drops it, since its keys are already
+    seen, so there's no duplicate;
+  - new order: doesn't re-read the batch, and never marks its keys, so a
+    later duplicate of one of them is forwarded.
+
+That window is one memtable write, much narrower than the loss the WAL-off
+store already accepts.
 
 `closing(store)` is entered first, so the node exits and closes its clients
 before the store closes. `cleanup_expired` now runs after the read rather than
@@ -567,40 +614,39 @@ nodes.
 2. **`tkati_core/node.py`**: `DEFAULT_PHASES`, `SINK_PHASES`, `Batch`,
    `Idle`, `Event`, `_Stop` and `Node`, with `producer` optional throughout, as in **API**, **One step of the iteration**, **Exit**
    and **Signals**. `Node.__next__` raises `RuntimeError` if it's called
-   outside `with`. The module docstring explains the ack rule (asking for the
-   next event commits the previous batch) and `break`/exception behaviour.
+   outside `with`. The module docstring explains the `done()` rule and
+   `break`/exception behaviour.
 3. **Exports**: in `tkati_core/__init__.py`, export `Batch`, `Idle`, `Node`,
    `NodeSettings`, `DEFAULT_PHASES` and `SINK_PHASES`.
 4. **`tkati_core/testing.py`**: `MemoryConsumer`, `MemoryProducer` and
    `memory_node`, as in **Test doubles**.
 5. **`packages/tkati-core/tests/test_node.py`**: broker-free tests of the
    harness, against the doubles:
-   - A batch is handed out, sent, then flushed and committed on the next
-     request, in that order in the log. `rows_out` is counted only after the
-     commit.
+   - `done()` flushes then commits, in that order in the log. Code after it
+     runs after the commit. `rows_out` is counted at `done()`.
+   - The next event without `done()` raises and rewinds. `done()` twice
+     raises. `output` together with `rows_out` raises and rewinds.
    - An exception in the body rewinds the outstanding batch, doesn't commit
      it, propagates, and still closes everything. A failing rewind doesn't
-     mask it.
-   - A failing flush at the next request rewinds and raises.
-   - `break` neither commits nor rewinds, but closes.
+     mask it. An exception after `done()` doesn't rewind.
+   - A failing send or flush in `done()` rewinds and raises.
+   - `break` before `done()` neither commits nor rewinds, but closes. `break`
+     after `done()` keeps the commit.
    - `KeyboardInterrupt` in the body doesn't rewind.
    - An empty poll yields `Idle`. `stop_when_idle` ends the loop at the
      first empty poll instead.
-   - `send` outside a batch raises. `send` of an empty table doesn't reach
-     the producer.
-   - `stop()` in the body commits the current batch and then ends the loop
-     without reading again.
-   - `after_commit` hooks run after the commit, in order, and don't run when
-     the batch fails.
+   - An empty `output` doesn't reach the producer.
+   - `stop()` in the body ends the loop after the current batch, without
+     reading again.
    - The consumer and producer receive `node.stats`. `iterations`,
      `starved_iterations` (empty poll and short batch) and `rows_in`/`rows_out`
      are counted. `phases` missing a `DEFAULT_PHASES` name raises.
    - Close order is consumer, producer, DLQ, and a failing close doesn't skip
      the rest.
    - Without a producer (`memory_node(..., output=False)`):
-     - the next request commits the batch with no flush;
-     - `send` raises and `flush` does nothing;
-     - `add_rows_out` counts toward `rows_out` at commit;
+     - `done()` commits the batch with no flush;
+     - `output=` raises and rewinds;
+     - `rows_out=` counts toward `rows_out` at commit;
      - the default phases are `SINK_PHASES`, and `phases` without the producer
        phases is accepted;
      - an exception in the body still rewinds.
@@ -638,10 +684,10 @@ nodes.
    - `settings.py`: `AppSettings(NodeSettings)` redeclares
      `output: OutputSettings` as required and keeps `dedup`.
    - `main.py`: `run(node, store, field)` and the new `main()`, as in
-     **Nodes**. `_PHASES`, `_dedupe_batch` and `_DROPPED_ROWS` stay. The
-     comments on flush-before-mark-seen and on booking cleanup under `commit`
-     move with the code. The comments about commit ordering go to the module
-     docstring, since the harness now does the commit.
+     **Nodes**, in the order deliver → commit → mark seen. `_PHASES`,
+     `_dedupe_batch` and `_DROPPED_ROWS` stay. The comment on booking cleanup
+     under `commit` moves with the code. The module docstring explains the
+     new order and why it's safe.
 9. **tkati-node-dedup tests**:
    - The Kafka tests call a `_run(test_settings, store)` helper. It builds a
      `Node` over a fresh consumer and producer with `stop_when_idle=True` and
@@ -688,3 +734,58 @@ nodes.
       the group's committed offset matches the last batch it logged.
     - Afterwards: set the doc's `status` to `IMPLEMENTED` and add
       `## Implementation notes (as built)` and `## Verification`.
+
+## Implementation notes (as built)
+
+Built as specified. Where the code differs from the Design section, or makes a
+decision the Design section left open:
+
+- **Discarded reads aren't counted.** When a stop is requested during a read,
+  `__next__` ends before incrementing `iterations`. The read's result was
+  never handed out, so it isn't an iteration.
+- **Explicit `done()` instead of the implicit commit.** The first
+  implementation followed the original design: the next event request
+  committed the batch, `Batch.after_commit(fn)` ran post-commit code, and
+  `Node.flush` let dedup wait for delivery before marking keys seen. Review
+  replaced all three with a synchronous `Batch.done()`, so the node states
+  where a batch ends and writes its tail work on the lines after it. Dedup's
+  order became deliver → commit → mark seen as a result (see **Nodes**).
+  `test_keys_are_marked_seen_after_delivery_and_commit` pins that order.
+- **`node.done(event, output=)` instead of `send` plus `Batch.done()`.** A
+  second review step folded sending into finishing. The output is passed to
+  the call that commits its input, `send` and `add_rows_out` are gone
+  (`rows_out=` replaces the latter for nodes without a producer), and
+  `Batch` became a frozen dataclass with no reference back to the node.
+- **Dedup flushes every batch.** `done()` flushes even when every row was a
+  duplicate and nothing was sent. The old loop skipped produce and flush in
+  that case. A flush with nothing in flight returns immediately.
+- **Extra fields on the test doubles.** `MemoryConsumer` also logs
+  `read:<seq>`. `MemoryProducer` takes a `name`, so a DLQ double logs
+  `close:dlq`.
+- **Test layout.** ruff's `PT012` wants a single statement inside
+  `pytest.raises`, so tests that expect an error from the loop body run the
+  loop in a small named function.
+- **Signal handlers.** `_restore_signal_handlers` puts back `SIG_DFL` when
+  `signal.signal` reported the previous handler as `None`, meaning it wasn't
+  installed from Python.
+- **Version.** Released as 0.7.0.
+
+## Verification
+
+- `uv run ruff check packages/` and `uv run ty check packages/` are clean.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` pass. Only the Cargo.toml version changed on the Rust side.
+- `uv run pytest packages/tkati-core packages/tkati-node-el packages/tkati-node-dedup packages/tkati-dashboard`
+  passes against local Redpanda and ClickHouse (209 tests).
+  `packages/tkati-core/tests/test_node.py` holds 36 broker-free harness
+  tests, covering every behaviour listed in step 5.
+- Manual check: `tkati-node-el`, Kafka to Kafka, with input flowing at about
+  50k msg/s and `batch_size = 1000`, got SIGTERM six seconds into its run.
+  - It logged the stop, closed the consumer and then the producer, and exited
+    with code 0 about 0.1 s after the signal.
+  - The group's committed input offset (56000) equalled the number of messages
+    in the output topic (56000): nothing was committed without being
+    delivered, and nothing delivered was left uncommitted.
+  - Repeated after the switch to `done()`, and again after the switch to
+    `node.done(event, output=)`: each time exit code 0 about 0.1 s after the
+    signal, with 55000 committed and 55000 in the output topic.

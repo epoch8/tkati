@@ -51,6 +51,91 @@ broker = "localhost:9092"
 
 ## Usage
 
+### `Node` — the worker loop harness
+
+`tkati_core.Node` runs a node's loop. It owns the input, the output, the DLQ,
+`LoopStats`, the metrics server, signal handling and shutdown. Node code is a
+`for` loop over the events it yields: a `Batch` for each batch read, and `Idle`
+when a poll comes back empty.
+
+```python
+from tkati_core import Batch, Node, NodeSettings
+
+
+class AppSettings(NodeSettings):
+    ...  # the node's own sections
+
+
+def run(node: Node) -> None:
+    for event in node:
+        if isinstance(event, Batch):
+            node.done(event, output=transform(event.data))
+
+
+def main() -> None:
+    with Node.from_settings(AppSettings()) as node:
+        run(node)
+```
+
+**A node finishes each batch with `node.done(event, output=table)`.**
+`done()` sends the output, waits until it's delivered, commits the batch, and
+returns once the commit is made. There is no separate send, so the output is
+always tied to the input batch it came from. `output=None`, or an empty table,
+sends nothing. Work that must follow delivery, or must not repeat if the batch
+is re-read (marking keys seen, counting what was dropped), goes on the lines
+after it.
+
+- **Batch as read.** What's committed is always the batch as read, whatever
+  the node filtered out of `event.data`.
+- **A forgotten `done()`.** Asking for the next event while a batch isn't done
+  raises `RuntimeError`. The batch is rewound, so the bug is loud instead of
+  showing up as consumer lag. `done()` twice raises too.
+- **Exceptions.** An exception before or inside `done()` (for example a failed
+  send or flush) rewinds the batch (`Consumer.rewind`) and propagates. After `done()`
+  the batch is committed, so there is nothing to rewind. `break` and
+  `KeyboardInterrupt` before `done()` leave the batch uncommitted without
+  waiting on a seek. Either way it is read again after a restart.
+- **Later.** `done()` being synchronous is a first step. A later version will
+  pipeline the loop: `done()` will return before delivery and take callbacks
+  for the work that follows.
+
+**Shutdown.** `from_settings` makes SIGTERM and SIGINT stop the node after the
+current batch. A signal that arrives while the node is waiting on a poll cuts
+the poll short. A second signal forces an exit with `KeyboardInterrupt`. On
+exit the node closes the consumer, the output and the DLQ, in that order. The
+node's own resources belong in the same `with` statement.
+
+**Stats.** The node passes its `LoopStats` to the consumer and producer, and
+counts iterations, starved iterations and rows in and out itself. A node
+times its own work with `node.phase("name")` and passes the full report order
+as `phases=` (the default is `DEFAULT_PHASES`). That tuple must include every
+phase the harness times.
+
+**Nodes without an output producer.** `NodeSettings.output` is optional. When
+it's absent, the node has no producer (`producer=None`), and passing
+`output=` to `done()` raises. Such a node writes through its own client, for
+example to a cloud API. It must finish those writes before it calls `done()`,
+which commits the batch, and reports the rows it wrote with
+`node.done(event, rows_out=n)`:
+
+```python
+def run(node: Node, client: ApiClient) -> None:
+    for event in node:
+        if isinstance(event, Batch):
+            with node.phase("upload"):
+                client.upload(event.data)  # returns once the API accepted it
+            node.done(event, rows_out=len(event.data))
+
+# phases=(*CONSUMER_PHASES, "upload", "commit"); SINK_PHASES is the default.
+```
+
+**Testing.** `tkati_core.testing.memory_node(batches)` returns a `Node` over
+an in-memory consumer and producer, along with those two doubles. They record
+what was read, sent, flushed, committed and rewound, in one shared `log`, and
+the loop ends once `batches` runs out. For tests against a real broker,
+construct `Node(consumer, producer, ..., stop_when_idle=True)`: it processes
+what is already in the topic and stops at the first empty poll.
+
 ### `Consumer` / `Producer` base classes
 
 `tkati_core.consumer.Consumer` and `tkati_core.producer.Producer` are the abstract
@@ -80,6 +165,9 @@ and logs a breakdown on an interval (every 10s by default). The phase names,
 the log prefix and the cadence are all constructor arguments, because nodes
 have different pipelines — a dedup node has lookup and write phases an
 extract/load node does not.
+
+A `Node` does all of this for you. The loop below is what it runs, and is for
+code that drives a consumer and producer by hand.
 
 ```python
 from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, LoopStats
@@ -209,7 +297,8 @@ if you serve metrics yourself.
 ### `tkati_core.settings` — generic node settings aliases
 
 `tkati_core.settings` defines `InputSettings`/`OutputSettings` (discriminated unions
-over every input/output kind `tkati-core` implements). Use those aliases with the
+over every input/output kind `tkati-core` implements), and `NodeSettings`, the
+`input`/`output`/`dlq`/`metrics` sections `Node.from_settings` reads. Use those aliases with the
 factory helpers in `tkati_core.consumer` and `tkati_core.producer`, or import the
 helpers from the top-level `tkati_core` package for convenience.
 

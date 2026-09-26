@@ -1,3 +1,19 @@
+# 0.7.0
+
+* Runs on `tkati-core`'s `Node`. SIGTERM and SIGINT now stop the node after
+  the current batch, which is committed, and close the dedup store. Before,
+  SIGTERM killed the process without closing the store, and with the WAL off
+  (the default) keys it hadn't flushed were lost, so later duplicates of them
+  were forwarded. A second signal forces an exit
+* Bucket cleanup runs after each poll instead of before it. It still runs
+  before the lookup, and on empty polls too
+* Keys are marked seen after the input offsets are committed, not before.
+  They are still marked only after their rows are delivered, so no event can
+  be lost. A crash between the commit and the mark forwards a later duplicate
+  of those keys, where before it re-read the batch and dropped it
+* `run_one_iteration` is replaced by `run(node, store, field)`. Delivery
+  guarantees, settings, metrics and the perf line's columns are unchanged
+
 # 0.6.0
 
 * Commits exactly the batch it processed (`consumer.commit(batch)`), and on a

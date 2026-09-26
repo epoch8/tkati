@@ -3,10 +3,11 @@ import time
 import orjson
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
+from tkati_core import Node
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
-from tkati_node_el.main import run_one_iteration
+from tkati_node_el.main import run
 from tkati_node_el.settings import AppSettings
 
 
@@ -54,7 +55,7 @@ def _drain_output(
 def test_node_el_kafka_json_roundtrip_preserves_types(
     kafka_producer: RawProducer, kafka_test_settings: AppSettings
 ) -> None:
-    """A full Kafka->Kafka noop pass through run_one_iteration must reproduce every field
+    """A full Kafka->Kafka noop pass through the node must reproduce every field
     byte-for-byte, including timestamp[ms] as the original epoch-ms int (not an ISO string)."""
     event = {
         "s": "hello",
@@ -71,12 +72,15 @@ def test_node_el_kafka_json_roundtrip_preserves_types(
     kafka_producer.flush()
 
     assert isinstance(kafka_test_settings.output, KafkaOutputSettings)
-    consumer = _make_consumer(kafka_test_settings)
-    producer = KafkaProducer.from_output_settings(kafka_test_settings.output)
-    try:
-        run_one_iteration(consumer, producer, kafka_test_settings)
-    finally:
-        consumer.close()
+    node = Node(
+        _make_consumer(kafka_test_settings),
+        KafkaProducer.from_output_settings(kafka_test_settings.output),
+        batch_size=kafka_test_settings.input.consumer.batch_size,
+        batch_timeout_sec=kafka_test_settings.input.consumer.batch_timeout_sec,
+        stop_when_idle=True,
+    )
+    with node:
+        run(node)
 
     rows = _drain_output(kafka_test_settings, expected=1)
     assert rows == [event]
