@@ -7,11 +7,19 @@ import pyarrow as pa
 class KafkaError(Exception):
     """An error reported by librdkafka."""
 
+class BatchOffsets:
+    """Where a consumed batch lies in each partition. Opaque: only handed back
+    to `NativeConsumer.commit` / `rewind`."""
+
+    def __init__(self) -> None:
+        """An empty set, for tests that mock a consumer."""
+
 class RawBatch:
     """One consumed batch. Supports the buffer protocol: the payloads as
     newline-delimited JSON, tombstones omitted."""
 
     errors: list[str]
+    offsets: BatchOffsets
     tombstones: int
 
     @staticmethod
@@ -38,7 +46,8 @@ def encode_arrow(
 class NativeConsumer:
     def __init__(self, config: Mapping[str, object], topic: str) -> None: ...
     def poll_batch(self, timeout: float, max_messages: int) -> RawBatch: ...
-    def commit(self) -> None: ...
+    def commit(self, offsets: BatchOffsets) -> None: ...
+    def rewind(self, offsets: BatchOffsets) -> None: ...
     def close(self) -> None: ...
 
 class NativeProducer:

@@ -56,7 +56,19 @@ broker = "localhost:9092"
 `tkati_core.consumer.Consumer` and `tkati_core.producer.Producer` are the abstract
 interfaces a node's input and output are built against. A `Consumer` reads a batch
 with `read_arrow` (an Arrow table, which fails the batch on a malformed message) or
-`read_pylist` (a list of dicts, which skips and logs one). `KafkaConsumer` is the only
+`read_pylist` (a list of dicts, which skips and logs one). Either returns a
+`ConsumedBatch`, whose `.data` is the table or list, or `None` when nothing arrived.
+Each batch then ends in one of two explicit calls, made in the order the batches
+were read:
+
+- `consumer.commit(batch)`: the batch is fully processed. Exactly its offsets are
+  committed, even if later batches have already been read.
+- `consumer.rewind(batch)`: processing failed. The consumer seeks back to where the
+  batch started, so it is read again, and so is everything read after it. Those
+  later batches can no longer be committed.
+
+Committing or rewinding anything but the oldest outstanding batch raises
+`ValueError`. Nothing is ever committed implicitly. `KafkaConsumer` is the only
 `Consumer` implementation today; `KafkaProducer` and `ClickhouseProducer` both
 implement `Producer`. This is what lets a generic node pick its input/output kind
 from config instead of hardcoding a concrete class.
@@ -83,14 +95,18 @@ while True:
     if batch is None:
         stats.starved_iterations += 1
         continue
-    stats.rows_in += len(batch)
+    stats.rows_in += len(batch.data)
 
-    producer.produce_arrow(batch, stats=stats)
-    producer.flush(stats=stats)
-    stats.rows_out += len(batch)
+    try:
+        producer.produce_arrow(batch.data, stats=stats)
+        producer.flush(stats=stats)
+    except Exception:
+        consumer.rewind(batch)
+        raise
+    stats.rows_out += len(batch.data)
 
     with stats.phase("commit"):
-        consumer.commit()
+        consumer.commit(batch)
 
     stats.report_if_due()
 ```
@@ -234,15 +250,17 @@ settings = AppSettings()  # settings.input.connection.broker, settings.input.top
 consumer = KafkaConsumer.from_input_settings(settings.input)
 
 # Read a batch
-table = consumer.read_arrow(
-    aggregation_interval_seconds=settings.input.consumer.batch_timeout_sec,
-    max_events_to_aggregate=settings.input.consumer.batch_size,
+batch = consumer.read_arrow(
+    timeout=settings.input.consumer.batch_timeout_sec,
+    num_messages=settings.input.consumer.batch_size,
 )
-consumer.commit()
+if batch is not None:
+    process(batch.data)
+    consumer.commit(batch)
 ```
 
-The factory method sets `enable.auto.commit=False` — offsets must be committed explicitly
-via `consumer.commit()`.
+The factory method sets `enable.auto.commit=False`: each batch's offsets are
+committed explicitly with `consumer.commit(batch)`.
 
 ### Constructing a producer from settings
 

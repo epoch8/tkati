@@ -45,32 +45,40 @@ def run_one_iteration(
         stats.starved_iterations += 1
         return
 
+    table = batch.data
+
     # A short batch means the node drained the topic and waited out the batch
     # timeout — it wasn't CPU-bound, so its timings say nothing about whether
     # this node can keep up.
-    if len(batch) < settings.input.consumer.batch_size:
+    if len(table) < settings.input.consumer.batch_size:
         stats.starved_iterations += 1
-    stats.rows_in += len(batch)
+    stats.rows_in += len(table)
 
-    # No phase blocks here either: the producer splits its own time into
-    # `serialize`, `enqueue` and `deliver`, for the same reason as the
-    # consumer above.
-    producer.produce_arrow(batch, stats=stats)
-    # Block until actually delivered before committing: KafkaProducer's
-    # produce_arrow() only enqueues, so committing straight after it would lose
-    # the batch on a crash while its offset says it was handled.
-    # ClickhouseProducer.flush() is a no-op since its inserts are already
-    # synchronous.
-    producer.flush(stats=stats)
-    stats.rows_out += len(batch)
+    try:
+        # No phase blocks here either: the producer splits its own time into
+        # `serialize`, `enqueue` and `deliver`, for the same reason as the
+        # consumer above.
+        producer.produce_arrow(table, stats=stats)
+        # Block until actually delivered before committing: KafkaProducer's
+        # produce_arrow() only enqueues, so committing straight after it would
+        # lose the batch on a crash while its offset says it was handled.
+        # ClickhouseProducer.flush() is a no-op since its inserts are already
+        # synchronous.
+        producer.flush(stats=stats)
+    except Exception:
+        # The batch failed: say so, so the consumer reads it again. The error
+        # still propagates and stops the node, as before.
+        consumer.rewind(batch)
+        raise
+    stats.rows_out += len(table)
 
-    # Only after a confirmed delivery: commit. If we crash before this line,
-    # the batch is re-read at restart and written again — a duplicate at
-    # worst, never a lost event.
+    # Only after a confirmed delivery: commit this batch. If we crash before
+    # this line, the batch is re-read at restart and written again — a
+    # duplicate at worst, never a lost event.
     with stats.phase("commit"):
-        consumer.commit()
+        consumer.commit(batch)
 
-    logger.debug(f"Produced {len(batch)} rows")
+    logger.debug(f"Produced {len(table)} rows")
 
 
 def main() -> None:

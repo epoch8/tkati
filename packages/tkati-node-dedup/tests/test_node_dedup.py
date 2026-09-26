@@ -7,7 +7,8 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
 from prometheus_client import REGISTRY
-from tkati_core import LoopStats
+from tkati_core import ConsumedBatch, LoopStats
+from tkati_core._native import BatchOffsets
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
@@ -67,6 +68,10 @@ def _drain_output(test_settings: AppSettings, expected: int, timeout: float = 10
     finally:
         consumer.close()
     return rows
+
+
+def _batch(table: pa.Table) -> ConsumedBatch[pa.Table]:
+    return ConsumedBatch(data=table, offsets=BatchOffsets(), seq=0)
 
 
 def _event(uid: str | None, val: int) -> dict:
@@ -191,10 +196,10 @@ def test_missing_dedup_field_in_schema(
 
 
 def test_crash_before_flush_does_not_mark_seen_or_commit(tmp_path) -> None:
-    """If produce/flush fails, the key must not be marked seen and the offset
-    must not be committed — re-processing the same message afterward must not
-    treat it as a duplicate."""
-    batch = pa.table({"uid": ["crash-uid"], "val": [1]})
+    """If produce/flush fails, the key must not be marked seen and the batch
+    must be rewound rather than committed — re-processing the same message
+    afterward must not treat it as a duplicate."""
+    batch = _batch(pa.table({"uid": ["crash-uid"], "val": [1]}))
 
     consumer = MagicMock()
     consumer.read_arrow.return_value = batch
@@ -213,6 +218,7 @@ def test_crash_before_flush_does_not_mark_seen_or_commit(tmp_path) -> None:
         run_one_iteration(consumer, producer, store, settings)
 
     consumer.commit.assert_not_called()
+    consumer.rewind.assert_called_once_with(batch)
     assert store.contains(b"crash-uid") is False
 
     # Simulate a restart: same batch re-read, this time produce succeeds.
@@ -224,7 +230,7 @@ def test_crash_before_flush_does_not_mark_seen_or_commit(tmp_path) -> None:
 
     produced_table = producer2.produce_arrow.call_args[0][0]
     assert len(produced_table) == 1  # not dropped as a duplicate
-    consumer.commit.assert_called_once()
+    consumer.commit.assert_called_once_with(batch)
     assert store.contains(b"crash-uid") is True
 
     store.close()
@@ -234,7 +240,7 @@ def test_iteration_hands_its_stats_to_the_consumer_and_producer(tmp_path) -> Non
     """The node times no read or produce phase of its own; it relies on the
     consumer and producer to fill in theirs. If it stopped passing `stats`
     down, those report columns would silently read 0.00s."""
-    batch = pa.table({"uid": ["a", "b"], "val": [1, 2]})
+    batch = _batch(pa.table({"uid": ["a", "b"], "val": [1, 2]}))
 
     consumer = MagicMock()
     consumer.read_arrow.return_value = batch
@@ -266,7 +272,7 @@ def _mock_iteration_args(
     tmp_path, batch: pa.Table
 ) -> tuple[MagicMock, MagicMock, BucketedDedupStore, MagicMock]:
     consumer = MagicMock()
-    consumer.read_arrow.return_value = batch
+    consumer.read_arrow.return_value = _batch(batch)
     producer = MagicMock()
     store = BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
     settings = MagicMock()
@@ -284,6 +290,8 @@ def test_dropped_rows_are_counted(tmp_path) -> None:
     before = _dropped_rows_total()
     run_one_iteration(consumer, producer, store, settings)
     assert _dropped_rows_total() - before == 1
+    # The batch as read is committed, not the filtered table produced.
+    consumer.commit.assert_called_once_with(consumer.read_arrow.return_value)
 
     # Same batch again: every row is now a cross-batch duplicate.
     run_one_iteration(consumer, producer, store, settings)
