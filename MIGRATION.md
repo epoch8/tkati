@@ -1,3 +1,41 @@
+# Migrating from v0.5.x to v0.6.0
+
+## Breaking changes in `tkati-core`: explicit per-batch commit
+
+`Consumer.read_arrow` and `Consumer.read_pylist` return a `ConsumedBatch`, not
+the table or list itself. `Consumer.commit()` takes that batch.
+
+```python
+# before
+table = consumer.read_arrow(timeout=5, num_messages=1000)
+if table is not None:
+    producer.produce_arrow(table)
+    producer.flush()
+    consumer.commit()
+
+# after
+batch = consumer.read_arrow(timeout=5, num_messages=1000)
+if batch is not None:
+    try:
+        producer.produce_arrow(batch.data)
+        producer.flush()
+    except Exception:
+        consumer.rewind(batch)  # optional: the batch will be read again
+        raise
+    consumer.commit(batch)
+```
+
+- Use `batch.data` wherever the table or list was used.
+- Pass the batch as read to `commit`, even if you filtered or transformed
+  `batch.data`.
+- `commit` and `rewind` must be called for batches in the order they were read.
+  Out of order raises `ValueError`. A loop that reads one batch and finishes it
+  before reading the next already satisfies this.
+- `commit(batch)` commits only that batch. If code relied on `commit()` also
+  covering batches it read and dropped, it must now commit those batches too.
+
+The nodes (`tkati-node-el`, `tkati-node-dedup`) need no configuration changes.
+
 # Migrating from v0.3.0 to v0.4.0
 
 No breaking changes were introduced.

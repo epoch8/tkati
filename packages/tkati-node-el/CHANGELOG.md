@@ -1,3 +1,9 @@
+# 0.6.0
+
+* Commits exactly the batch it processed (`consumer.commit(batch)`), and on a
+  failed produce/flush rewinds that batch before the error stops the node.
+  Delivery guarantees are unchanged
+
 # 0.5.2
 
 * **Fixed at-least-once delivery for a Kafka output.** The node committed the

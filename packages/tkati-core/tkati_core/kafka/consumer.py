@@ -1,7 +1,7 @@
 """Kafka consumer utilities for reading messages into PyArrow tables."""
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import orjson
 import pyarrow as pa
@@ -9,6 +9,7 @@ from loguru import logger
 from pyarrow import json as pa_json
 
 from tkati_core._native import NativeConsumer, RawBatch
+from tkati_core.consumer import ConsumedBatch
 from tkati_core.consumer import Consumer as ConsumerBase
 from tkati_core.stats import LoopStats
 from tkati_core.type_mapping import TYPE_MAPPING
@@ -57,7 +58,8 @@ class KafkaConsumer(ConsumerBase):
         """
         Construct a KafkaConsumer from a KafkaInputSettings instance.
 
-        Sets enable.auto.commit=False — offsets must be committed explicitly via .commit().
+        Sets enable.auto.commit=False — each batch's offsets are committed
+        explicitly via .commit(batch).
         """
         kafka_config: dict[str, str | bool] = {
             "bootstrap.servers": settings.connection.broker,
@@ -91,6 +93,10 @@ class KafkaConsumer(ConsumerBase):
         self.consumer = NativeConsumer(kafka_config, topic_name)
         self.topic_name = topic_name
         self.input_schema = input_schema
+        # Batches are numbered as they are read; `_oldest_outstanding` is the
+        # one `commit` / `rewind` must be called with next.
+        self._next_seq = 0
+        self._oldest_outstanding = 0
 
         # Create PyArrow schemas based on input_schema
         wire_schema_fields = []
@@ -133,6 +139,11 @@ class KafkaConsumer(ConsumerBase):
         logger.debug(f"Consumed {len(batch)} events")
         return batch
 
+    def _wrap[T](self, data: T, raw: RawBatch) -> ConsumedBatch[T]:
+        batch = ConsumedBatch(data=data, offsets=raw.offsets, seq=self._next_seq)
+        self._next_seq += 1
+        return batch
+
     # WARNING: This function breaks if any single message is malformed JSON. We may
     # want to enhance it to handle individual message errors more gracefully.
     def read_arrow(
@@ -140,7 +151,7 @@ class KafkaConsumer(ConsumerBase):
         timeout: int,
         num_messages: int,
         stats: LoopStats | None = None,
-    ) -> pa.Table | None:
+    ) -> ConsumedBatch[pa.Table] | None:
         """
         Read messages from subscribed topics into a PyArrow table.
 
@@ -155,10 +166,12 @@ class KafkaConsumer(ConsumerBase):
                 single combined figure cannot tell which to chase.
 
         Returns:
-            A PyArrow Table containing the parsed events, or None if no data was consumed.
+            The parsed events as a PyArrow Table in `.data`, or None if no data
+            was consumed.
 
         Notes:
-            - Does NOT commit offsets. The caller is responsible for managing consumer lifecycle.
+            - Does NOT commit offsets. Pass the batch to commit() once processed,
+              or to rewind() if processing failed.
             - Does NOT subscribe to topics. The consumer must be pre-subscribed.
             - Raises exceptions on JSON parsing errors.
             - Uses permissive parsing that ignores unexpected fields in JSON messages.
@@ -200,14 +213,14 @@ class KafkaConsumer(ConsumerBase):
                 logger.error(f"Failed to parse JSON with PyArrow: {e}")
                 raise
 
-        return table
+        return self._wrap(table, batch)
 
     def read_pylist(
         self,
         timeout: int,
         num_messages: int,
         stats: LoopStats | None = None,
-    ) -> list[dict] | None:
+    ) -> ConsumedBatch[list[dict]] | None:
         """
         Read messages from subscribed topics into a list of dicts.
 
@@ -221,10 +234,13 @@ class KafkaConsumer(ConsumerBase):
                 `consumer/parse` exactly as in read_arrow.
 
         Returns:
-            A list of parsed event dicts, or None if no data was consumed.
+            The parsed event dicts in `.data`, or None if no data was consumed.
+            A batch whose messages all failed to parse is None too; its offsets
+            are committed once a later batch from the same partitions is.
 
         Notes:
-            - Does NOT commit offsets. The caller is responsible for managing consumer lifecycle.
+            - Does NOT commit offsets. Pass the batch to commit() once processed,
+              or to rewind() if processing failed.
         """
         stats = stats if stats is not None else LoopStats(phases=())
 
@@ -252,14 +268,37 @@ class KafkaConsumer(ConsumerBase):
                     )
 
         logger.debug(f"Successfully parsed {len(rows)} rows")
-        return rows if rows else None
+        return self._wrap(rows, batch) if rows else None
 
-    def commit(self) -> None:
+    def _check_oldest(self, batch: ConsumedBatch[Any], action: str) -> None:
+        if batch.seq != self._oldest_outstanding:
+            raise ValueError(
+                f"cannot {action} batch {batch.seq}: batch {self._oldest_outstanding} "
+                "is the oldest one not yet committed or rewound"
+                if batch.seq > self._oldest_outstanding
+                else f"cannot {action} batch {batch.seq}: already committed or rewound"
+            )
+
+    def commit(self, batch: ConsumedBatch[Any]) -> None:
         """
-        Commit the current offsets for all subscribed topics.
+        Commit exactly `batch`'s offsets. It must be the oldest batch not yet
+        committed or rewound.
         """
-        self.consumer.commit()
-        logger.debug("Committed offsets")
+        self._check_oldest(batch, "commit")
+        self.consumer.commit(batch.offsets)
+        self._oldest_outstanding += 1
+        logger.debug(f"Committed batch {batch.seq}")
+
+    def rewind(self, batch: ConsumedBatch[Any]) -> None:
+        """
+        Seek back to where `batch` started, so it is read again. It must be the
+        oldest batch not yet committed or rewound; every batch read after it
+        is re-read too, and so is dropped from the outstanding ones.
+        """
+        self._check_oldest(batch, "rewind")
+        self.consumer.rewind(batch.offsets)
+        self._oldest_outstanding = self._next_seq
+        logger.info(f"Rewound batch {batch.seq}; it will be read again")
 
     def close(self) -> None:
         """

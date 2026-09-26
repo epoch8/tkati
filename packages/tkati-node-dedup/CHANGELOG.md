@@ -1,3 +1,11 @@
+# 0.6.0
+
+* Commits exactly the batch it processed (`consumer.commit(batch)`), and on a
+  failed lookup, produce/flush or mark-seen rewinds that batch before the error
+  stops the node. Delivery guarantees are unchanged
+* `rows_out` is counted only once the batch has been produced and marked seen,
+  as in `tkati-node-el`. Before, a batch that then failed was counted too
+
 # 0.5.2
 
 * The output producer is closed on shutdown. Before, only the DLQ producer

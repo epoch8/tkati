@@ -91,52 +91,60 @@ def run_one_iteration(
         stats.starved_iterations += 1
         return
 
+    table = batch.data
+
     # A short batch means the node drained the topic and waited out the batch
     # timeout — it wasn't CPU-bound, so its timings say nothing about whether
     # this node can keep up.
-    if len(batch) < settings.input.consumer.batch_size:
+    if len(table) < settings.input.consumer.batch_size:
         stats.starved_iterations += 1
-    stats.rows_in += len(batch)
+    stats.rows_in += len(table)
 
-    field_name = settings.dedup.field
-    if field_name not in batch.column_names:
-        logger.warning(
-            f"Dedup field '{field_name}' missing from batch schema; "
-            "passing batch through unfiltered"
-        )
-        filtered, new_keys = batch, []
-    else:
-        # Includes the batch.filter() call, which is Arrow work rather than a
-        # store lookup — cheap enough not to be worth a phase of its own.
-        with stats.phase("lookup"):
-            filtered, new_keys = _dedupe_batch(batch, field_name, store)
+    try:
+        field_name = settings.dedup.field
+        if field_name not in table.column_names:
+            logger.warning(
+                f"Dedup field '{field_name}' missing from batch schema; "
+                "passing batch through unfiltered"
+            )
+            filtered, new_keys = table, []
+        else:
+            # Includes the table.filter() call, which is Arrow work rather than
+            # a store lookup — cheap enough not to be worth a phase of its own.
+            with stats.phase("lookup"):
+                filtered, new_keys = _dedupe_batch(table, field_name, store)
 
-    dropped = len(batch) - len(filtered)
+        if len(filtered) > 0:
+            # No phase blocks here either: the producer splits its own time
+            # into `serialize`, `enqueue` and `deliver`, for the same reason as
+            # the consumer above.
+            producer.produce_arrow(filtered, stats=stats)
+            # Block until actually delivered before marking anything "seen" or
+            # committing: KafkaProducer.produce_arrow() only enqueues
+            # (non-blocking), and marking a key seen before it's durably
+            # delivered would risk losing the event permanently on a crash.
+            # ClickhouseProducer.flush() is a no-op since its inserts are
+            # already synchronous.
+            producer.flush(stats=stats)
+
+        # Only after a confirmed-successful produce: mark these keys seen.
+        with stats.phase("write"):
+            store.add_many(new_keys)
+    except Exception:
+        # The batch failed: say so, so the consumer reads it again. The error
+        # still propagates and stops the node, as before.
+        consumer.rewind(batch)
+        raise
+
+    dropped = len(table) - len(filtered)
     stats.rows_out += len(filtered)
 
-    if len(filtered) > 0:
-        # No phase blocks here either: the producer splits its own time into
-        # `serialize`, `enqueue` and `deliver`, for the same reason as the
-        # consumer above.
-        producer.produce_arrow(filtered, stats=stats)
-        # Block until actually delivered before marking anything "seen" or
-        # committing. Required here even though tkati-node-el's loop skips it:
-        # KafkaProducer.produce_arrow() only enqueues (non-blocking), and
-        # marking a key seen before it's durably delivered would risk losing
-        # the event permanently on a crash. ClickhouseProducer.flush() is a
-        # no-op since its inserts are already synchronous.
-        producer.flush(stats=stats)
-
-    # Only after a confirmed-successful produce: mark these keys seen.
-    with stats.phase("write"):
-        store.add_many(new_keys)
-
-    # Only after mark-seen: commit. If we crash before this line, the batch is
-    # re-read at restart; those keys are already in the store, so re-processing
-    # it drops what was already produced — a harmless duplicate at worst, never
-    # a lost event.
+    # Only after mark-seen: commit the batch as read, not the filtered table.
+    # If we crash before this line, the batch is re-read at restart; those keys
+    # are already in the store, so re-processing it drops what was already
+    # produced — a harmless duplicate at worst, never a lost event.
     with stats.phase("commit"):
-        consumer.commit()
+        consumer.commit(batch)
 
     # Counted only once committed: a batch that fails before this point is
     # re-read after restart, and counting its drops here too would count them
@@ -144,7 +152,7 @@ def run_one_iteration(
     _DROPPED_ROWS.inc(dropped)
 
     logger.debug(
-        f"Batch of {len(batch)} rows: produced {len(filtered)}, "
+        f"Batch of {len(table)} rows: produced {len(filtered)}, "
         f"deduped {dropped} ({len(new_keys)} newly marked seen)"
     )
 

@@ -6,7 +6,8 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
-from tkati_core import LoopStats
+from tkati_core import ConsumedBatch, LoopStats
+from tkati_core._native import BatchOffsets
 from tkati_core.clickhouse.producer import ClickhouseProducer
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.kafka.consumer import KafkaConsumer
@@ -105,6 +106,10 @@ def test_node_el_malformed_data(
     assert result.result_rows[0][0] == 0
 
 
+def _batch(table: pa.Table) -> ConsumedBatch[pa.Table]:
+    return ConsumedBatch(data=table, offsets=BatchOffsets(), seq=0)
+
+
 def _mock_settings(batch_size: int = 100) -> MagicMock:
     settings = MagicMock()
     settings.input.consumer.batch_size = batch_size
@@ -117,7 +122,7 @@ def test_iteration_hands_its_stats_to_the_consumer_and_producer() -> None:
     consumer and producer to fill in theirs. If it stopped passing `stats`
     down, those report columns would silently read 0.00s."""
     consumer = MagicMock()
-    consumer.read_arrow.return_value = pa.table({"uid": ["a", "b"]})
+    consumer.read_arrow.return_value = _batch(pa.table({"uid": ["a", "b"]}))
     producer = MagicMock()
 
     stats = LoopStats(phases=())
@@ -128,11 +133,27 @@ def test_iteration_hands_its_stats_to_the_consumer_and_producer() -> None:
     assert producer.flush.call_args.kwargs["stats"] is stats
 
 
-def test_failed_flush_does_not_commit() -> None:
-    """A Kafka output only enqueues in produce_arrow; the offset must not be
-    committed until flush confirms delivery, or a crash loses the batch."""
+def test_delivered_batch_is_committed() -> None:
+    """The commit names the batch that was read, and nothing is rewound."""
+    batch = _batch(pa.table({"uid": ["a"]}))
     consumer = MagicMock()
-    consumer.read_arrow.return_value = pa.table({"uid": ["a"]})
+    consumer.read_arrow.return_value = batch
+    producer = MagicMock()
+
+    run_one_iteration(consumer, producer, _mock_settings())
+
+    assert producer.produce_arrow.call_args.args[0] is batch.data
+    consumer.commit.assert_called_once_with(batch)
+    consumer.rewind.assert_not_called()
+
+
+def test_failed_flush_rewinds_instead_of_committing() -> None:
+    """A Kafka output only enqueues in produce_arrow; the offset must not be
+    committed until flush confirms delivery, or a crash loses the batch. The
+    failure is reported back to the consumer as a rewind."""
+    batch = _batch(pa.table({"uid": ["a"]}))
+    consumer = MagicMock()
+    consumer.read_arrow.return_value = batch
     producer = MagicMock()
     producer.flush.side_effect = RuntimeError("boom")
 
@@ -140,6 +161,7 @@ def test_failed_flush_does_not_commit() -> None:
         run_one_iteration(consumer, producer, _mock_settings())
 
     consumer.commit.assert_not_called()
+    consumer.rewind.assert_called_once_with(batch)
 
 
 def test_iteration_counts_rows_and_starved_iterations() -> None:
@@ -149,7 +171,11 @@ def test_iteration_counts_rows_and_starved_iterations() -> None:
     settings = _mock_settings(batch_size=2)
     stats = LoopStats(phases=())
 
-    for batch in (pa.table({"uid": ["a", "b"]}), pa.table({"uid": ["c"]}), None):
+    for batch in (
+        _batch(pa.table({"uid": ["a", "b"]})),
+        _batch(pa.table({"uid": ["c"]})),
+        None,
+    ):
         consumer.read_arrow.return_value = batch
         run_one_iteration(consumer, producer, settings, stats)
 

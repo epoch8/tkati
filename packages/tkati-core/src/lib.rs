@@ -53,11 +53,38 @@ fn config_entries(config: &Bound<'_, PyDict>) -> PyResult<Vec<(String, String)>>
         .collect()
 }
 
-/// One consumed batch: raw payloads plus the consumer errors met while
-/// polling for it.
+/// Where a consumed batch starts and ends in each partition. Opaque to
+/// Python: it is only handed back to `NativeConsumer.commit` / `rewind`.
+#[pyclass(frozen, skip_from_py_object, module = "tkati_core._native")]
+#[derive(Clone, Default)]
+struct BatchOffsets {
+    ranges: kafka::Offsets,
+}
+
+#[pymethods]
+impl BatchOffsets {
+    /// An empty set, for tests that mock a consumer.
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn __repr__(&self) -> String {
+        let ranges: Vec<String> = self
+            .ranges
+            .iter()
+            .map(|(partition, (first, next))| format!("{partition}: {first}..{next}"))
+            .collect();
+        format!("BatchOffsets({{{}}})", ranges.join(", "))
+    }
+}
+
+/// One consumed batch: raw payloads, where they came from, and the consumer
+/// errors met while polling for it.
 #[pyclass(frozen, module = "tkati_core._native")]
 struct RawBatch {
     payloads: Payloads,
+    offsets: kafka::Offsets,
     #[pyo3(get)]
     errors: Vec<String>,
 }
@@ -74,12 +101,22 @@ impl RawBatch {
         }
         Self {
             payloads: p,
+            offsets: kafka::Offsets::new(),
             errors: Vec::new(),
         }
     }
 
     fn __len__(&self) -> usize {
         self.payloads.len()
+    }
+
+    /// Where the batch lies in each partition, to commit or rewind it by.
+    /// Empty for a batch built with `from_payloads`.
+    #[getter]
+    fn offsets(&self) -> BatchOffsets {
+        BatchOffsets {
+            ranges: self.offsets.clone(),
+        }
     }
 
     /// Messages without a value. They have no line in the buffer.
@@ -206,17 +243,36 @@ impl NativeConsumer {
     fn poll_batch(&self, py: Python<'_>, timeout: f64, max_messages: usize) -> PyResult<RawBatch> {
         let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
         let mut payloads = Payloads::default();
+        let mut offsets = kafka::Offsets::new();
         let mut errors = Vec::new();
         while payloads.len() < max_messages && Instant::now() < deadline {
-            py.detach(|| self.inner.poll_step(deadline, max_messages, &mut payloads, &mut errors))
-                .map_err(closed_err)?;
+            py.detach(|| {
+                self.inner
+                    .poll_step(deadline, max_messages, &mut payloads, &mut offsets, &mut errors)
+            })
+            .map_err(closed_err)?;
             py.check_signals()?;
         }
-        Ok(RawBatch { payloads, errors })
+        Ok(RawBatch {
+            payloads,
+            offsets,
+            errors,
+        })
     }
 
-    fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.inner.commit())
+    /// Commit the end of each partition the batch read from.
+    fn commit(&self, py: Python<'_>, offsets: Py<BatchOffsets>) -> PyResult<()> {
+        let offsets = offsets.get();
+        py.detach(|| self.inner.commit(&offsets.ranges))
+            .map_err(closed_err)?
+            .map_err(kafka_err)
+    }
+
+    /// Seek back to the start of each partition the batch read from, so it is
+    /// delivered again.
+    fn rewind(&self, py: Python<'_>, offsets: Py<BatchOffsets>) -> PyResult<()> {
+        let offsets = offsets.get();
+        py.detach(|| self.inner.rewind(&offsets.ranges))
             .map_err(closed_err)?
             .map_err(kafka_err)
     }
@@ -261,6 +317,7 @@ impl NativeProducer {
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<BatchOffsets>()?;
     m.add_class::<RawBatch>()?;
     m.add_class::<EncodedBatch>()?;
     m.add_class::<NativeConsumer>()?;

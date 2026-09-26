@@ -10,7 +10,7 @@ import orjson
 import pyarrow as pa
 import pytest
 from pyarrow import json as pa_json
-from tkati_core._native import EncodedBatch, RawBatch, encode_arrow
+from tkati_core._native import BatchOffsets, EncodedBatch, RawBatch, encode_arrow
 from tkati_core.kafka.consumer import parse_ndjson
 from tkati_core.kafka.producer import KafkaProducer
 
@@ -191,6 +191,12 @@ def test_raw_batch_buffer_is_ndjson_without_tombstones():
     assert (len(batch), batch.tombstones) == (3, 1)
     assert bytes(memoryview(batch)) == b'{"a":1}\n{}\n'
     assert batch.payloads() == [b'{"a":1}', None, b"{}"]
+
+
+def test_raw_batch_from_payloads_has_empty_offsets():
+    offsets = RawBatch.from_payloads([b"{}"]).offsets
+    assert isinstance(offsets, BatchOffsets)
+    assert repr(offsets) == "BatchOffsets({})"
 
 
 def test_raw_batch_buffer_is_read_only():

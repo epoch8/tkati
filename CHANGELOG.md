@@ -12,6 +12,26 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.6.0
+
+### tptxzquv — Explicit per-batch commit and rewind [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- **Breaking (tkati-core):** `Consumer.read_arrow` / `read_pylist` return a
+  `ConsumedBatch` (`.data` is the table or list). `commit()` becomes
+  `commit(batch)`, which commits exactly that batch's offsets instead of
+  everything polled so far. The new `rewind(batch)` seeks back so a failed
+  batch is read again. Both must be called in read order, or they raise
+  `ValueError`. This is groundwork for pipelining, where several batches are in
+  flight at once.
+- The native consumer records each batch's first and last offset per partition
+  while polling (`BatchOffsets`, opaque to Python). It commits them with an
+  explicit `TopicPartitionList` and rewinds with `seek_partitions`.
+- Both nodes commit the batch they read, and rewind it when processing fails
+  before re-raising. `tkati-node-dedup` counts `rows_out` only after a batch
+  succeeds.
+- Migration notes: `MIGRATION.md`. Design doc:
+  `design-docs/2026-09-26-explicit-batch-commit.md`.
+
 ## 0.5.2
 
 ### ovpxopzr — node-el loop stats, metrics and flush-before-commit [tkati-node-el, tkati-node-dedup, repo]

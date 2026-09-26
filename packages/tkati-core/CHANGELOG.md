@@ -1,3 +1,22 @@
+# 0.6.0
+
+* **Breaking:** explicit per-batch commit.
+  * `read_arrow` / `read_pylist` return a `ConsumedBatch` (exported from
+    `tkati_core`) instead of a bare `pa.Table` / `list[dict]`. The table or
+    list is its `.data`.
+  * `commit()` becomes `commit(batch)`. It commits exactly that batch's offsets,
+    not the consumer's whole position. Before, every message polled so far was
+    committed, including batches read but not yet processed.
+  * New `rewind(batch)` marks a batch as failed. The consumer seeks back to
+    where the batch started, so it (and everything read after it) is read
+    again.
+  * `commit` and `rewind` must be called for the oldest outstanding batch, in
+    read order. Anything else raises `ValueError`.
+  * Offsets for partitions no longer assigned after a rebalance are skipped,
+    as `commit()` already skipped them.
+* `tkati_core._native`: new opaque `BatchOffsets`; `RawBatch.offsets`;
+  `NativeConsumer.commit(offsets)` and `rewind(offsets)`.
+
 # 0.5.1
 
 * Prometheus metrics no longer carry a `node` label. Each node serves its own

@@ -1,7 +1,7 @@
 [package]
 name = "tkati_core_native"
 # Kept equal to the workspace's shared Python version (see CLAUDE.md).
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 publish = false
 
