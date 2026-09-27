@@ -1,3 +1,73 @@
+# Migrating from v0.6.0 to v0.7.0
+
+`tkati-core` has no breaking changes. Its new API (`Node`, `NodeSettings`,
+`tkati_core.testing`) is additive, and `Consumer`/`Producer` code written for
+v0.6.0 works unchanged. Settings files for both nodes need no changes.
+
+## Breaking changes in `tkati-node-el` and `tkati-node-dedup`: `run_one_iteration` removed
+
+Both nodes now run on `tkati-core`'s `Node`, and their `run_one_iteration`
+functions are gone. This affects only code that imported them, such as tests
+or custom entry points. Running the nodes through their CLIs is unaffected.
+
+```python
+# before
+run_one_iteration(consumer, producer, settings, stats)              # node-el
+run_one_iteration(consumer, producer, store, settings, stats)       # node-dedup
+
+# after: runs the whole loop until the node is stopped
+with Node.from_settings(settings) as node:
+    run(node)                                   # tkati_node_el.main.run
+
+with closing(store), Node.from_settings(settings, phases=_PHASES) as node:
+    run(node, store, settings.dedup.field)      # tkati_node_dedup.main.run
+```
+
+Each node's `main()` shows the full setup.
+
+To test a node without a broker, build it with `tkati_core.testing.memory_node`
+instead of real Kafka clients.
+
+## Behavior changes
+
+- SIGTERM and SIGINT stop both nodes gracefully. The node finishes and commits
+  the current batch, closes everything and exits, and a second signal forces
+  an exit. Before, SIGTERM killed the process without cleanup.
+- `tkati-node-dedup` marks keys as seen after it commits the input offsets
+  instead of before. A crash between the two now forwards a later duplicate of
+  those keys, where before it re-read the batch and dropped it. No event can
+  be lost either way.
+
+## Optional: move hand-written loops to `Node`
+
+A loop written against the v0.6.0 `read_arrow`/`commit(batch)`/`rewind(batch)`
+API still works. To let `Node` own the consumer, producer, DLQ, `LoopStats`,
+the metrics server and shutdown instead:
+
+```python
+# before
+batch = consumer.read_arrow(timeout=5, num_messages=1000)
+if batch is not None:
+    try:
+        producer.produce_arrow(batch.data)
+        producer.flush()
+    except Exception:
+        consumer.rewind(batch)
+        raise
+    consumer.commit(batch)
+
+# after
+class AppSettings(NodeSettings):  # input / output / dlq / metrics
+    ...
+
+with Node.from_settings(AppSettings()) as node:
+    for event in node.consume_arrow():
+        if isinstance(event, Batch):
+            node.done(event, output_arrow=event.data)
+```
+
+See [`packages/tkati-core/README.md`](packages/tkati-core/README.md).
+
 # Migrating from v0.5.x to v0.6.0
 
 ## Breaking changes in `tkati-core`: explicit per-batch commit
