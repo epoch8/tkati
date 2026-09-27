@@ -1,3 +1,11 @@
+# 0.7.0
+
+* Runs on `tkati-core`'s `Node`. SIGTERM and SIGINT now stop the node after
+  the current batch, which is committed, and a second signal forces an exit.
+  Before, SIGTERM killed the process without closing anything. Delivery
+  guarantees, settings and metrics are unchanged
+* `run_one_iteration` is replaced by `run(node)`
+
 # 0.6.0
 
 * Commits exactly the batch it processed (`consumer.commit(batch)`), and on a

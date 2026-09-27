@@ -2,7 +2,7 @@ import os
 from typing import Annotated
 
 from loguru import logger
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -12,6 +12,7 @@ from pydantic_settings import (
 
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.kafka.settings import KafkaInputSettings, KafkaOutputSettings
+from tkati_core.metrics import MetricsSettings
 
 SETTINGS_FILE = os.getenv("SETTINGS_FILE", "settings.toml")
 
@@ -48,3 +49,28 @@ InputSettings = KafkaInputSettings
 OutputSettings = Annotated[
     KafkaOutputSettings | ClickHouseOutputSettings, Field(discriminator="type")
 ]
+
+
+class NodeSettings(TomlBaseSettings):
+    """The sections every `Node.from_settings` reads. A node subclasses this
+    and adds its own.
+
+    `output` is optional because a node may deliver its output itself, e.g.
+    through a cloud API client. A node that always has one redeclares it as
+    `output: OutputSettings`, so its config fails validation without it.
+    """
+
+    input: InputSettings
+    output: OutputSettings | None = None
+    dlq: OutputSettings | None = None
+    metrics: MetricsSettings = MetricsSettings()
+
+    @model_validator(mode="after")
+    def _dlq_needs_output(self) -> "NodeSettings":
+        # The DLQ only receives rows the output producer rejects, so without
+        # an output it would be accepted and then never used.
+        if self.dlq is not None and self.output is None:
+            raise ValueError(
+                "`dlq` is set but `output` is not; the DLQ only takes rows the output rejects"
+            )
+        return self

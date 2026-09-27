@@ -1,5 +1,4 @@
 import time
-from unittest.mock import MagicMock
 
 import orjson
 import pyarrow as pa
@@ -7,12 +6,12 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
 from prometheus_client import REGISTRY
-from tkati_core import ConsumedBatch, LoopStats
-from tkati_core._native import BatchOffsets
+from tkati_core import Node
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
-from tkati_node_dedup.main import run_one_iteration
+from tkati_core.testing import memory_node
+from tkati_node_dedup.main import _PHASES, run
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
 
@@ -44,7 +43,9 @@ def _make_store(test_settings: AppSettings) -> BucketedDedupStore:
     )
 
 
-def _drain_output(test_settings: AppSettings, expected: int, timeout: float = 10.0) -> list[dict]:
+def _drain_output(
+    test_settings: AppSettings, expected: int, timeout: float = 10.0
+) -> list[dict]:
     assert isinstance(test_settings.output, KafkaOutputSettings)
     consumer = RawConsumer(
         {
@@ -70,8 +71,20 @@ def _drain_output(test_settings: AppSettings, expected: int, timeout: float = 10
     return rows
 
 
-def _batch(table: pa.Table) -> ConsumedBatch[pa.Table]:
-    return ConsumedBatch(data=table, offsets=BatchOffsets(), seq=0)
+def _run(test_settings: AppSettings, store: BucketedDedupStore) -> None:
+    """Run the node over everything already in the input topic, then stop.
+    Each call is a fresh consumer in the same group, so a second call resumes
+    from the first one's commit — as a restart would."""
+    node = Node(
+        _make_consumer(test_settings),
+        _make_producer(test_settings),
+        batch_size=test_settings.input.consumer.batch_size,
+        batch_timeout_sec=test_settings.input.consumer.batch_timeout_sec,
+        phases=_PHASES,
+        stop_when_idle=True,
+    )
+    with node:
+        run(node, store, test_settings.dedup.field)
 
 
 def _event(uid: str | None, val: int) -> dict:
@@ -82,17 +95,18 @@ def test_basic_in_batch_dedup(
     kafka_producer: RawProducer, test_settings: AppSettings
 ) -> None:
     """Two messages with the same uid produced before one poll: only one survives."""
-    kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-1", 1)))
-    kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-1", 2)))
+    kafka_producer.produce(
+        test_settings.input.topic.name, value=orjson.dumps(_event("dup-1", 1))
+    )
+    kafka_producer.produce(
+        test_settings.input.topic.name, value=orjson.dumps(_event("dup-1", 2))
+    )
     kafka_producer.flush()
 
-    consumer = _make_consumer(test_settings)
-    producer = _make_producer(test_settings)
     store = _make_store(test_settings)
     try:
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
     finally:
-        consumer.close()
         store.close()
 
     rows = _drain_output(test_settings, expected=1)
@@ -100,21 +114,24 @@ def test_basic_in_batch_dedup(
     assert rows[0]["uid"] == "dup-1"
 
 
-def test_cross_batch_dedup(kafka_producer: RawProducer, test_settings: AppSettings) -> None:
-    """Same uid produced across two separate iterations: only the first survives."""
-    consumer = _make_consumer(test_settings)
-    producer = _make_producer(test_settings)
+def test_cross_batch_dedup(
+    kafka_producer: RawProducer, test_settings: AppSettings
+) -> None:
+    """Same uid produced across two separate runs: only the first survives."""
     store = _make_store(test_settings)
     try:
-        kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-2", 1)))
+        kafka_producer.produce(
+            test_settings.input.topic.name, value=orjson.dumps(_event("dup-2", 1))
+        )
         kafka_producer.flush()
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
 
-        kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-2", 2)))
+        kafka_producer.produce(
+            test_settings.input.topic.name, value=orjson.dumps(_event("dup-2", 2))
+        )
         kafka_producer.flush()
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
     finally:
-        consumer.close()
         store.close()
 
     rows = _drain_output(test_settings, expected=1)
@@ -130,22 +147,23 @@ def test_bucket_rollover_lets_key_through_again(
     now = [1_000_000.0]
     monkeypatch.setattr("tkati_node_dedup.store._now", lambda: now[0])
 
-    consumer = _make_consumer(test_settings)
-    producer = _make_producer(test_settings)
     store = _make_store(test_settings)
     try:
-        kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-3", 1)))
+        kafka_producer.produce(
+            test_settings.input.topic.name, value=orjson.dumps(_event("dup-3", 1))
+        )
         kafka_producer.flush()
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
 
         # Advance well past window_hours + bucket_hours so the bucket ages out.
         now[0] += 5 * 3600
 
-        kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-3", 2)))
+        kafka_producer.produce(
+            test_settings.input.topic.name, value=orjson.dumps(_event("dup-3", 2))
+        )
         kafka_producer.flush()
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
     finally:
-        consumer.close()
         store.close()
 
     rows = _drain_output(test_settings, expected=2)
@@ -155,17 +173,18 @@ def test_bucket_rollover_lets_key_through_again(
 def test_null_dedup_field_passes_through(
     kafka_producer: RawProducer, test_settings: AppSettings
 ) -> None:
-    kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event(None, 1)))
-    kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event(None, 2)))
+    kafka_producer.produce(
+        test_settings.input.topic.name, value=orjson.dumps(_event(None, 1))
+    )
+    kafka_producer.produce(
+        test_settings.input.topic.name, value=orjson.dumps(_event(None, 2))
+    )
     kafka_producer.flush()
 
-    consumer = _make_consumer(test_settings)
-    producer = _make_producer(test_settings)
     store = _make_store(test_settings)
     try:
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
     finally:
-        consumer.close()
         store.close()
 
     rows = _drain_output(test_settings, expected=2)
@@ -177,17 +196,18 @@ def test_missing_dedup_field_in_schema(
 ) -> None:
     test_settings.dedup.field = "does_not_exist"
 
-    kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-4", 1)))
-    kafka_producer.produce(test_settings.input.topic.name, value=orjson.dumps(_event("dup-4", 2)))
+    kafka_producer.produce(
+        test_settings.input.topic.name, value=orjson.dumps(_event("dup-4", 1))
+    )
+    kafka_producer.produce(
+        test_settings.input.topic.name, value=orjson.dumps(_event("dup-4", 2))
+    )
     kafka_producer.flush()
 
-    consumer = _make_consumer(test_settings)
-    producer = _make_producer(test_settings)
     store = _make_store(test_settings)
     try:
-        run_one_iteration(consumer, producer, store, test_settings)
+        _run(test_settings, store)
     finally:
-        consumer.close()
         store.close()
 
     # Both rows pass through unfiltered — there's no column to dedup by.
@@ -195,70 +215,76 @@ def test_missing_dedup_field_in_schema(
     assert len(rows) == 2
 
 
+def _store(tmp_path) -> BucketedDedupStore:
+    return BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
+
+
+def _run_memory(store: BucketedDedupStore, node: Node) -> None:
+    with node:
+        run(node, store, "uid")
+
+
 def test_crash_before_flush_does_not_mark_seen_or_commit(tmp_path) -> None:
     """If produce/flush fails, the key must not be marked seen and the batch
     must be rewound rather than committed — re-processing the same message
     afterward must not treat it as a duplicate."""
-    batch = _batch(pa.table({"uid": ["crash-uid"], "val": [1]}))
+    table = pa.table({"uid": ["crash-uid"], "val": [1]})
+    store = _store(tmp_path)
 
-    consumer = MagicMock()
-    consumer.read_arrow.return_value = batch
-
-    producer = MagicMock()
-    producer.produce_arrow = MagicMock()
-    producer.flush = MagicMock(side_effect=RuntimeError("boom"))
-
-    store = BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
-    settings = MagicMock()
-    settings.input.consumer.batch_size = 100
-    settings.input.consumer.batch_timeout_sec = 5
-    settings.dedup.field = "uid"
-
+    node, consumer, _ = memory_node(
+        [table], phases=_PHASES, fail_flush=RuntimeError("boom")
+    )
     with pytest.raises(RuntimeError, match="boom"):
-        run_one_iteration(consumer, producer, store, settings)
+        _run_memory(store, node)
 
-    consumer.commit.assert_not_called()
-    consumer.rewind.assert_called_once_with(batch)
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
     assert store.contains(b"crash-uid") is False
 
     # Simulate a restart: same batch re-read, this time produce succeeds.
-    producer2 = MagicMock()
-    producer2.produce_arrow = MagicMock()
-    producer2.flush = MagicMock()
+    node, consumer, producer = memory_node([table], phases=_PHASES)
+    _run_memory(store, node)
 
-    run_one_iteration(consumer, producer2, store, settings)
-
-    produced_table = producer2.produce_arrow.call_args[0][0]
-    assert len(produced_table) == 1  # not dropped as a duplicate
-    consumer.commit.assert_called_once_with(batch)
+    assert producer is not None
+    assert [len(t) for t in producer.sent] == [1]  # not dropped as a duplicate
+    assert consumer.commits == [0]
     assert store.contains(b"crash-uid") is True
 
     store.close()
 
 
-def test_iteration_hands_its_stats_to_the_consumer_and_producer(tmp_path) -> None:
-    """The node times no read or produce phase of its own; it relies on the
-    consumer and producer to fill in theirs. If it stopped passing `stats`
-    down, those report columns would silently read 0.00s."""
-    batch = _batch(pa.table({"uid": ["a", "b"], "val": [1, 2]}))
+def test_keys_are_marked_seen_after_delivery_and_commit(tmp_path, monkeypatch) -> None:
+    """Deliver, commit, then mark seen: never mark a key seen before its row
+    is delivered."""
+    store = _store(tmp_path)
+    node, consumer, _ = memory_node(
+        [pa.table({"uid": ["a"], "val": [1]})], phases=_PHASES
+    )
+    add_many = store.add_many
 
-    consumer = MagicMock()
-    consumer.read_arrow.return_value = batch
-    producer = MagicMock()
+    def logged_add_many(keys) -> None:
+        consumer.log.append("mark-seen")
+        add_many(keys)
 
-    store = BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
-    settings = MagicMock()
-    settings.input.consumer.batch_size = 100
-    settings.input.consumer.batch_timeout_sec = 5
-    settings.dedup.field = "uid"
+    monkeypatch.setattr(store, "add_many", logged_add_many)
+    _run_memory(store, node)
 
-    stats = LoopStats(phases=())
-    run_one_iteration(consumer, producer, store, settings, stats)
+    assert consumer.log[:5] == ["read:0", "produce", "flush", "commit:0", "mark-seen"]
+    assert store.contains(b"a") is True
+    store.close()
 
-    assert consumer.read_arrow.call_args.kwargs["stats"] is stats
-    assert producer.produce_arrow.call_args.kwargs["stats"] is stats
-    assert producer.flush.call_args.kwargs["stats"] is stats
 
+def test_idle_event_runs_store_cleanup(tmp_path, monkeypatch) -> None:
+    """An idle node must still expire buckets: cleanup runs on empty polls
+    too, not only on batches."""
+    store = _store(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(store, "cleanup_expired", lambda: calls.append("cleanup"))
+
+    node, _, _ = memory_node([None, None], phases=_PHASES)
+    _run_memory(store, node)
+
+    assert calls == ["cleanup", "cleanup"]
     store.close()
 
 
@@ -268,48 +294,39 @@ def _dropped_rows_total() -> float:
     return value
 
 
-def _mock_iteration_args(
-    tmp_path, batch: pa.Table
-) -> tuple[MagicMock, MagicMock, BucketedDedupStore, MagicMock]:
-    consumer = MagicMock()
-    consumer.read_arrow.return_value = _batch(batch)
-    producer = MagicMock()
-    store = BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
-    settings = MagicMock()
-    settings.input.consumer.batch_size = 100
-    settings.input.consumer.batch_timeout_sec = 5
-    settings.dedup.field = "uid"
-    return consumer, producer, store, settings
-
-
 def test_dropped_rows_are_counted(tmp_path) -> None:
     """The counter is process-global, so assert on the delta."""
-    batch = pa.table({"uid": ["a", "a", "b"], "val": [1, 2, 3]})
-    consumer, producer, store, settings = _mock_iteration_args(tmp_path, batch)
+    table = pa.table({"uid": ["a", "a", "b"], "val": [1, 2, 3]})
+    store = _store(tmp_path)
 
     before = _dropped_rows_total()
-    run_one_iteration(consumer, producer, store, settings)
+    node, consumer, producer = memory_node([table], phases=_PHASES)
+    _run_memory(store, node)
     assert _dropped_rows_total() - before == 1
-    # The batch as read is committed, not the filtered table produced.
-    consumer.commit.assert_called_once_with(consumer.read_arrow.return_value)
+    assert producer is not None
+    assert producer.sent[0].column("uid").to_pylist() == ["a", "b"]
+    assert consumer.commits == [0]
 
     # Same batch again: every row is now a cross-batch duplicate.
-    run_one_iteration(consumer, producer, store, settings)
+    node, _, producer = memory_node([table], phases=_PHASES)
+    _run_memory(store, node)
     assert _dropped_rows_total() - before == 4
+    assert producer is not None
+    assert producer.sent == []
 
     store.close()
 
 
-def test_failed_iteration_does_not_count_dropped_rows(tmp_path) -> None:
+def test_failed_batch_does_not_count_dropped_rows(tmp_path) -> None:
     """A batch that fails before commit is re-read after restart; counting its
     drops on the failed attempt would count them twice."""
-    batch = pa.table({"uid": ["a", "a"], "val": [1, 2]})
-    consumer, producer, store, settings = _mock_iteration_args(tmp_path, batch)
-    producer.flush.side_effect = RuntimeError("boom")
+    table = pa.table({"uid": ["a", "a"], "val": [1, 2]})
+    store = _store(tmp_path)
 
     before = _dropped_rows_total()
+    node, _, _ = memory_node([table], phases=_PHASES, fail_flush=RuntimeError("boom"))
     with pytest.raises(RuntimeError, match="boom"):
-        run_one_iteration(consumer, producer, store, settings)
+        _run_memory(store, node)
     assert _dropped_rows_total() == before
 
     store.close()

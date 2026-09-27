@@ -1,16 +1,27 @@
+"""Deduplicate a Kafka topic by one field, within a rolling window.
+
+Ordering is what makes this at-least-once without losing events. For each
+batch, in the loop body:
+
+1. look the keys up and filter out duplicates;
+2. `done()` with the survivors: sent, delivered, then committed;
+3. only then mark their keys seen in the store.
+
+A crash before the commit re-reads the batch at restart, and its rows are
+sent again: a duplicate at worst. A crash between the commit and step 3 means
+the batch isn't re-read and its keys were never marked, so a later duplicate
+of one of them is forwarded: again a duplicate at worst, in a window as wide
+as one memtable write. Either way no event is lost. Marking keys seen before
+delivery is the one dangerous order: a crash in between would drop the event
+on re-read without it ever having been produced.
+"""
+
+from contextlib import closing
+
 import pyarrow as pa
 from loguru import logger
 from prometheus_client import Counter
-from tkati_core import (
-    CONSUMER_PHASES,
-    PRODUCER_PHASES,
-    Consumer,
-    LoopStats,
-    Producer,
-    build_consumer,
-    build_producer,
-    start_metrics_server,
-)
+from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, Batch, Node
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
@@ -32,10 +43,6 @@ _DROPPED_ROWS = Counter(
 )
 
 
-def _new_stats() -> LoopStats:
-    return LoopStats(phases=_PHASES)
-
-
 def _dedupe_batch(
     batch: pa.Table, field_name: str, store: BucketedDedupStore
 ) -> tuple[pa.Table, list[bytes]]:
@@ -54,54 +61,29 @@ def _dedupe_batch(
     return filtered, new_keys
 
 
-def run_one_iteration(
-    consumer: Consumer,
-    producer: Producer,
-    store: BucketedDedupStore,
-    settings: AppSettings,
-    stats: LoopStats | None = None,
-) -> None:
-    stats = stats if stats is not None else _new_stats()
+def run(node: Node, store: BucketedDedupStore, field_name: str) -> None:
+    for event in node:
+        # Runs on every event, a batch or an empty poll, and can never raise.
+        # Buckets must be fresh *before* the dedupe check below runs — doing
+        # this only after commit would leave a just-expired bucket open and
+        # checked against for one extra batch, and an idle node (only Idle
+        # events) would never clean up at all.
+        # Timed into the "commit" bucket rather than given a phase of its own:
+        # it is ~0 except once an hour when a bucket is destroyed, so it shows
+        # up as an occasional commit spike instead of a permanent near-zero
+        # field.
+        with node.phase("commit"):
+            try:
+                store.cleanup_expired()
+            except Exception:
+                logger.exception(
+                    "dedup store cleanup failed; will retry next iteration"
+                )
 
-    # Runs first, every iteration (even if no batch arrives), and can never
-    # raise. Buckets must be fresh *before* the dedupe check below runs —
-    # doing this only after commit would leave a just-expired bucket open and
-    # checked against for one extra iteration, and an idle node (no messages,
-    # read_arrow returns None below) would never clean up at all.
-    # Timed into the "commit" bucket rather than given a phase of its own:
-    # it is ~0 except once an hour when a bucket is destroyed, so it shows
-    # up as an occasional commit spike instead of a permanent near-zero field.
-    with stats.phase("commit"):
-        try:
-            store.cleanup_expired()
-        except Exception:
-            logger.exception("dedup store cleanup failed; will retry next iteration")
+        if not isinstance(event, Batch):
+            continue
+        table = event.data
 
-    # No phase block here: the consumer splits its own time into `poll` and
-    # `parse`. Wrapping it in an umbrella phase as well would double-count that
-    # time, and the percentages are of the interval — they are meant to fall
-    # short of 100%, with the shortfall being genuinely unaccounted work.
-    batch = consumer.read_arrow(
-        num_messages=settings.input.consumer.batch_size,
-        timeout=settings.input.consumer.batch_timeout_sec,
-        stats=stats,
-    )
-    stats.iterations += 1
-    if batch is None:
-        stats.starved_iterations += 1
-        return
-
-    table = batch.data
-
-    # A short batch means the node drained the topic and waited out the batch
-    # timeout — it wasn't CPU-bound, so its timings say nothing about whether
-    # this node can keep up.
-    if len(table) < settings.input.consumer.batch_size:
-        stats.starved_iterations += 1
-    stats.rows_in += len(table)
-
-    try:
-        field_name = settings.dedup.field
         if field_name not in table.column_names:
             logger.warning(
                 f"Dedup field '{field_name}' missing from batch schema; "
@@ -111,62 +93,33 @@ def run_one_iteration(
         else:
             # Includes the table.filter() call, which is Arrow work rather than
             # a store lookup — cheap enough not to be worth a phase of its own.
-            with stats.phase("lookup"):
+            with node.phase("lookup"):
                 filtered, new_keys = _dedupe_batch(table, field_name, store)
 
-        if len(filtered) > 0:
-            # No phase blocks here either: the producer splits its own time
-            # into `serialize`, `enqueue` and `deliver`, for the same reason as
-            # the consumer above.
-            producer.produce_arrow(filtered, stats=stats)
-            # Block until actually delivered before marking anything "seen" or
-            # committing: KafkaProducer.produce_arrow() only enqueues
-            # (non-blocking), and marking a key seen before it's durably
-            # delivered would risk losing the event permanently on a crash.
-            # ClickhouseProducer.flush() is a no-op since its inserts are
-            # already synchronous.
-            producer.flush(stats=stats)
+        # Sent, delivered, then committed. Everything below runs after the
+        # commit.
+        node.done(event, output=filtered)
 
-        # Only after a confirmed-successful produce: mark these keys seen.
-        with stats.phase("write"):
+        # Only after a confirmed delivery: mark these keys seen. Marking a key
+        # seen before its row is delivered would risk losing the event on a
+        # crash; see the module docstring for why after the commit is safe.
+        with node.phase("write"):
             store.add_many(new_keys)
-    except Exception:
-        # The batch failed: say so, so the consumer reads it again. The error
-        # still propagates and stops the node, as before.
-        consumer.rewind(batch)
-        raise
 
-    dropped = len(table) - len(filtered)
-    stats.rows_out += len(filtered)
+        dropped = len(table) - len(filtered)
+        # Counted only once committed: a batch that fails before then is
+        # re-read after restart, and counting its drops too would count them
+        # twice.
+        _DROPPED_ROWS.inc(dropped)
 
-    # Only after mark-seen: commit the batch as read, not the filtered table.
-    # If we crash before this line, the batch is re-read at restart; those keys
-    # are already in the store, so re-processing it drops what was already
-    # produced — a harmless duplicate at worst, never a lost event.
-    with stats.phase("commit"):
-        consumer.commit(batch)
-
-    # Counted only once committed: a batch that fails before this point is
-    # re-read after restart, and counting its drops here too would count them
-    # twice.
-    _DROPPED_ROWS.inc(dropped)
-
-    logger.debug(
-        f"Batch of {len(table)} rows: produced {len(filtered)}, "
-        f"deduped {dropped} ({len(new_keys)} newly marked seen)"
-    )
+        logger.debug(
+            f"Batch of {len(table)} rows: produced {len(filtered)}, "
+            f"deduped {dropped} ({len(new_keys)} newly marked seen)"
+        )
 
 
 def main() -> None:
     settings = AppSettings()
-
-    consumer = build_consumer(settings.input)
-
-    dlq_producer: Producer | None = None
-    if settings.dlq is not None:
-        dlq_producer = build_producer(settings.dlq)
-
-    producer = build_producer(settings.output, dlq_producer=dlq_producer)
 
     store = BucketedDedupStore(
         root_dir=settings.dedup.store_dir,
@@ -174,18 +127,7 @@ def main() -> None:
         bucket_hours=settings.dedup.bucket_hours,
         tuning=settings.dedup.rocksdb,
     )
-
-    stats = _new_stats()
-    # Same numbers as the periodic perf log line, as Prometheus counters.
-    start_metrics_server(settings.metrics, stats)
-    try:
-        while True:
-            run_one_iteration(consumer, producer, store, settings, stats)
-            stats.report_if_due()
-    finally:
-        consumer.close()
-        # Before the DLQ producer: the output can still route rows to it.
-        producer.close()
-        if dlq_producer is not None:
-            dlq_producer.close()
-        store.close()
+    # The store is entered first, so it closes last: after the node has
+    # stopped and closed its clients.
+    with closing(store), Node.from_settings(settings, phases=_PHASES) as node:
+        run(node, store, settings.dedup.field)

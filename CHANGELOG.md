@@ -12,6 +12,27 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.7.0
+
+### nxsrlkrt — Worker loop harness [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- `tkati-core` gains `Node`, a harness that runs a node's loop. Node code is
+  `for event in node:` over `Batch` and `Idle` events. The harness owns the
+  input, output, DLQ, `LoopStats`, the metrics server and shutdown. The node
+  finishes each batch with `node.done(event, output=table)`, which sends the
+  output, waits for delivery and commits the batch. Asking for the next event
+  without it raises. An exception before it rewinds the batch.
+- `Node` also supports nodes without an output producer (`NodeSettings.output`
+  is optional), which deliver their output themselves and report it with
+  `node.done(event, rows_out=n)`.
+- SIGTERM and SIGINT now stop both nodes after the current batch, which is
+  committed, and close everything. Before, SIGTERM killed the process without
+  running any cleanup, so node-dedup's store lost keys it hadn't flushed.
+- Both nodes' hand-written loops are replaced by `run(node, ...)` functions on
+  `Node`. Loop tests move to `tkati-core` and run against the new in-memory
+  doubles in `tkati_core.testing`.
+- Design doc: `design-docs/2026-09-26-worker-loop-harness.md`.
+
 ## 0.6.0
 
 ### tptxzquv — Explicit per-batch commit and rewind [tkati-core, tkati-node-el, tkati-node-dedup, repo]

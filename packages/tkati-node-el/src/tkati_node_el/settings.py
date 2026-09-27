@@ -1,9 +1,7 @@
-from tkati_core import MetricsSettings
-from tkati_core.settings import InputSettings, OutputSettings, TomlBaseSettings
+from tkati_core.settings import NodeSettings, OutputSettings
 
 
-class AppSettings(TomlBaseSettings):
-    input: InputSettings
+class AppSettings(NodeSettings):
+    # Required here, unlike in NodeSettings: this node always writes to an
+    # output producer.
     output: OutputSettings
-    dlq: OutputSettings | None = None
-    metrics: MetricsSettings = MetricsSettings()
