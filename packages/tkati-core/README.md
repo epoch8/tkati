@@ -55,8 +55,8 @@ broker = "localhost:9092"
 
 `tkati_core.Node` runs a node's loop. It owns the input, the output, the DLQ,
 `LoopStats`, the metrics server, signal handling and shutdown. Node code is a
-`for` loop over the events it yields: a `Batch` for each batch read, and `Idle`
-when a poll comes back empty.
+`for` loop over `node.consume_arrow()` or `node.consume_pylist()`, which
+yield a `Batch` for each batch read and `Idle` when a poll comes back empty.
 
 ```python
 from tkati_core import Batch, Node, NodeSettings
@@ -67,9 +67,9 @@ class AppSettings(NodeSettings):
 
 
 def run(node: Node) -> None:
-    for event in node:
+    for event in node.consume_arrow():
         if isinstance(event, Batch):
-            node.done(event, output=transform(event.data))
+            node.done(event, output_arrow=transform(event.data))
 
 
 def main() -> None:
@@ -77,13 +77,26 @@ def main() -> None:
         run(node)
 ```
 
-**A node finishes each batch with `node.done(event, output=table)`.**
+**A node finishes each batch with `node.done(event, output_arrow=table)`.**
 `done()` sends the output, waits until it's delivered, commits the batch, and
 returns once the commit is made. There is no separate send, so the output is
-always tied to the input batch it came from. `output=None`, or an empty table,
+always tied to the input batch it came from. No output, or an empty one,
 sends nothing. Work that must follow delivery, or must not repeat if the batch
 is re-read (marking keys seen, counting what was dropped), goes on the lines
 after it.
+
+**Arrow or dicts.** The node names both formats explicitly:
+
+- **Input.** `consume_arrow()` reads with `Consumer.read_arrow`: `event.data`
+  is a `pa.Table`, and a message that fails to decode fails its whole batch.
+  `consume_pylist()` reads with `Consumer.read_pylist`: `event.data` is a
+  `list[dict]`, and a message that fails to decode is logged and skipped.
+  The node itself isn't iterable, so the choice is always visible.
+- **Output.** `done(event, output_arrow=table)` sends with
+  `Producer.produce_arrow`, and `done(event, output_pylist=rows)` with
+  `produce_pylist`. It's independent of the input format: a
+  `consume_pylist()` node may send `output_arrow=`. At most one of
+  `output_arrow`, `output_pylist` and `rows_out` may be given.
 
 - **Batch as read.** What's committed is always the batch as read, whatever
   the node filtered out of `event.data`.
@@ -113,14 +126,14 @@ phase the harness times.
 
 **Nodes without an output producer.** `NodeSettings.output` is optional. When
 it's absent, the node has no producer (`producer=None`), and passing
-`output=` to `done()` raises. Such a node writes through its own client, for
+`output_arrow=` or `output_pylist=` to `done()` raises. Such a node writes through its own client, for
 example to a cloud API. It must finish those writes before it calls `done()`,
 which commits the batch, and reports the rows it wrote with
 `node.done(event, rows_out=n)`:
 
 ```python
 def run(node: Node, client: ApiClient) -> None:
-    for event in node:
+    for event in node.consume_arrow():
         if isinstance(event, Batch):
             with node.phase("upload"):
                 client.upload(event.data)  # returns once the API accepted it

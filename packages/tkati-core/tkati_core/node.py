@@ -1,10 +1,10 @@
 """The worker loop harness: a node's input, output, stats and lifecycle behind
-a `for event in node:` loop.
+a `for event in node.consume_arrow():` (or `consume_pylist()`) loop.
 
 The node writes what happens to one batch; the harness does everything around
 it. The one rule to know:
 
-    A node finishes each batch with `node.done(event, output=...)`.
+    A node finishes each batch with `node.done(event, output_arrow=...)`.
 
 `done()` sends the batch's output, waits until it is delivered, commits the
 batch, and returns once the commit is made. Work that must only happen after
@@ -25,11 +25,11 @@ Design doc: design-docs/2026-09-26-worker-loop-harness.md.
 
 import signal
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sized
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from types import FrameType, TracebackType
-from typing import Self
+from typing import Any, Self
 
 import pyarrow as pa
 from loguru import logger
@@ -59,15 +59,16 @@ _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 # tells the current batch from one already finished. Comparing two batches
 # by value would compare their tables.
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
-class Batch:
+class Batch[T: Sized]:
     """A batch read from the input. Finish it with `Node.done`.
 
-    The harness keeps the batch as read, to commit or rewind; the node only
-    sees its data, so filtering or transforming `data` never changes what is
-    committed.
+    `data` is a `pa.Table` from `Node.consume_arrow()`, or a `list[dict]` from
+    `Node.consume_pylist()`. The harness keeps the batch as read, to commit or
+    rewind; the node only sees its data, so filtering or transforming `data`
+    never changes what is committed.
     """
 
-    data: pa.Table
+    data: T
     # Fewer rows than the batch size: the poll drained the input and waited
     # out the batch timeout.
     short: bool
@@ -85,14 +86,14 @@ class Idle:
         return "Idle()"
 
 
-type Event = Batch | Idle
+type Event[T: Sized] = Batch[T] | Idle
 
 
 class _Stop(BaseException):
     """Raised by the signal handler to cut a blocked read short.
 
     A BaseException so that `except Exception` blocks in the consumer let it
-    through to `Node.__next__`, which catches it around the read.
+    through to `Node._read`, which catches it around the read.
     """
 
 
@@ -100,12 +101,13 @@ class Node:
     """Runs a node's loop: read, hand the batch to the node, commit it when
     the node says it is done.
 
-    Use as a context manager, and iterate inside it::
+    Use as a context manager, and consume inside it, choosing the input
+    format with `consume_arrow()` or `consume_pylist()`::
 
         with Node.from_settings(settings) as node:
-            for event in node:
+            for event in node.consume_arrow():
                 if isinstance(event, Batch):
-                    node.done(event, output=transform(event.data))
+                    node.done(event, output_arrow=transform(event.data))
 
     `producer` may be None, for a node that delivers its output itself (e.g.
     through a cloud API client). Such a node must have finished its writes for
@@ -172,8 +174,8 @@ class Node:
         self._entered = False
         # The batch handed out last and not yet done, and the event the node
         # got for it.
-        self._batch: ConsumedBatch[pa.Table] | None = None
-        self._event: Batch | None = None
+        self._batch: ConsumedBatch[Any] | None = None
+        self._event: Batch[Any] | None = None
         self._stop_requested = False
         self._reading = False
         self._signals_received = 0
@@ -258,12 +260,40 @@ class Node:
                     closing.callback(self._producer.close)
                 closing.callback(self._consumer.close)
 
-    def __iter__(self) -> Self:
-        return self
+    def consume_arrow(self) -> Iterator[Batch[pa.Table] | Idle]:
+        """Iterate the input as Arrow tables (`Consumer.read_arrow`). A
+        message that fails to decode fails its whole batch."""
+        return self._consume(self._consumer.read_arrow)
 
-    def __next__(self) -> Event:
+    def consume_pylist(self) -> Iterator[Batch[list[dict]] | Idle]:
+        """Iterate the input as lists of dicts (`Consumer.read_pylist`). A
+        message that fails to decode is logged and skipped, so a batch can be
+        shorter than what was read."""
+        return self._consume(self._consumer.read_pylist)
+
+    def _consume[T: Sized](
+        self, read: Callable[..., ConsumedBatch[T] | None]
+    ) -> Iterator[Batch[T] | Idle]:
+        # Checked here rather than inside the generator, so misuse raises at
+        # the call, not at the first iteration.
         if not self._entered:
-            raise RuntimeError("iterate a Node inside `with node:`")
+            raise RuntimeError("consume from a Node inside `with node:`")
+        return self._events(read)
+
+    def _events[T: Sized](
+        self, read: Callable[..., ConsumedBatch[T] | None]
+    ) -> Iterator[Batch[T] | Idle]:
+        # No try/finally here: a node that breaks out of its loop leaves this
+        # generator suspended, and there is nothing for it to clean up.
+        while (event := self._next_event(read)) is not None:
+            yield event
+
+    def _next_event[T: Sized](
+        self, read: Callable[..., ConsumedBatch[T] | None]
+    ) -> Batch[T] | Idle | None:
+        """One step of the loop: the next event, or None to end it."""
+        if not self._entered:
+            raise RuntimeError("consume from a Node inside `with node:`")
 
         if self._batch is not None:
             # Raised out of the node's `for` loop, so `__exit__` rewinds the
@@ -277,43 +307,48 @@ class Node:
         self._stats.report_if_due()
 
         if self._stop_requested:
-            raise StopIteration
+            return None
 
-        consumed = self._read()
+        consumed = self._read(read)
         # Requested during the read — by a signal, or by `stop()`. Whatever
         # was read is left uncommitted, to be read again after restart.
         if self._stop_requested:
-            raise StopIteration
+            return None
 
         self._stats.iterations += 1
         if consumed is None:
             self._stats.starved_iterations += 1
             if self._stop_when_idle:
                 self._stop_requested = True
-                raise StopIteration
+                return None
             return Idle()
 
-        table = consumed.data
+        data = consumed.data
         # A short batch means the node drained the input and waited out the
         # batch timeout — it wasn't CPU-bound, so its timings say nothing
-        # about whether this node can keep up.
-        short = len(table) < self._batch_size
+        # about whether this node can keep up. For `read_pylist` this counts
+        # parsed rows, not messages read: messages that failed to decode make
+        # a full poll look short.
+        short = len(data) < self._batch_size
         if short:
             self._stats.starved_iterations += 1
-        self._stats.rows_in += len(table)
+        self._stats.rows_in += len(data)
 
+        event = Batch(data, short)
         self._batch = consumed
-        self._event = Batch(table, short)
-        return self._event
+        self._event = event
+        return event
 
-    def _read(self) -> ConsumedBatch[pa.Table] | None:
+    def _read[T: Sized](
+        self, read: Callable[..., ConsumedBatch[T] | None]
+    ) -> ConsumedBatch[T] | None:
         # No phase block here: the consumer splits its own time into `poll`
         # and `parse`. Wrapping it in an umbrella phase as well would
         # double-count that time.
         try:
             try:
                 self._reading = True
-                return self._consumer.read_arrow(
+                return read(
                     timeout=self._batch_timeout_sec,
                     num_messages=self._batch_size,
                     stats=self._stats,
@@ -327,32 +362,43 @@ class Node:
 
     def done(
         self,
-        event: Batch,
+        event: Batch[Any],
         *,
-        output: pa.Table | None = None,
+        output_arrow: pa.Table | None = None,
+        output_pylist: list[dict] | None = None,
         rows_out: int | None = None,
     ) -> None:
-        """Finish `event`'s batch: send `output`, wait until it is delivered,
+        """Finish `event`'s batch: send its output, wait until it is delivered,
         commit the batch as read, and count the rows out. Returns once the
         commit is made, so the lines after it run after the commit.
 
+        Pass at most one of the three keyword arguments. The output format is
+        named explicitly and needn't match the input's: a `consume_pylist()`
+        node may send `output_arrow=`.
+
         Args:
             event: The batch being finished: the one handed out last.
-            output: What the batch produced, sent to the output producer. None
-                or an empty table sends nothing, e.g. when every row was
-                filtered out.
+            output_arrow: What the batch produced, as an Arrow table, sent with
+                `Producer.produce_arrow`.
+            output_pylist: What the batch produced, as a list of dicts, sent
+                with `Producer.produce_pylist`.
             rows_out: For a node without a producer: how many rows it
                 delivered itself for this batch. Counted toward `rows_out`
                 like sent rows, so the perf line's "dropped" stays meaningful.
 
+        None or an empty output sends nothing, e.g. when every row was
+        filtered out.
+
         Raises RuntimeError if `event` isn't the unfinished current batch
-        (e.g. `done()` twice), or if `output` is given without a producer.
+        (e.g. `done()` twice), or if an output is given without a producer.
         If sending, flushing or committing fails, the batch stays unfinished
         and is rewound when the loop exits.
         """
-        if output is not None and rows_out is not None:
+        given = [output_arrow, output_pylist, rows_out]
+        if sum(arg is not None for arg in given) > 1:
             raise ValueError(
-                "pass `output` or `rows_out`, not both: sent rows are counted already"
+                "pass at most one of `output_arrow`, `output_pylist` and "
+                "`rows_out`: sent rows are counted already"
             )
         batch = self._batch
         if batch is None or event is not self._event:
@@ -360,17 +406,22 @@ class Node:
                 "done() was already called for this batch, or it isn't the current one"
             )
 
-        if output is not None:
+        if output_arrow is not None or output_pylist is not None:
             if self._producer is None:
                 raise RuntimeError(
-                    "this node has no output producer to send `output` to; "
+                    "this node has no output producer to send output to; "
                     "report rows delivered by the node itself with `rows_out=`"
                 )
-            rows_out = len(output)
-            if rows_out > 0:
-                # No phase block: the producer splits its own time into
-                # `serialize` and `enqueue`.
-                self._producer.produce_arrow(output, stats=self._stats)
+            # No phase blocks: the producer splits its own time into
+            # `serialize` and `enqueue`.
+            if output_arrow is not None:
+                rows_out = len(output_arrow)
+                if rows_out > 0:
+                    self._producer.produce_arrow(output_arrow, stats=self._stats)
+            elif output_pylist is not None:
+                rows_out = len(output_pylist)
+                if rows_out > 0:
+                    self._producer.produce_pylist(output_pylist, stats=self._stats)
 
         if self._producer is not None:
             # KafkaProducer.produce_arrow() only enqueues: block until

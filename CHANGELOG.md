@@ -17,9 +17,11 @@ config or docs changed.
 ### nxsrlkrt — Worker loop harness [tkati-core, tkati-node-el, tkati-node-dedup, repo]
 
 - `tkati-core` gains `Node`, a harness that runs a node's loop. Node code is
-  `for event in node:` over `Batch` and `Idle` events. The harness owns the
+  `for event in node.consume_arrow():` (or `consume_pylist()`) over `Batch`
+  and `Idle` events. The harness owns the
   input, output, DLQ, `LoopStats`, the metrics server and shutdown. The node
-  finishes each batch with `node.done(event, output=table)`, which sends the
+  finishes each batch with `node.done(event, output_arrow=table)` (or
+  `output_pylist=rows`), which sends the
   output, waits for delivery and commits the batch. Asking for the next event
   without it raises. An exception before it rewinds the batch.
 - `Node` also supports nodes without an output producer (`NodeSettings.output`

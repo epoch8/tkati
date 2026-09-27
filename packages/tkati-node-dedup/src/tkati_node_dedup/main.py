@@ -62,7 +62,7 @@ def _dedupe_batch(
 
 
 def run(node: Node, store: BucketedDedupStore, field_name: str) -> None:
-    for event in node:
+    for event in node.consume_arrow():
         # Runs on every event, a batch or an empty poll, and can never raise.
         # Buckets must be fresh *before* the dedupe check below runs — doing
         # this only after commit would leave a just-expired bucket open and
@@ -98,7 +98,7 @@ def run(node: Node, store: BucketedDedupStore, field_name: str) -> None:
 
         # Sent, delivered, then committed. Everything below runs after the
         # commit.
-        node.done(event, output=filtered)
+        node.done(event, output_arrow=filtered)
 
         # Only after a confirmed delivery: mark these keys seen. Marking a key
         # seen before its row is delivered would risk losing the event on a

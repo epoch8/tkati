@@ -304,7 +304,9 @@ def test_dropped_rows_are_counted(tmp_path) -> None:
     _run_memory(store, node)
     assert _dropped_rows_total() - before == 1
     assert producer is not None
-    assert producer.sent[0].column("uid").to_pylist() == ["a", "b"]
+    sent = producer.sent[0]
+    assert isinstance(sent, pa.Table)
+    assert sent.column("uid").to_pylist() == ["a", "b"]
     assert consumer.commits == [0]
 
     # Same batch again: every row is now a cross-batch duplicate.
