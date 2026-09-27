@@ -1,7 +1,8 @@
 import time
+from collections.abc import Callable
 
 from loguru import logger
-from tkati_core import LoopStats
+from tkati_core import LoopStats, PhaseStats
 
 
 def _stats(**kwargs) -> LoopStats:
@@ -95,6 +96,37 @@ def test_phases_render_in_declared_order_even_when_some_never_fired() -> None:
     assert phase_line.index("read=") < phase_line.index("work=")
     assert phase_line.index("work=") < phase_line.index("write=")
     assert "work=0.00s" in phase_line
+
+
+def _logged(report: Callable[[], None]) -> list[str]:
+    lines: list[str] = []
+    handler_id = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    try:
+        report()
+    finally:
+        logger.remove(handler_id)
+    return lines
+
+
+def test_phase_stats_report_one_line_named_by_its_label() -> None:
+    stats = PhaseStats(phases=("poll", "wait"), label="read")
+    with stats.phase("poll"):
+        pass
+
+    lines = _logged(stats.report)
+
+    assert len(lines) == 1
+    assert lines[0].startswith("perf read: poll=")
+    assert "wait=0.00s" in lines[0]
+    assert stats.phase_sec == {}
+
+
+def test_a_labelled_loop_stats_names_its_phase_line() -> None:
+    lines = _logged(_stats(label="loop").report)
+
+    assert len(lines) == 2
+    assert lines[0].startswith("perf over ")
+    assert lines[1].startswith("perf loop: read=")
 
 
 def test_totals_keep_growing_across_reports_while_the_interval_resets() -> None:

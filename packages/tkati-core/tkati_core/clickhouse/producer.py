@@ -6,7 +6,7 @@ from tenacity import RetryCallState, retry, stop_after_attempt, wait_fixed
 
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.producer import Producer
-from tkati_core.stats import LoopStats
+from tkati_core.stats import PhaseStats
 
 
 def log_retry_attempt(retry_state: RetryCallState) -> None:
@@ -95,7 +95,7 @@ class ClickhouseProducer(Producer):
     def produce_arrow(
         self,
         data: pa.Table,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None:
         # All of it is `deliver`: clickhouse_connect serializes and sends inside
@@ -103,7 +103,7 @@ class ClickhouseProducer(Producer):
         # includes the retry and DLQ fallback, whose own producer is deliberately
         # not handed `stats` — its time is already inside this block, and
         # recording it again would count it twice.
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
 
         with stats.phase("producer/deliver"):
             try:
@@ -129,10 +129,10 @@ class ClickhouseProducer(Producer):
     def produce_pylist(
         self,
         rows: list[dict],
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None:
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
         with stats.phase("producer/serialize"):
             table = pa.Table.from_pylist(rows)
         self.produce_arrow(table, stats=stats)
@@ -143,7 +143,7 @@ class ClickhouseProducer(Producer):
         accepted by the produce methods only to match `Producer`."""
         return True
 
-    def flush(self, stats: LoopStats | None = None) -> None:
+    def flush(self, stats: PhaseStats | None = None) -> None:
         """No-op: ClickHouse inserts are synchronous, nothing to flush. Their
         wait is recorded as `producer/deliver` by produce_arrow instead."""
 

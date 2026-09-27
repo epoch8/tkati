@@ -107,10 +107,16 @@ from `tkati-core`:
 
 ```
 perf over 10s: 157000 rows in, 157000 out (0 dropped), 157 iterations (0 input-starved)
-perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/input=0.21s (2%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=1.12s (11%) commit=0.38s (4%)
+perf loop: wait/input=0.21s (2%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=1.12s (11%) commit=0.38s (4%)
+perf read: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/loop=5.20s (52%)
 ```
 
 This node never drops rows, so `dropped` is always 0.
+
+`perf loop:` is the node's loop, in the order its phases happen for a batch.
+`perf read:` is its read-ahead thread, which reads the next batches while the
+loop works on this one. The two lines run at the same time, so add up
+percentages within a line, never across them.
 
 * `consumer/poll`, `consumer/parse`: fetching message batches from the broker,
   and decoding them into an Arrow table.
@@ -124,17 +130,18 @@ This node never drops rows, so `dropped` is always 0.
   thread. High means the node is input-bound.
 * `wait/in-flight`: time `done()` waited because `[pipeline] max_in_flight`
   batches were still undelivered. High means the node is output-bound.
-
-`consumer/poll` and `consumer/parse` run on the read-ahead thread, at the same
-time as the rest, so the percentages can add up to more than 100.
+* `wait/loop` (read line): time the read-ahead thread waited for the loop to
+  take what it had read. High, with low `wait/input` and `wait/in-flight`,
+  means encoding the output is the bottleneck.
 
 Percentages are of the interval, so they **do not sum to 100**; the remainder
-is time in none of the named phases. `input-starved` counts iterations that
+of a line is time in none of its named phases. `input-starved` counts iterations that
 drained the topic and waited out the batch timeout. A mostly-starved interval
 shows `consumer/poll` near 100% and says nothing about whether the node can
 keep up. `tkati-core`'s README covers the phases in more depth.
 
-The same numbers are served as Prometheus metrics at `:8000/metrics`. To turn
+The `perf over` and `perf loop:` numbers are served as Prometheus metrics at
+`:8000/metrics` (the read line's are log-only). To turn
 that off, set `[metrics] enabled = false` or the env var
 `METRICS__ENABLED=false`; `METRICS__PORT` moves it. See `tkati-core`'s README
 for the metric names and the PromQL that reproduces the log line's

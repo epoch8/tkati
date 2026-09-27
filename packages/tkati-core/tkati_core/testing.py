@@ -22,7 +22,7 @@ from tkati_core._native import BatchOffsets
 from tkati_core.consumer import ConsumedBatch, Consumer
 from tkati_core.node import PipelinedNode, SyncNode
 from tkati_core.producer import Producer
-from tkati_core.stats import LoopStats
+from tkati_core.stats import PhaseStats
 
 type _Rows = pa.Table | list[dict]
 
@@ -61,14 +61,14 @@ class MemoryConsumer(Consumer):
         self.log: list[str] = log if log is not None else []
         self.commits: list[int] = []
         self.rewinds: list[int] = []
-        self.stats_seen: list[LoopStats | None] = []
+        self.stats_seen: list[PhaseStats | None] = []
         self.closed = False
 
     def read_arrow(
         self,
         timeout: int,
         num_messages: int,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
     ) -> ConsumedBatch[pa.Table] | None:
         return self._read(stats, _to_table)
 
@@ -76,12 +76,12 @@ class MemoryConsumer(Consumer):
         self,
         timeout: int,
         num_messages: int,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
     ) -> ConsumedBatch[list[dict]] | None:
         return self._read(stats, _to_pylist)
 
     def _read[T: Sized](
-        self, stats: LoopStats | None, convert: Callable[[_Rows], T]
+        self, stats: PhaseStats | None, convert: Callable[[_Rows], T]
     ) -> ConsumedBatch[T] | None:
         if self.delay:
             time.sleep(self.delay)
@@ -155,13 +155,13 @@ class MemoryProducer(Producer):
         self.name = name
         self.sent: list[_Rows] = []
         self.flushes = 0
-        self.stats_seen: list[LoopStats | None] = []
+        self.stats_seen: list[PhaseStats | None] = []
         self.closed = False
 
     def produce_arrow(
         self,
         data: pa.Table,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None:
         self._record(data, stats, tag)
@@ -169,12 +169,12 @@ class MemoryProducer(Producer):
     def produce_pylist(
         self,
         rows: list[dict],
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None:
         self._record(rows, stats, tag)
 
-    def _record(self, rows: _Rows, stats: LoopStats | None, tag: int | None) -> None:
+    def _record(self, rows: _Rows, stats: PhaseStats | None, tag: int | None) -> None:
         self.stats_seen.append(stats)
         self.sent.append(rows)
         self.tags.append(tag)
@@ -215,7 +215,7 @@ class MemoryProducer(Producer):
             and tag not in self.fail_delivery
         )
 
-    def flush(self, stats: LoopStats | None = None) -> None:
+    def flush(self, stats: PhaseStats | None = None) -> None:
         self.stats_seen.append(stats)
         self.flushes += 1
         self.log.append("flush")

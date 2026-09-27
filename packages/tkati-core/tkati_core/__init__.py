@@ -18,7 +18,7 @@ from tkati_core.node import (
 )
 from tkati_core.producer import PRODUCER_PHASES, Producer, build_producer
 from tkati_core.settings import InputSettings, NodeSettings, OutputSettings
-from tkati_core.stats import LoopStats, LoopStatsTotals
+from tkati_core.stats import LoopStats, LoopStatsTotals, PhaseStats
 
 __all__ = [
     "CONSUMER_PHASES",
@@ -39,6 +39,7 @@ __all__ = [
     "MetricsSettings",
     "NodeSettings",
     "OutputSettings",
+    "PhaseStats",
     "PipelinedNode",
     "Producer",
     "SyncNode",

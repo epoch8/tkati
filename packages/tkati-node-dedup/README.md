@@ -88,10 +88,16 @@ Every 10 seconds the node logs where its wall clock went, using
 
 ```
 perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/input=0.21s (2%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=1.12s (11%) write=0.21s (2%) commit=0.38s (4%)
+perf loop: wait/input=0.21s (2%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=1.12s (11%) commit=0.38s (4%) write=0.21s (2%)
+perf read: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/loop=4.90s (49%)
 ```
 
 `dropped` is the rows this node deduplicated away.
+
+`perf loop:` is the node's loop, in the order its phases happen for a batch.
+`perf read:` is its read-ahead thread, which reads the next batches while the
+loop works on this one. The two lines run at the same time, so add up
+percentages within a line, never across them.
 
 * `consumer/poll`: fetching message batches from the broker. Mostly broker
   round trips, but it also includes librdkafka handing each message to Python,
@@ -112,12 +118,13 @@ perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/input=0.21s (2%) 
   thread. High means the node is input-bound.
 * `wait/in-flight`: time `done()` waited because `[pipeline] max_in_flight`
   batches were still undelivered. High means the node is output-bound.
-
-`consumer/poll` and `consumer/parse` run on the read-ahead thread, at the same
-time as the rest, so the percentages can add up to more than 100.
+* `wait/loop` (read line): time the read-ahead thread waited for the loop to
+  take what it had read. High, with low `wait/input` and `wait/in-flight`,
+  means the loop's own work (lookup, serialize, write) is the bottleneck.
 
 The `consumer/` and `producer/` phases are timed by `tkati-core` rather than by
-this node, which splices them in from `CONSUMER_PHASES` and `PRODUCER_PHASES`.
+this node, which splices the producer's in from `PRODUCER_PHASES`. The
+consumer's are on the read line, which `tkati-core` adds itself.
 They are split apart because their fixes are unrelated:
 
 * A large `consumer/poll` points at batch sizing, broker latency or an
@@ -130,7 +137,7 @@ They are split apart because their fixes are unrelated:
   `linger.ms` settings.
 
 Percentages are of the interval, not of each other, so they **do not sum to
-100** — the remainder is time in none of the named phases.
+100** — the remainder of a line is time in none of its named phases.
 
 `input-starved` counts iterations where the node drained the topic and waited
 out the batch timeout. Those iterations were not CPU-bound, and because

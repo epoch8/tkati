@@ -8,7 +8,7 @@ import pyarrow as pa
 
 from tkati_core._native import BatchOffsets
 from tkati_core.settings import InputSettings
-from tkati_core.stats import LoopStats
+from tkati_core.stats import PhaseStats
 
 # The phases a consumer decomposes its read into, in report order. Exported so
 # nodes can splice them into their own phase tuple instead of restating the
@@ -48,7 +48,7 @@ class Consumer(ABC):
         self,
         timeout: int,
         num_messages: int,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
     ) -> ConsumedBatch[pa.Table] | None:
         """Read a batch into an Arrow table, or None if nothing was available.
 
@@ -63,7 +63,7 @@ class Consumer(ABC):
         self,
         timeout: int,
         num_messages: int,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
     ) -> ConsumedBatch[list[dict]] | None:
         """Read a batch as a list of dicts, or None if nothing was available.
 

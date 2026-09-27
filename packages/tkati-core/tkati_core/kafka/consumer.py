@@ -12,7 +12,7 @@ from pyarrow import json as pa_json
 from tkati_core._native import NativeConsumer, RawBatch
 from tkati_core.consumer import ConsumedBatch
 from tkati_core.consumer import Consumer as ConsumerBase
-from tkati_core.stats import LoopStats
+from tkati_core.stats import PhaseStats
 from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ class KafkaConsumer(ConsumerBase):
         self,
         timeout: int,
         num_messages: int,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
     ) -> ConsumedBatch[pa.Table] | None:
         """
         Read messages from subscribed topics into a PyArrow table.
@@ -164,7 +164,7 @@ class KafkaConsumer(ConsumerBase):
         Args:
             timeout: Maximum time in seconds to consume messages.
             num_messages: Maximum number of events to consume.
-            stats: Optional LoopStats to attribute this read's wall clock to,
+            stats: Optional PhaseStats to attribute this read's wall clock to,
                 split into `consumer/poll` (waiting on the broker) and
                 `consumer/parse` (turning the raw payloads into an Arrow table). These have different
                 fixes — batch sizing and broker latency on one side, JSON
@@ -185,7 +185,7 @@ class KafkaConsumer(ConsumerBase):
         # Discarded when the caller isn't measuring, so the body below never has
         # to branch on `stats is None`. Allocating one per call costs ~1us
         # against a read that takes milliseconds at minimum.
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
 
         # Also covers assembling the payloads into one buffer, which happens
         # as they arrive, natively and outside the GIL.
@@ -225,7 +225,7 @@ class KafkaConsumer(ConsumerBase):
         self,
         timeout: int,
         num_messages: int,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
     ) -> ConsumedBatch[list[dict]] | None:
         """
         Read messages from subscribed topics into a list of dicts.
@@ -236,7 +236,7 @@ class KafkaConsumer(ConsumerBase):
         Args:
             timeout: Maximum time in seconds to consume messages.
             num_messages: Maximum number of events to consume.
-            stats: Optional LoopStats, split into `consumer/poll` and
+            stats: Optional PhaseStats, split into `consumer/poll` and
                 `consumer/parse` exactly as in read_arrow.
 
         Returns:
@@ -248,7 +248,7 @@ class KafkaConsumer(ConsumerBase):
             - Does NOT commit offsets. Pass the batch to commit() once processed,
               or to rewind() if processing failed.
         """
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
 
         with stats.phase("consumer/poll"):
             batch = self._consume_batch(timeout, num_messages)

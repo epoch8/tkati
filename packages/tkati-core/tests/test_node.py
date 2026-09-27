@@ -7,6 +7,7 @@ import time
 
 import pyarrow as pa
 import pytest
+from loguru import logger
 from pydantic import ValidationError
 from tkati_core import (
     CONSUMER_PHASES,
@@ -365,12 +366,14 @@ def test_node_itself_is_not_iterable() -> None:
 
 def test_consumer_and_producer_are_handed_the_node_stats() -> None:
     """The harness times no read or produce phase of its own; it relies on the
-    consumer and producer to fill in theirs."""
+    consumer and producer to fill in theirs. Reading is timed apart from the
+    loop."""
     node, consumer, producer = memory_node([_table(1)])
     with node:
         _send_all(node)
 
-    assert consumer.stats_seen and all(s is node.stats for s in consumer.stats_seen)
+    seen = consumer.stats_seen
+    assert seen and all(s is node.read_stats for s in seen)
     stats_seen = _producer(producer).stats_seen
     assert stats_seen and all(s is node.stats for s in stats_seen)
 
@@ -389,7 +392,7 @@ def test_rows_and_starved_iterations_are_counted() -> None:
 
 
 def test_node_phases_are_timed() -> None:
-    phases = (*CONSUMER_PHASES, "wait/input", "work", *PRODUCER_PHASES, "commit")
+    phases = ("wait/input", "work", *PRODUCER_PHASES, "commit")
     node, _, _ = memory_node([_table(1)], phases=phases)
     with node:
         for event in node.consume_arrow():
@@ -405,7 +408,12 @@ def test_node_phases_are_timed() -> None:
 
 def test_phases_missing_a_harness_phase_raise() -> None:
     with pytest.raises(ValueError, match="producer/deliver"):
-        memory_node([], phases=(*CONSUMER_PHASES, "commit"))
+        memory_node([], phases=("wait/input", "commit"))
+
+
+def test_phases_with_the_consumer_phases_raise() -> None:
+    with pytest.raises(ValueError, match="consumer/poll"):
+        memory_node([], phases=(*CONSUMER_PHASES, *DEFAULT_PHASES))
 
 
 def test_default_phases() -> None:
@@ -413,6 +421,42 @@ def test_default_phases() -> None:
     assert node.stats.phases == DEFAULT_PHASES
     node, _, _ = memory_node([], output=False)
     assert node.stats.phases == SINK_PHASES
+
+
+def test_loop_and_read_stats_are_reported_together() -> None:
+    """Each report of the loop's stats comes with one of reading's. Without
+    read-ahead the loop waits on the read itself, as `wait/input`."""
+    node, _, _ = memory_node([_table(1), _table(1)])
+    node.stats.report_interval_sec = 0
+    lines: list[str] = []
+    handler_id = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    try:
+        with node:
+            _send_all(node)
+    finally:
+        logger.remove(handler_id)
+
+    loop = [line for line in lines if line.startswith("perf loop:")]
+    read = [line for line in lines if line.startswith("perf read:")]
+    assert loop and len(read) == len(loop)
+    assert "wait/input=" in loop[0] and "consumer/poll" not in loop[0]
+    assert "consumer/poll=" in read[0] and "wait/loop" not in read[0]
+    assert node.stats.totals().phase_sec["wait/input"] > 0
+
+
+def test_a_reader_held_up_by_the_loop_is_recorded_as_wait_loop() -> None:
+    node, _, _ = memory_node([_table(1), _table(1), _table(1)], read_ahead=1)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            time.sleep(0.05)
+            node.done(event, output_arrow=event.data)
+
+    # With one batch queued and one in the loop's hands, the reader waits for
+    # room to hand the third over.
+    assert "wait/loop" in node.read_stats.phases
+    assert node.read_stats.phase_sec["wait/loop"] >= 0.03
+    assert "wait/loop" not in node.stats.phase_sec
 
 
 # --- closing ----------------------------------------------------------------
@@ -461,7 +505,7 @@ def test_without_a_producer_output_raises_and_the_batch_is_rewound() -> None:
 
 
 def test_without_a_producer_phases_need_not_include_the_producer_phases() -> None:
-    phases = (*CONSUMER_PHASES, "wait/input", "upload", "commit")
+    phases = ("wait/input", "upload", "commit")
     node, _, _ = memory_node([], output=False, phases=phases)
     assert node.stats.phases == phases
 

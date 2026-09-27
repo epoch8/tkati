@@ -35,25 +35,26 @@ from functools import partial
 import pyarrow as pa
 from loguru import logger
 from prometheus_client import Counter
-from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, Batch, PipelinedNode
+from tkati_core import PRODUCER_PHASES, Batch, PipelinedNode
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
 
-# Reported in this order, not sorted by duration: a stable field order is what
-# makes two consecutive log lines comparable at a glance. The unprefixed names
-# live here rather than in tkati-core because they are this node's pipeline —
-# tkati-node-el, for instance, has no lookup or write phase. The consumer's and
-# producer's phases are spliced in from tkati-core, which owns the names it
-# times itself against.
+# The perf report's loop line, in the order the phases happen, not sorted by
+# duration: a stable field order is what makes two consecutive log lines
+# comparable at a glance. The unprefixed names live here rather than in
+# tkati-core because they are this node's pipeline — tkati-node-el, for
+# instance, has no lookup or write phase. The producer's phases are spliced in
+# from tkati-core, which owns the names it times itself against. `write` comes
+# last: it runs in `after_commit`, after the commit. The consumer's phases go
+# on the report's read line, which tkati-core adds itself.
 _PHASES = (
-    *CONSUMER_PHASES,
     "wait/input",
     "lookup",
     *PRODUCER_PHASES,
     "wait/in-flight",
-    "write",
     "commit",
+    "write",
 )
 
 
