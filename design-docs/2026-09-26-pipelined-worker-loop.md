@@ -638,6 +638,15 @@ code differs from the steps above, or goes beyond them:
   a `PipelinedNode` where a `SyncNode` is expected, under
   `# ty: ignore[invalid-argument-type]`. If the two classes ever become
   compatible, ty reports the ignore as unused.
+- **Rows in are counted at commit (fixed in 0.8.1).** 0.8.0 still counted
+  `rows_in` at read, in `_next_event`, and `rows_out` at commit. Under
+  `PipelinedNode` a report could fall between a batch's read and its commit,
+  splitting the batch across two intervals. The dedup node's perf line then
+  showed negative drops (`90000 rows in, 100000 out (-10000 dropped)`).
+  `_NodeBase._commit` now counts both, so they always land in the same
+  interval and scrape. As a side effect, a rewound batch no longer counts
+  toward `rows_in` twice. `iterations` and `starved_iterations` are still
+  counted at read.
 - **Still untracked:** `ClickhouseProducer`'s DLQ fallback produces to the DLQ
   without a tag. A DLQ message that fails delivery is waited for by `flush()`,
   but not reported.

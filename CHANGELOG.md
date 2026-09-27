@@ -12,6 +12,37 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.1
+
+### nvuwnkqr — Perf report: loop and read lines [tkati-core, tkati-node-dedup, tkati-node-el, repo]
+
+- `PhaseStats` split out of `LoopStats`: one thread's phases, `record`,
+  `phase`, `reset` and a one-line `report` labelled by `label=`. `LoopStats`
+  subclasses it with the counters, the `perf over` header and `totals()`.
+  Consumer and producer signatures take `PhaseStats`.
+- The node harness keeps `node.stats` (`LoopStats(label="loop")`) and
+  `node.read_stats` (`PhaseStats(label="read")`: `CONSUMER_PHASES`, plus the
+  new `wait/loop`, timed in `_hand_over`, with read-ahead), and reports the
+  second whenever the first reports. Only the loop's stats are exported to
+  Prometheus. Without read-ahead the synchronous read is timed as
+  `wait/input`. The phase constants lose `CONSUMER_PHASES` and are in
+  chronological order, and `phases=` containing them raises.
+- node-dedup's `_PHASES` drops `CONSUMER_PHASES` and puts `write` after
+  `commit`, where it runs.
+- READMEs of tkati-core, node-dedup and node-el describe the two lines.
+- Design doc `design-docs/2026-09-27-perf-report-lines.md`.
+
+### ltuworuq — Count rows in at commit [tkati-core, repo]
+
+- `rows_in` moved from `_NodeBase._next_event` (read) to `_NodeBase._commit`,
+  next to `rows_out`. Under `PipelinedNode` a stats report could land between
+  a batch's read and its commit, so an interval counted a batch's input and
+  another its output, and node-dedup's perf line showed negative drops.
+  Rewound batches no longer count toward `rows_in`.
+- Tests: rows in/out counted together at commit under `PipelinedNode`, and
+  not at all for a rewound batch.
+- Design doc note in `design-docs/2026-09-26-pipelined-worker-loop.md`.
+
 ## 0.8.0
 
 ### onvqqtpt — PipelinedNode [tkati-core, tkati-node-el, tkati-node-dedup, repo]

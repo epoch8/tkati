@@ -1,3 +1,25 @@
+# 0.8.1
+
+* Fix: `LoopStats.rows_in` is now counted when a batch is committed, like
+  `rows_out`, not when it is read. Under `PipelinedNode` a report could fall
+  between the two, so the perf line's "dropped" could go negative
+  (`90000 rows in, 100000 out (-10000 dropped)`). `tkati_rows_in_total` now
+  counts only committed batches, so a rewound batch is no longer counted twice
+* The node perf report splits its phases by thread: `perf loop:` for the loop
+  thread and `perf read:` for reading. Before, with read-ahead, the two
+  threads' shares overlapped on one line. New `wait/loop` phase on the read
+  line: the read-ahead thread waiting for the loop to take a batch. Without
+  read-ahead, `wait/input` now times the loop's own read. `DEFAULT_PHASES`,
+  `SINK_PHASES` and `PIPELINED_PHASES` no longer contain `CONSUMER_PHASES`.
+* **Breaking:** a node's `phases=` must not list `CONSUMER_PHASES`. Reading
+  is timed in a stats object of its own, `node.read_stats`, which is logged
+  with the loop's stats but not exported as metrics, so the consumer phases
+  leave `/metrics`
+* New `PhaseStats`: one thread's phase timings, logged as a single
+  `perf <label>:` line. `LoopStats` is now a `PhaseStats` with the loop's
+  counts, and takes `label=`; consumers and producers take a `PhaseStats`.
+  `LoopStats.report_if_due()` returns whether it reported
+
 # 0.8.0
 
 * New `PipelinedNode`: `done()` returns before delivery and takes

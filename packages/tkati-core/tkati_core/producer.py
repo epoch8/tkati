@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 import pyarrow as pa
 
 from tkati_core.settings import OutputSettings
-from tkati_core.stats import LoopStats
+from tkati_core.stats import PhaseStats
 
 # The phases a producer decomposes its work into, in report order. Exported for
 # the same reason as CONSUMER_PHASES: nodes splice them into their own phase
@@ -31,7 +31,7 @@ class Producer(ABC):
     def produce_arrow(
         self,
         data: pa.Table,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None: ...
 
@@ -39,7 +39,7 @@ class Producer(ABC):
     def produce_pylist(
         self,
         rows: list[dict],
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None: ...
 
@@ -57,7 +57,7 @@ class Producer(ABC):
         """
 
     @abstractmethod
-    def flush(self, stats: LoopStats | None = None) -> None: ...
+    def flush(self, stats: PhaseStats | None = None) -> None: ...
 
     @abstractmethod
     def close(self) -> None: ...

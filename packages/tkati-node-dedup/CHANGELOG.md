@@ -1,3 +1,12 @@
+# 0.8.1
+
+* Fix: the perf line's rows in and out are counted for the same batches, so
+  "dropped" is no longer skewed (or negative) by batches still in flight at
+  report time
+* The perf log splits into `perf loop:` (the loop, in the order its phases
+  run) and `perf read:` (the read-ahead thread, with a new `wait/loop`), so
+  neither line's percentages exceed 100
+
 # 0.8.0
 
 * Runs on `tkati-core`'s `PipelinedNode`: it reads the next batch while

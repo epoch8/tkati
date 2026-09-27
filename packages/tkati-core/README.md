@@ -117,11 +117,34 @@ the poll short. A second signal forces an exit with `KeyboardInterrupt`. On
 exit the node closes the consumer, the output and the DLQ, in that order. The
 node's own resources belong in the same `with` statement.
 
-**Stats.** The node passes its `LoopStats` to the consumer and producer, and
-counts iterations, starved iterations and rows in and out itself. A node
+**Stats.** The node keeps two sets of stats: `node.stats`, a `LoopStats` for
+the loop thread, and `node.read_stats`, a `PhaseStats` for reading. It passes
+the first to the producer and the second to the consumer, and counts
+iterations, starved iterations and rows in and out itself. Rows in
+and out are both counted when a batch is committed, so a pipelined node's
+report never splits a batch across intervals. A node
 times its own work with `node.phase("name")` and passes the full report order
 as `phases=` (the default is `DEFAULT_PHASES`). That tuple must include every
-phase the harness times, `wait/input` among them.
+phase the harness times on the loop thread, `wait/input` among them, and must
+not include `CONSUMER_PHASES`, which are timed in `read_stats`.
+
+The node's report has two phase lines, one per set of stats, for the same
+interval. `perf loop:` is the loop thread:
+waiting for the next batch (`wait/input`), the node's own phases, sending
+(`producer/*`), waiting for a free in-flight slot (`wait/in-flight`, in a
+`PipelinedNode`) and committing. `perf read:` is reading: `consumer/poll`,
+`consumer/parse` and, with read-ahead, `wait/loop`, the reader waiting for the
+loop to take what it read. Only the loop's stats are exported as metrics.
+
+```
+perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
+perf loop: wait/input=0.21s (2%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=5.12s (51%) commit=0.38s (4%) write=0.21s (2%)
+perf read: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/loop=5.02s (50%)
+```
+
+The three waits say where the bottleneck is. High `wait/input`: the input,
+or reading and parsing it. High `wait/in-flight`: delivery. High `wait/loop`
+with low loop waits: the loop's own work.
 
 **Read-ahead.** `from_settings` reads the next batch in the background while
 the loop body processes the current one, on a thread of the node's own. It is
@@ -136,9 +159,9 @@ Nothing changes for node code: `done()` still commits before it returns, and
 it commits the batch's own offsets, never a batch still waiting in the queue.
 A stop drops the batches read ahead without committing them, so they are read
 again after a restart. Time the loop spends waiting for the reader is
-`wait/input`. The reader records `consumer/poll` and `consumer/parse` while
-the loop works, so with read-ahead those phases overlap the others, and the
-percentages can add up to more than 100. Constructing a `SyncNode` directly
+`wait/input`. Time the reader spends waiting for room in the queue is
+`wait/loop`, on the read line. Without read-ahead the loop reads itself, and
+`wait/input` is the whole read. Constructing a `SyncNode` directly
 defaults to `read_ahead=0`.
 
 **`PipelinedNode`.** A sibling of `SyncNode` for nodes that shouldn't wait for
@@ -194,8 +217,7 @@ def run(node: SyncNode, client: ApiClient) -> None:
             node.done(event, rows_out=len(event.data))
 
 
-# phases=(*CONSUMER_PHASES, "wait/input", "upload", "commit"); SINK_PHASES is
-# the default.
+# phases=("wait/input", "upload", "commit"); SINK_PHASES is the default.
 ```
 
 **Testing.** `tkati_core.testing.memory_node(batches)` returns a `SyncNode` over
@@ -268,7 +290,6 @@ while True:
     if batch is None:
         stats.starved_iterations += 1
         continue
-    stats.rows_in += len(batch.data)
 
     try:
         producer.produce_arrow(batch.data, stats=stats)
@@ -276,10 +297,12 @@ while True:
     except Exception:
         consumer.rewind(batch)
         raise
-    stats.rows_out += len(batch.data)
 
     with stats.phase("commit"):
         consumer.commit(batch)
+    # Both counted once committed, so in - out is the batch's drops.
+    stats.rows_in += len(batch.data)
+    stats.rows_out += len(batch.data)
 
     stats.report_if_due()
 ```
@@ -327,9 +350,10 @@ makes two consecutive lines comparable.
 
 Percentages are of the interval rather than of each other, so they do **not**
 sum to 100 — the shortfall is time in none of the named phases, which keeps
-unaccounted work visible. (With a node's read-ahead, the consumer phases run
-on another thread and overlap the rest, so the sum can exceed 100; see
-`wait/input` for the time the loop actually waited.) Track `starved_iterations` for iterations that were
+unaccounted work visible. Time spent on another thread belongs in a
+`PhaseStats` of its own, which `report()` logs as one `perf <label>:` line
+(`label=`), as the node harness does for reading. Each line is a share of the
+same interval for a different thread, so lines are not to be added up. Track `starved_iterations` for iterations that were
 blocked waiting on input: `consumer/poll` blocks until the batch fills or the timeout
 expires, so on an under-fed node it approaches 100% and nothing else on the
 line means anything.
@@ -350,14 +374,15 @@ start_metrics_server(MetricsSettings(), stats)  # :8000/metrics, daemon thread
 |---|---|---|
 | `tkati_phase_seconds_total` | `phase` | wall clock spent in each phase |
 | `tkati_wall_seconds_total` | — | wall clock since the `LoopStats` was created, the 100% denominator |
-| `tkati_rows_in_total` / `tkati_rows_out_total` | — | rows read / written |
+| `tkati_rows_in_total` / `tkati_rows_out_total` | — | rows read / written, counted when their batch is committed |
 | `tkati_iterations_total` | — | loop iterations |
 | `tkati_starved_iterations_total` | — | iterations that waited on input |
 
 There is no node label: each node serves its own `/metrics`, so the scrape
 target's `job`/`instance` already says which node a series came from. `phase`
 is the phase name exactly as it appears in the log line. Every declared phase
-is exported from the first scrape, at 0 if it hasn't run yet.
+is exported from the first scrape, at 0 if it hasn't run yet. A node exports
+its loop's stats only: `perf read:`'s phases are in the log alone.
 
 The log line's "% of the interval", and its unaccounted remainder, in PromQL:
 

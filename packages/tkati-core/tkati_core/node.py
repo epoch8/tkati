@@ -46,22 +46,18 @@ from tkati_core.consumer import (
 from tkati_core.metrics import MetricsSettings, start_metrics_server
 from tkati_core.producer import PRODUCER_PHASES, Producer, build_producer
 from tkati_core.settings import NodeSettings
-from tkati_core.stats import LoopStats
+from tkati_core.stats import LoopStats, PhaseStats
 
-# The phases the harness times itself (through the consumer and producer it
-# passes its stats to), in report order. A node that adds its own passes the
-# whole tuple, so it decides where its columns go.
-DEFAULT_PHASES = (*CONSUMER_PHASES, "wait/input", *PRODUCER_PHASES, "commit")
+# The phases the harness times on the loop thread (itself, and through the
+# producer it passes its stats to), in report order: the order they happen in.
+# A node that adds its own passes the whole tuple, so it decides where its
+# columns go. The consumer's phases aren't here: reading is timed apart, in
+# the node's `read_stats`, and reported on a line of its own.
+DEFAULT_PHASES = ("wait/input", *PRODUCER_PHASES, "commit")
 # The default for a node without an output producer.
-SINK_PHASES = (*CONSUMER_PHASES, "wait/input", "commit")
+SINK_PHASES = ("wait/input", "commit")
 # PipelinedNode's default: it also times `done()` waiting for a free slot.
-PIPELINED_PHASES = (
-    *CONSUMER_PHASES,
-    "wait/input",
-    *PRODUCER_PHASES,
-    "wait/in-flight",
-    "commit",
-)
+PIPELINED_PHASES = ("wait/input", *PRODUCER_PHASES, "wait/in-flight", "commit")
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -159,10 +155,13 @@ class _NodeBase:
                 itself. Closed by the node.
             batch_size: Messages to read per batch at most.
             batch_timeout_sec: How long a read waits for a full batch.
-            phases: The perf report's columns, in order. Must include every
-                phase the harness times: `CONSUMER_PHASES`, `commit`, and
+            phases: The perf report's loop line, in order: what the loop
+                thread spends its time on. Must include every phase the
+                harness times there: `wait/input`, `commit`, and
                 `PRODUCER_PHASES` when there is a producer. Defaults to
-                `DEFAULT_PHASES`, or `SINK_PHASES` without a producer.
+                `DEFAULT_PHASES`, or `SINK_PHASES` without a producer. Must
+                not include `CONSUMER_PHASES`: reading is timed apart, in
+                `read_stats`.
             dlq: The producer `producer` routes rejected rows to, if any. Only
                 closed here, after `producer`.
             metrics: Where to serve `/metrics`, started on entering the node.
@@ -183,7 +182,6 @@ class _NodeBase:
                 "read_ahead must be 0 (off) or a positive number of batches"
             )
         required = (
-            *CONSUMER_PHASES,
             "wait/input",
             *(PRODUCER_PHASES if producer is not None else ()),
             *self._EXTRA_PHASES,
@@ -192,6 +190,12 @@ class _NodeBase:
         if phases is None:
             phases = self._default_phases(producer is not None)
         missing = [name for name in required if name not in phases]
+        misplaced = [name for name in CONSUMER_PHASES if name in phases]
+        if misplaced:
+            raise ValueError(
+                f"phases includes {misplaced}, which are timed in `read_stats` "
+                "and reported on the read line; leave them out"
+            )
         if missing:
             # A column the harness fills in but the report doesn't show would
             # hide real time, so refuse rather than silently drop it.
@@ -215,7 +219,16 @@ class _NodeBase:
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(read_ahead, 1))
         # Set by `_end_of_input()` during a read that found the input used up.
         self._input_ended = False
-        self._stats = LoopStats(phases=phases)
+        self._stats = LoopStats(phases=phases, label="loop")
+        # Reading, timed apart from the loop: with read-ahead it runs on a
+        # thread of its own, and even without, its poll and parse are what
+        # the loop's `wait/input` is made of. With read-ahead it also times
+        # the reader waiting for the loop to take what it read. Reported with
+        # the loop's stats, but not exported as metrics.
+        self._read_stats = PhaseStats(
+            phases=(*CONSUMER_PHASES, "wait/loop") if read_ahead else CONSUMER_PHASES,
+            label="read",
+        )
 
         self._entered = False
         # The batch handed out last and not yet done, and the event the node
@@ -266,7 +279,14 @@ class _NodeBase:
 
     @property
     def stats(self) -> LoopStats:
+        """The loop thread's stats, and the loop's counts."""
         return self._stats
+
+    @property
+    def read_stats(self) -> PhaseStats:
+        """Reading's stats: `CONSUMER_PHASES`, and `wait/loop` with
+        read-ahead."""
+        return self._read_stats
 
     def __enter__(self) -> Self:
         if self._metrics is not None:
@@ -385,7 +405,7 @@ class _NodeBase:
                 item = read(
                     timeout=self._batch_timeout_sec,
                     num_messages=self._batch_size,
-                    stats=self._stats,
+                    stats=self._read_stats,
                 )
             except BaseException as error:
                 if not self._reader_stop.is_set():
@@ -399,14 +419,20 @@ class _NodeBase:
                 return
 
     def _hand_over(self, item: Any) -> bool:
-        """Put `item` on the queue, waiting for room; False if stopped first."""
-        while not self._reader_stop.is_set():
-            try:
-                self._queue.put(item, timeout=_WAIT_STEP_SEC)
-            except queue.Full:
-                continue
-            return True
-        return False
+        """Put `item` on the queue, waiting for room; False if stopped first.
+        Time spent waiting is the reader held up by the loop, recorded as
+        `wait/loop`."""
+        started = time.perf_counter()
+        try:
+            while not self._reader_stop.is_set():
+                try:
+                    self._queue.put(item, timeout=_WAIT_STEP_SEC)
+                except queue.Full:
+                    continue
+                return True
+            return False
+        finally:
+            self._read_stats.record("wait/loop", time.perf_counter() - started)
 
     def _take(self) -> ConsumedBatch[Any] | None:
         """The next read from the read-ahead thread: a batch, or None for an
@@ -468,12 +494,18 @@ class _NodeBase:
             )
 
         self._before_read()
-        self._stats.report_if_due()
+        if self._stats.report_if_due():
+            self._read_stats.report()
 
         if self._stop_requested:
             return None
 
-        consumed = self._take() if self._reader is not None else self._read(read)
+        if self._reader is not None:
+            consumed = self._take()
+        else:
+            # Without read-ahead the loop waits on the read itself.
+            with self._stats.phase("wait/input"):
+                consumed = self._read(read)
         if self._input_ended and self._reader is None:
             self._stop_requested = True
         # Requested during the read — by a signal, or by `stop()`. Whatever
@@ -498,7 +530,6 @@ class _NodeBase:
         short = len(data) < self._batch_size
         if short:
             self._stats.starved_iterations += 1
-        self._stats.rows_in += len(data)
 
         event = Batch(data, short)
         self._batch = consumed
@@ -508,16 +539,15 @@ class _NodeBase:
     def _read[T: Sized](
         self, read: Callable[..., ConsumedBatch[T] | None]
     ) -> ConsumedBatch[T] | None:
-        # No phase block here: the consumer splits its own time into `poll`
-        # and `parse`. Wrapping it in an umbrella phase as well would
-        # double-count that time.
+        # Timed by the caller as the loop's `wait/input`. The consumer splits
+        # the same time into `poll` and `parse` in `read_stats`.
         try:
             try:
                 self._reading = True
                 return read(
                     timeout=self._batch_timeout_sec,
                     num_messages=self._batch_size,
-                    stats=self._stats,
+                    stats=self._read_stats,
                 )
             finally:
                 self._reading = False
@@ -575,7 +605,13 @@ class _NodeBase:
     def _commit(self, batch: ConsumedBatch[Any], rows_out: int) -> None:
         with self._stats.phase("commit"):
             self._consumer.commit(batch)
-        # Counted only once committed, so a failed batch isn't counted.
+        # Counted only once committed, so a failed batch isn't counted (nor
+        # counted twice once re-read). Rows in are counted here too, not at
+        # read: a `PipelinedNode` commits batches later than it reads them,
+        # and a report between the two would otherwise put a batch's rows in
+        # and rows out in different intervals, making "dropped" meaningless.
+        # For `read_pylist` this counts parsed rows, not messages read.
+        self._stats.rows_in += len(batch.data)
         self._stats.rows_out += rows_out
 
     def _oldest_uncommitted(self) -> ConsumedBatch[Any] | None:
@@ -737,7 +773,8 @@ class PipelinedNode(_NodeBase):
     every earlier batch's output is delivered, in read order. So the lines
     after `done()` run *before* the commit. Work that must follow the commit
     (marking keys seen, counting what a batch dropped) goes in
-    `done(..., after_commit=fn)` instead.
+    `done(..., after_commit=fn)` instead. The stats' rows in and out are
+    counted at the commit too, so both lag the read by the batches in flight.
 
     Use as a context manager, and consume inside it::
 
@@ -777,7 +814,7 @@ class PipelinedNode(_NodeBase):
     def _default_phases(self, has_producer: bool) -> tuple[str, ...]:
         if has_producer:
             return PIPELINED_PHASES
-        return (*CONSUMER_PHASES, "wait/input", "wait/in-flight", "commit")
+        return ("wait/input", "wait/in-flight", "commit")
 
     @classmethod
     def _settings_kwargs(cls, settings: NodeSettings) -> dict[str, Any]:

@@ -8,7 +8,7 @@ from loguru import logger
 
 from tkati_core._native import EncodedBatch, NativeProducer, encode_arrow
 from tkati_core.producer import Producer as ProducerBase
-from tkati_core.stats import LoopStats
+from tkati_core.stats import PhaseStats
 from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
@@ -109,7 +109,7 @@ class KafkaProducer(ProducerBase):
     def produce_arrow(
         self,
         data: pa.Table | pa.RecordBatch,
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None:
         """
@@ -126,7 +126,7 @@ class KafkaProducer(ProducerBase):
         and handing the messages to librdkafka as ``producer/enqueue``. Neither
         waits on the broker — that is ``flush``'s ``producer/deliver``.
         """
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
 
         if self.format == "json":
             with stats.phase("producer/serialize"):
@@ -155,7 +155,7 @@ class KafkaProducer(ProducerBase):
     def produce_pylist(
         self,
         rows: list[dict],
-        stats: LoopStats | None = None,
+        stats: PhaseStats | None = None,
         tag: int | None = None,
     ) -> None:
         """
@@ -165,7 +165,7 @@ class KafkaProducer(ProducerBase):
         If ``key_column`` is set, its value is used as the Kafka message key.
         ``stats`` is split as in ``produce_arrow``.
         """
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
 
         with stats.phase("producer/serialize"):
             messages = EncodedBatch.from_payloads(self._serialize_rows(rows))
@@ -205,7 +205,7 @@ class KafkaProducer(ProducerBase):
         reports for the messages enqueued with `tag`."""
         return self.producer.wait_delivered(tag, timeout)
 
-    def flush(self, stats: LoopStats | None = None) -> None:
+    def flush(self, stats: PhaseStats | None = None) -> None:
         """
         Block until all queued messages have been delivered.
 
@@ -213,7 +213,7 @@ class KafkaProducer(ProducerBase):
         background as soon as messages are enqueued, so this is the *residual*
         wait for broker acks, not the batch's total time on the network.
         """
-        stats = stats if stats is not None else LoopStats(phases=())
+        stats = stats if stats is not None else PhaseStats(phases=())
 
         with stats.phase("producer/deliver"):
             self.producer.flush()

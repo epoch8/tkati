@@ -61,8 +61,16 @@ class LoopStatsCollector:
                 ),
                 totals.wall_sec,
             ),
-            ("tkati_rows_in", "Rows read from the input.", totals.rows_in),
-            ("tkati_rows_out", "Rows written to the output.", totals.rows_out),
+            (
+                "tkati_rows_in",
+                "Rows read from the input, counted once their batch is committed.",
+                totals.rows_in,
+            ),
+            (
+                "tkati_rows_out",
+                "Rows written to the output, counted once their batch is committed.",
+                totals.rows_out,
+            ),
             ("tkati_iterations", "Node loop iterations.", totals.iterations),
             (
                 "tkati_starved_iterations",
