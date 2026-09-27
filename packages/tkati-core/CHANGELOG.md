@@ -1,10 +1,12 @@
 # 0.7.0
 
 * New `Node` (`tkati_core.node`): the worker loop harness.
-  * Used as `with Node.from_settings(settings) as node: for event in node:`.
-    It yields a `Batch` (`.data`, `.short`) for each batch read and `Idle` for
-    an empty poll.
-  * The node finishes each batch with `node.done(event, output=table)`. It
+  * Used as `with Node.from_settings(settings) as node:` then
+    `for event in node.consume_arrow():` (or `consume_pylist()`, for rows as
+    dicts with undecodable messages skipped). It yields a `Batch` (`.data`,
+    `.short`) for each batch read and `Idle` for an empty poll.
+  * The node finishes each batch with `node.done(event, output_arrow=table)`
+    (or `output_pylist=rows`). It
     sends the output, waits for delivery and commits the batch, and returns
     once the commit is made. Asking for the next event without it raises and
     rewinds the batch. An exception before `done()` rewinds the batch too.

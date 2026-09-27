@@ -7,9 +7,10 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer, TopicPartition
 from confluent_kafka.admin import AdminClient, NewTopic
-from tkati_core import CONSUMER_PHASES, Consumer, LoopStats, build_consumer
+from tkati_core import CONSUMER_PHASES, Batch, Consumer, LoopStats, Node, build_consumer
 from tkati_core.kafka.consumer import KafkaConsumer
-from tkati_core.kafka.settings import KafkaInputSettings
+from tkati_core.kafka.producer import KafkaProducer
+from tkati_core.kafka.settings import KafkaInputSettings, KafkaOutputSettings
 
 
 def test_from_input_settings_sets_attributes(input_settings: KafkaInputSettings):
@@ -287,7 +288,9 @@ def test_read_pylist_is_callable_through_the_base_consumer(
     assert batch.data == [{"id": "a", "value": 1}]
 
 
-def _produce(producer: Producer, topic: str, ids: list[str], partition: int = 0) -> None:
+def _produce(
+    producer: Producer, topic: str, ids: list[str], partition: int = 0
+) -> None:
     for i in ids:
         producer.produce(
             topic, value=orjson.dumps({"id": i, "value": 0}), partition=partition
@@ -457,3 +460,46 @@ def test_commit_out_of_read_order_raises(
         assert _wait_committed(input_settings, {0: 2}) == {0: 2}
     finally:
         consumer.close()
+
+
+def test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it(
+    input_settings: KafkaInputSettings,
+    output_settings: KafkaOutputSettings,
+    kafka_input_topic: str,
+    kafka_output_topic: str,
+    raw_producer: Producer,
+    raw_consumer: RawConsumer,
+):
+    """Through a Node end to end: the malformed message is skipped, the valid
+    rows are produced, and the commit covers all three messages read."""
+    for value in (
+        orjson.dumps({"id": "a", "value": 1}),
+        b"not json",
+        orjson.dumps({"id": "b", "value": 2}),
+    ):
+        raw_producer.produce(kafka_input_topic, value=value)
+    raw_producer.flush()
+
+    node = Node(
+        KafkaConsumer.from_input_settings(input_settings),
+        KafkaProducer.from_output_settings(output_settings),
+        batch_size=3,
+        batch_timeout_sec=10,
+    )
+    with node:
+        for event in node.consume_pylist():
+            if isinstance(event, Batch):
+                assert [row["id"] for row in event.data] == ["a", "b"]
+                node.done(event, output_pylist=event.data)
+                node.stop()
+
+    assert _wait_committed(input_settings, {0: 3}) == {0: 3}
+
+    raw_consumer.subscribe([kafka_output_topic])
+    rows: list[dict] = []
+    deadline = time.monotonic() + 10
+    while len(rows) < 2 and time.monotonic() < deadline:
+        msg = raw_consumer.poll(1.0)
+        if msg is not None and not msg.error() and (value := msg.value()):
+            rows.append(orjson.loads(value))
+    assert sorted(row["id"] for row in rows) == ["a", "b"]

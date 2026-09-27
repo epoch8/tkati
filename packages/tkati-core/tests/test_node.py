@@ -41,21 +41,21 @@ def _send_all(node: Node) -> list[type]:
     """The simplest node: send every batch unchanged. Returns the event types
     it saw."""
     seen: list[type] = []
-    for event in node:
+    for event in node.consume_arrow():
         seen.append(type(event))
         if isinstance(event, Batch):
-            node.done(event, output=event.data)
+            node.done(event, output_arrow=event.data)
     return seen
 
 
 def _raise_in_body(node: Node, exc: BaseException) -> None:
-    for _ in node:
+    for _ in node.consume_arrow():
         raise exc
 
 
 def _skip_done(node: Node) -> None:
     """A buggy node: never finishes the batch."""
-    for event in node:
+    for event in node.consume_arrow():
         assert isinstance(event, Batch)
 
 
@@ -91,7 +91,7 @@ def test_done_flushes_then_commits() -> None:
 def test_code_after_done_runs_after_the_commit() -> None:
     node, consumer, _ = memory_node([_table(1)])
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             node.done(event)
             consumer.log.append("tail")
@@ -102,10 +102,10 @@ def test_code_after_done_runs_after_the_commit() -> None:
 def test_rows_out_is_counted_at_done() -> None:
     node, _, _ = memory_node([_table(2)])
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             assert node.stats.rows_out == 0
-            node.done(event, output=event.data)
+            node.done(event, output_arrow=event.data)
             assert node.stats.rows_out == 2
 
 
@@ -123,7 +123,7 @@ def test_done_twice_raises() -> None:
     node, consumer, _ = memory_node([_table(1)])
 
     def done_twice() -> None:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             node.done(event)
             node.done(event)
@@ -139,11 +139,11 @@ def test_done_with_both_output_and_rows_out_raises_and_rewinds() -> None:
     node, consumer, producer = memory_node([_table(1)])
 
     def both() -> None:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
-            node.done(event, output=event.data, rows_out=1)
+            node.done(event, output_arrow=event.data, rows_out=1)
 
-    with pytest.raises(ValueError, match="not both"), node:
+    with pytest.raises(ValueError, match="at most one"), node:
         both()
 
     assert _producer(producer).sent == []
@@ -180,7 +180,7 @@ def test_exception_after_done_does_not_rewind_the_committed_batch() -> None:
     node, consumer, _ = memory_node([_table(1)])
 
     def fail_after_done() -> None:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             node.done(event)
             raise RuntimeError("tail failed")
@@ -217,7 +217,7 @@ def test_failing_rewind_does_not_mask_the_original_error() -> None:
 def test_break_before_done_neither_commits_nor_rewinds() -> None:
     node, consumer, producer = memory_node([_table(1), _table(1)])
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             break
 
@@ -229,7 +229,7 @@ def test_break_before_done_neither_commits_nor_rewinds() -> None:
 def test_break_after_done_keeps_the_commit() -> None:
     node, consumer, _ = memory_node([_table(1), _table(1)])
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             node.done(event)
             break
@@ -282,7 +282,7 @@ def test_short_batch_is_flagged() -> None:
     node, _, _ = memory_node([_table(2), _table(1)], batch_size=2)
     shorts: list[bool] = []
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             shorts.append(event.short)
             node.done(event)
@@ -292,9 +292,9 @@ def test_short_batch_is_flagged() -> None:
 def test_empty_table_is_not_sent() -> None:
     node, consumer, producer = memory_node([_table(1)])
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
-            node.done(event, output=event.data.slice(0, 0))
+            node.done(event, output_arrow=event.data.slice(0, 0))
 
     assert _producer(producer).sent == []
     assert consumer.commits == [0]
@@ -303,19 +303,28 @@ def test_empty_table_is_not_sent() -> None:
 def test_stop_ends_the_loop_after_the_current_batch() -> None:
     node, consumer, _ = memory_node([_table(1), _table(1)])
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             node.stop()
-            node.done(event, output=event.data)
+            node.done(event, output_arrow=event.data)
 
     assert consumer.commits == [0]
     assert "read:1" not in consumer.log
 
 
-def test_iterating_outside_with_raises() -> None:
+def test_consuming_outside_with_raises() -> None:
     node, _, _ = memory_node([_table(1)])
     with pytest.raises(RuntimeError, match="inside `with node:`"):
-        next(iter(node))
+        node.consume_arrow()
+    with pytest.raises(RuntimeError, match="inside `with node:`"):
+        node.consume_pylist()
+
+
+def test_node_itself_is_not_iterable() -> None:
+    """The input format is always chosen explicitly."""
+    node, _, _ = memory_node([_table(1)])
+    with pytest.raises(TypeError), node:
+        iter(node)  # ty: ignore[no-matching-overload]  # the point of the test
 
 
 # --- stats ------------------------------------------------------------------
@@ -350,7 +359,7 @@ def test_node_phases_are_timed() -> None:
     phases = (*CONSUMER_PHASES, "work", *PRODUCER_PHASES, "commit")
     node, _, _ = memory_node([_table(1)], phases=phases)
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             with node.phase("work"):
                 time.sleep(0.002)
@@ -402,7 +411,7 @@ def test_without_a_producer_the_batch_is_committed_without_a_flush() -> None:
     node, consumer, producer = memory_node([_table(2)], output=False)
     assert producer is None
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             node.done(event, rows_out=len(event.data))
 
@@ -424,6 +433,96 @@ def test_without_a_producer_phases_need_not_include_the_producer_phases() -> Non
     assert node.stats.phases == phases
 
 
+# --- pylist ----------------------------------------------------------------
+
+
+def _rows(n: int) -> list[dict]:
+    return [{"uid": str(i)} for i in range(n)]
+
+
+def test_consume_pylist_yields_dicts_and_sends_them_with_produce_pylist() -> None:
+    node, consumer, producer = memory_node([_rows(2)])
+    seen: list[list[dict]] = []
+    with node:
+        for event in node.consume_pylist():
+            assert isinstance(event, Batch)
+            seen.append(event.data)
+            node.done(event, output_pylist=event.data)
+
+    assert seen == [_rows(2)]
+    assert _producer(producer).sent == [_rows(2)]
+    assert consumer.log[:4] == ["read:0", "produce", "flush", "commit:0"]
+
+
+def test_pylist_input_may_send_arrow() -> None:
+    node, _, producer = memory_node([_rows(2)])
+    with node:
+        for event in node.consume_pylist():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=pa.Table.from_pylist(event.data))
+
+    sent = _producer(producer).sent
+    assert len(sent) == 1 and isinstance(sent[0], pa.Table)
+
+
+def test_arrow_input_may_send_pylist() -> None:
+    node, _, producer = memory_node([_table(2)])
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_pylist=event.data.to_pylist())
+
+    assert _producer(producer).sent == [_rows(2)]
+
+
+def test_pylist_batches_are_counted() -> None:
+    node, _, _ = memory_node([_rows(2), _rows(1)], batch_size=2)
+    shorts: list[bool] = []
+    with node:
+        for event in node.consume_pylist():
+            assert isinstance(event, Batch)
+            shorts.append(event.short)
+            node.done(event, output_pylist=event.data[:1])
+
+    assert shorts == [False, True]
+    assert node.stats.rows_in == 3
+    assert node.stats.rows_out == 2
+
+
+def test_both_outputs_raise_and_rewind() -> None:
+    node, consumer, producer = memory_node([_rows(1)])
+
+    def both() -> None:
+        for event in node.consume_pylist():
+            assert isinstance(event, Batch)
+            node.done(
+                event,
+                output_arrow=pa.Table.from_pylist(event.data),
+                output_pylist=event.data,
+            )
+
+    with pytest.raises(ValueError, match="at most one"), node:
+        both()
+
+    assert _producer(producer).sent == []
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+def test_without_a_producer_output_pylist_raises() -> None:
+    node, consumer, _ = memory_node([_rows(1)], output=False)
+
+    def send() -> None:
+        for event in node.consume_pylist():
+            assert isinstance(event, Batch)
+            node.done(event, output_pylist=event.data)
+
+    with pytest.raises(RuntimeError, match="no output producer"), node:
+        send()
+
+    assert consumer.rewinds == [0]
+
+
 # --- signals ----------------------------------------------------------------
 
 
@@ -443,10 +542,10 @@ def test_sigterm_in_the_body_stops_after_committing_the_batch() -> None:
     consumer = MemoryConsumer([_table(1), _table(1)])
     node = _signal_node(consumer)
     with node:
-        for event in node:
+        for event in node.consume_arrow():
             assert isinstance(event, Batch)
             os.kill(os.getpid(), signal.SIGTERM)
-            node.done(event, output=event.data)
+            node.done(event, output_arrow=event.data)
 
     assert consumer.commits == [0]
     assert "read:1" not in consumer.log
@@ -479,7 +578,7 @@ def test_second_signal_forces_a_stop() -> None:
     node = _signal_node(consumer)
 
     def signal_twice() -> None:
-        for _ in node:
+        for _ in node.consume_arrow():
             os.kill(os.getpid(), signal.SIGTERM)
             os.kill(os.getpid(), signal.SIGTERM)
 

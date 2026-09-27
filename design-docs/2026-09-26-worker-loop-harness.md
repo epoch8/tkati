@@ -156,8 +156,9 @@ Non-goals:
 
 The harness takes over the loop, and the node keeps control of what it does
 with each batch. As in dora, the boundary between them is Python's iteration
-protocol. The node writes `for event in node:`. Each step of that iteration is
-the harness polling the input, doing its bookkeeping and returning the next
+protocol. The node writes `for event in node.consume_arrow():`, or
+`consume_pylist()` for rows as dicts. Each step of that iteration is the
+harness polling the input, doing its bookkeeping and returning the next
 event. The body of the loop is the node's logic, in the order the node wants
 it.
 
@@ -181,7 +182,7 @@ and the `for` loop exits. dora needs a STOP event because its nodes have no
 other place to clean up. In Python, `with` blocks around the loop handle that.
 
 **Commit.** The node says explicitly when a batch is finished, and what it
-produced, in one call: `node.done(event, output=table)`. `done()` sends the
+produced, in one call: `node.done(event, output_arrow=table)`. `done()` sends the
 output, flushes the producer, and then calls `consumer.commit(batch)` with
 the `ConsumedBatch` it handed out. It returns once the commit is made. There
 is no separate send, so every output is tied to the input batch it came from.
@@ -260,11 +261,11 @@ SINK_PHASES = (*CONSUMER_PHASES, "commit")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class Batch:
+class Batch[T: Sized]:
     """A batch read from the input. The harness keeps the ConsumedBatch; the
     node only sees what it needs."""
 
-    data: pa.Table
+    data: T  # pa.Table from consume_arrow(), list[dict] from consume_pylist()
     short: bool  # fewer rows than batch_size: the poll drained the input
 
 
@@ -272,7 +273,7 @@ class Idle:
     """A poll returned nothing."""
 
 
-type Event = Batch | Idle
+type Event[T: Sized] = Batch[T] | Idle
 
 
 class Node:
@@ -297,14 +298,15 @@ class Node:
 
     def __enter__(self) -> "Node": ...
     def __exit__(self, *exc_info) -> None: ...
-    def __iter__(self) -> Iterator[Event]: ...
-    def __next__(self) -> Event: ...
+    def consume_arrow(self) -> Iterator[Batch[pa.Table] | Idle]: ...
+    def consume_pylist(self) -> Iterator[Batch[list[dict]] | Idle]: ...
 
     def done(
         self,
-        event: Batch,
+        event: Batch[Any],
         *,
-        output: pa.Table | None = None,
+        output_arrow: pa.Table | None = None,
+        output_pylist: list[dict] | None = None,
         rows_out: int | None = None,
     ) -> None: ...
     def phase(self, name: str) -> AbstractContextManager[None]: ...
@@ -324,9 +326,13 @@ The open questions from the Approach, settled:
 - **A batch event carries only `data` and `short`.** Offsets stay inside the
   harness. Neither node needs them, and exposing them would invite nodes to
   commit on their own.
-- **`output` is Arrow only.** Both nodes use `read_arrow`/`produce_arrow`.
-  The harness reads with `read_arrow`, so there is no `list[dict]` path to
-  mirror.
+- **Both Arrow and dicts, each chosen explicitly.** The node picks its
+  input format with `consume_arrow()` (`read_arrow`) or `consume_pylist()`
+  (`read_pylist`, which skips undecodable messages instead of failing the
+  batch). `Node` itself isn't iterable, so there is no implicit default. The
+  output format is named separately, with `output_arrow=` (`produce_arrow`)
+  or `output_pylist=` (`produce_pylist`), rather than routed by the type of
+  the value. It needn't match the input format.
 - **Nodes time their phases through `node.phase(name)`.** `phases` is the
   full report order, as `_PHASES` is in each node today. It defaults to
   `DEFAULT_PHASES`, or to `SINK_PHASES` when `producer` is `None`. The
@@ -343,7 +349,7 @@ The open questions from the Approach, settled:
   before it calls `done()`, which commits the batch. See **Nodes without an
   output producer**.
 - **A batch is finished explicitly, with a synchronous
-  `node.done(event, output=table)`.** It sends the output, flushes, commits,
+  `node.done(event, output_arrow=table)`.** It sends the output, flushes, commits,
   adds the batch's rows to `rows_out`, and returns. Code after it runs after
   the commit, so there are no hooks. There is no `send` and no public
   `flush`, which keeps the interface minimal: every current node sends one
@@ -351,9 +357,9 @@ The open questions from the Approach, settled:
   committing. A node that needs multi-part output would bring back a
   lower-level send.
 - **A node without a producer reports its rows with
-  `done(event, rows_out=n)`.** `output` and `rows_out` are mutually
-  exclusive: sent rows are already counted. `output` without a producer
-  raises.
+  `done(event, rows_out=n)`.** At most one of `output_arrow`,
+  `output_pylist` and `rows_out` may be given: sent rows are already
+  counted. An output without a producer raises.
   - Asking for the next event while a batch isn't done raises
     `RuntimeError`. It is raised out of the `for` loop, so `__exit__`
     rewinds the batch.
@@ -373,14 +379,16 @@ move their tail lines into those callbacks as part of that change.
 
 ### One step of the iteration
 
-`Node.__next__` does the following, in order:
+`consume_arrow()` and `consume_pylist()` check that the node has been
+entered, and return a generator that runs the steps below until one ends the
+loop. Both pass the matching consumer method, `read_arrow` or `read_pylist`,
+as `read`:
 
 1. If a batch is outstanding, meaning the node didn't call `done()`, raises
    `RuntimeError`.
 2. `stats.report_if_due()`.
-3. If a stop was requested, ends the iteration (`StopIteration`, which it
-   raises again on every later call).
-4. Reads with `consumer.read_arrow(timeout=batch_timeout_sec,
+3. If a stop was requested, ends the iteration.
+4. Reads with `read(timeout=batch_timeout_sec,
    num_messages=batch_size, stats=stats)`. A stop signal that arrives during
    the read interrupts it (see **Signals**). A stop requested during the
    read, whether by a signal or by `stop()`, ends the iteration without
@@ -395,14 +403,18 @@ move their tail lines into those callbacks as part of that change.
    - the batch becomes the outstanding one, and the harness returns
      `Batch(data, short)`.
 
-`Node.done(event, output=, rows_out=)` does the finishing:
-- checks that `event` is the outstanding batch;
-- if `output` is a non-empty table, calls
-  `producer.produce_arrow(output, stats=stats)`. An empty table or `None`
-  sends nothing, which covers dedup's "everything was a duplicate" case;
+`Node.done(event, output_arrow=, output_pylist=, rows_out=)` does the
+finishing:
+- checks that at most one of the three is given, and that `event` is the
+  outstanding batch;
+- if `output_arrow` is a non-empty table, calls
+  `producer.produce_arrow(output_arrow, stats=stats)`. If `output_pylist` is
+  a non-empty list, calls `producer.produce_pylist(output_pylist, stats=stats)`.
+  An empty output or none sends nothing, which covers dedup's "everything was
+  a duplicate" case;
 - calls `producer.flush(stats=stats)` if there is a producer;
 - calls `consumer.commit(batch)` inside the `commit` phase;
-- adds `len(output)`, or `rows_out`, to `stats.rows_out`. This happens only
+- adds the output's length, or `rows_out`, to `stats.rows_out`. This happens only
   at commit, which matches what both nodes do today;
 - clears the outstanding batch.
 
@@ -482,17 +494,19 @@ A new module, `tkati_core/testing.py`, which ships in the package so that node
 packages can use it:
 
 - **`MemoryConsumer(batches, *, on_exhausted=None, log=None)`**
-  - `read_arrow` returns the tables in `batches` one by one, each wrapped in
-    a `ConsumedBatch` with `BatchOffsets()` and an increasing `seq`. A
-    `None` entry reads as an empty poll.
+  - `read_arrow` and `read_pylist` return the entries of `batches` one by
+    one, each wrapped in a `ConsumedBatch` with `BatchOffsets()` and an
+    increasing `seq`. An entry may be a table or a list of dicts, and each
+    method converts it to the format it returns. A `None` entry reads as an
+    empty poll.
   - Once `batches` runs out, every read calls `on_exhausted` (if given) and
     returns `None`.
   - `commit`/`rewind` record the batch's `seq` in `commits`/`rewinds`. It
     also records the `stats` it was given and whether it was closed.
-    `read_pylist` raises `NotImplementedError`.
 - **`MemoryProducer(*, fail_flush=None, log=None)`**
-  - Records the tables it's sent, how many times it was flushed, the `stats`
-    it was given, and whether it was closed.
+  - Records what it's sent, as given (a table from `produce_arrow`, a list
+    from `produce_pylist`), how many times it was flushed, the `stats` it was
+    given, and whether it was closed.
   - `flush` raises `fail_flush` when set.
 - **`log`** is a list that both doubles append to (`"produce"`, `"flush"`,
   `"commit:0"`, `"rewind:0"`, `"close:consumer"`, …), so tests can check the
@@ -513,7 +527,7 @@ A node that writes to a cloud API looks like this:
 
 ```python
 def run(node: Node, client: ApiClient) -> None:
-    for event in node:
+    for event in node.consume_arrow():
         if isinstance(event, Batch):
             with node.phase("upload"):
                 client.upload(event.data)  # returns once the API accepted it
@@ -540,9 +554,9 @@ tkati-node-el:
 
 ```python
 def run(node: Node) -> None:
-    for event in node:
+    for event in node.consume_arrow():
         if isinstance(event, Batch):
-            node.done(event, output=event.data)
+            node.done(event, output_arrow=event.data)
             logger.debug(f"Produced {len(event.data)} rows")
 
 
@@ -556,7 +570,7 @@ tkati-node-dedup:
 
 ```python
 def run(node: Node, store: BucketedDedupStore, field: str) -> None:
-    for event in node:
+    for event in node.consume_arrow():
         with node.phase("commit"):  # booked as before; see the comment there
             try:
                 store.cleanup_expired()
@@ -566,7 +580,7 @@ def run(node: Node, store: BucketedDedupStore, field: str) -> None:
             continue
         table = event.data
         ...  # missing-field check and _dedupe_batch under node.phase("lookup")
-        node.done(event, output=filtered)  # sent, delivered, then committed
+        node.done(event, output_arrow=filtered)  # sent, delivered, then committed
         with node.phase("write"):
             store.add_many(new_keys)  # mark seen: after delivery
         _DROPPED_ROWS.inc(len(table) - len(filtered))  # after commit
@@ -625,7 +639,8 @@ nodes.
    - `done()` flushes then commits, in that order in the log. Code after it
      runs after the commit. `rows_out` is counted at `done()`.
    - The next event without `done()` raises and rewinds. `done()` twice
-     raises. `output` together with `rows_out` raises and rewinds.
+     raises. Two of `output_arrow`, `output_pylist` and `rows_out` together
+     raise and rewind.
    - An exception in the body rewinds the outstanding batch, doesn't commit
      it, propagates, and still closes everything. A failing rewind doesn't
      mask it. An exception after `done()` doesn't rewind.
@@ -635,7 +650,11 @@ nodes.
    - `KeyboardInterrupt` in the body doesn't rewind.
    - An empty poll yields `Idle`. `stop_when_idle` ends the loop at the
      first empty poll instead.
-   - An empty `output` doesn't reach the producer.
+   - An empty output doesn't reach the producer.
+   - `consume_pylist()` yields `list[dict]` data, and `output_pylist=` goes
+     through `produce_pylist`. Input and output formats can be mixed.
+     Pylist batches are counted like Arrow ones.
+   - Consuming outside `with` raises, and `Node` itself isn't iterable.
    - `stop()` in the body ends the loop after the current batch, without
      reading again.
    - The consumer and producer receive `node.stats`. `iterations`,
@@ -645,7 +664,7 @@ nodes.
      the rest.
    - Without a producer (`memory_node(..., output=False)`):
      - `done()` commits the batch with no flush;
-     - `output=` raises and rewinds;
+     - `output_arrow=` or `output_pylist=` raises and rewinds;
      - `rows_out=` counts toward `rows_out` at commit;
      - the default phases are `SINK_PHASES`, and `phases` without the producer
        phases is accepted;
@@ -756,6 +775,20 @@ decision the Design section left open:
   the call that commits its input, `send` and `add_rows_out` are gone
   (`rows_out=` replaces the latter for nodes without a producer), and
   `Batch` became a frozen dataclass with no reference back to the node.
+- **`consume_arrow()` / `consume_pylist()` and `output_arrow=` /
+  `output_pylist=`.** A third step, after the harness had merged: an
+  application needed `read_pylist`, which the Arrow-only loop couldn't serve.
+  `Node` stopped being an iterator. The node now names its input format with
+  one of the two `consume_*()` methods, and its output format with the
+  matching `done()` keyword, never inferred from a value's type. `Batch`
+  became generic over its data (`Batch[T: Sized]`). The loop is a generator
+  over `_next_event(read)`, where `read` is the consumer method the chosen
+  `consume_*()` passes in.
+  - `short` for a pylist batch compares parsed rows, not messages read, to
+    the batch size, so messages that failed to decode make a full poll look
+    short. Fixing that needs the message count on `ConsumedBatch`.
+  - `test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it`
+    in `test_consumer.py` checks the pylist path against Redpanda.
 - **Dedup flushes every batch.** `done()` flushes even when every row was a
   duplicate and nothing was sent. The old loop skipped produce and flush in
   that case. A flush with nothing in flight returns immediately.
@@ -776,8 +809,8 @@ decision the Design section left open:
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
   `cargo test` pass. Only the Cargo.toml version changed on the Rust side.
 - `uv run pytest packages/tkati-core packages/tkati-node-el packages/tkati-node-dedup packages/tkati-dashboard`
-  passes against local Redpanda and ClickHouse (209 tests).
-  `packages/tkati-core/tests/test_node.py` holds 36 broker-free harness
+  passes against local Redpanda and ClickHouse (217 tests).
+  `packages/tkati-core/tests/test_node.py` holds 43 broker-free harness
   tests, covering every behaviour listed in step 5.
 - Manual check: `tkati-node-el`, Kafka to Kafka, with input flowing at about
   50k msg/s and `batch_size = 1000`, got SIGTERM six seconds into its run.
@@ -787,5 +820,6 @@ decision the Design section left open:
     in the output topic (56000): nothing was committed without being
     delivered, and nothing delivered was left uncommitted.
   - Repeated after the switch to `done()`, and again after the switch to
-    `node.done(event, output=)`: each time exit code 0 about 0.1 s after the
+    `node.done(event, output=)`, and again after the switch to
+    `consume_arrow()`: each time exit code 0 about 0.1 s after the
     signal, with 55000 committed and 55000 in the output topic.

@@ -10,9 +10,9 @@ def run(node: Node) -> None:
     `done()` waits for delivery before it commits, so delivery is
     at-least-once: a batch is committed only after it is confirmed delivered.
     """
-    for event in node:
+    for event in node.consume_arrow():
         if isinstance(event, Batch):
-            node.done(event, output=event.data)
+            node.done(event, output_arrow=event.data)
             logger.debug(f"Produced {len(event.data)} rows")
 
 
