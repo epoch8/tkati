@@ -582,6 +582,8 @@ def test_exception_rewinds_with_or_without_read_ahead(read_ahead: int) -> None:
 
     assert consumer.commits == []
     assert consumer.rewinds == [0]
+    # Read but rewound: counted in only once re-read and committed.
+    assert node.stats.rows_in == 0
 
 
 @pytest.mark.parametrize("read_ahead", [0, 1])
@@ -734,6 +736,24 @@ def test_pipelined_done_returns_before_delivery_and_commits_after() -> None:
     assert node.stats.rows_out == 1
 
 
+def test_pipelined_rows_in_and_out_are_counted_together_at_commit() -> None:
+    """A report between a batch's read and its commit must not see its rows
+    in without its rows out: that is what made "dropped" go negative."""
+    node, _, producer = memory_pipelined_node([_table(3)], deliver="manual")
+    producer = _producer(producer)
+    counts: list[tuple[int, int]] = []
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data.slice(0, 2))
+            counts.append((node.stats.rows_in, node.stats.rows_out))
+            producer.release(1)
+            node._before_read()
+            counts.append((node.stats.rows_in, node.stats.rows_out))
+
+    assert counts == [(0, 0), (3, 2)]
+
+
 def test_pipelined_commits_in_read_order_whatever_the_ack_order() -> None:
     node, consumer, producer = memory_pipelined_node(
         [_table(1), _table(1), _table(1)], deliver="manual"
@@ -823,6 +843,7 @@ def test_pipelined_exception_rewinds_the_oldest_finished_batch() -> None:
     # batch 0 is the oldest uncommitted, and rewinding it rewinds both.
     assert consumer.commits == []
     assert consumer.rewinds == [0]
+    assert node.stats.rows_in == node.stats.rows_out == 0
 
 
 def test_pipelined_break_after_done_still_commits_on_exit() -> None:

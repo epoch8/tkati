@@ -1,3 +1,9 @@
+# 0.8.1
+
+* Fix: the perf line's rows in and out are counted for the same batches, so
+  "dropped" is no longer skewed (or negative) by batches still in flight at
+  report time
+
 # 0.8.0
 
 * Runs on `tkati-core`'s `PipelinedNode`: it reads the next batch while

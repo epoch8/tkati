@@ -136,6 +136,10 @@ class LoopStats:
         deliberately do not sum to 100 — the shortfall is time in none of the
         named phases, which keeps unaccounted work visible.
 
+        Rows in and out are counted per committed batch, both at the commit
+        (see `_NodeBase._commit`), so "dropped" is exact for the batches
+        committed in the interval, however far commits lag reads.
+
         Beware the starved case: a node's read phase typically blocks until
         the batch fills or the batch timeout expires, so on an under-fed node
         it approaches 100% and none of the other figures mean anything. That

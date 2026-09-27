@@ -12,6 +12,19 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.1
+
+### ltuworuq — Count rows in at commit [tkati-core, repo]
+
+- `rows_in` moved from `_NodeBase._next_event` (read) to `_NodeBase._commit`,
+  next to `rows_out`. Under `PipelinedNode` a stats report could land between
+  a batch's read and its commit, so an interval counted a batch's input and
+  another its output, and node-dedup's perf line showed negative drops.
+  Rewound batches no longer count toward `rows_in`.
+- Tests: rows in/out counted together at commit under `PipelinedNode`, and
+  not at all for a rewound batch.
+- Design doc note in `design-docs/2026-09-26-pipelined-worker-loop.md`.
+
 ## 0.8.0
 
 ### onvqqtpt — PipelinedNode [tkati-core, tkati-node-el, tkati-node-dedup, repo]

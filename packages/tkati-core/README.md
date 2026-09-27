@@ -118,7 +118,9 @@ exit the node closes the consumer, the output and the DLQ, in that order. The
 node's own resources belong in the same `with` statement.
 
 **Stats.** The node passes its `LoopStats` to the consumer and producer, and
-counts iterations, starved iterations and rows in and out itself. A node
+counts iterations, starved iterations and rows in and out itself. Rows in
+and out are both counted when a batch is committed, so a pipelined node's
+report never splits a batch across intervals. A node
 times its own work with `node.phase("name")` and passes the full report order
 as `phases=` (the default is `DEFAULT_PHASES`). That tuple must include every
 phase the harness times, `wait/input` among them.
@@ -268,7 +270,6 @@ while True:
     if batch is None:
         stats.starved_iterations += 1
         continue
-    stats.rows_in += len(batch.data)
 
     try:
         producer.produce_arrow(batch.data, stats=stats)
@@ -276,10 +277,12 @@ while True:
     except Exception:
         consumer.rewind(batch)
         raise
-    stats.rows_out += len(batch.data)
 
     with stats.phase("commit"):
         consumer.commit(batch)
+    # Both counted once committed, so in - out is the batch's drops.
+    stats.rows_in += len(batch.data)
+    stats.rows_out += len(batch.data)
 
     stats.report_if_due()
 ```
@@ -350,7 +353,7 @@ start_metrics_server(MetricsSettings(), stats)  # :8000/metrics, daemon thread
 |---|---|---|
 | `tkati_phase_seconds_total` | `phase` | wall clock spent in each phase |
 | `tkati_wall_seconds_total` | — | wall clock since the `LoopStats` was created, the 100% denominator |
-| `tkati_rows_in_total` / `tkati_rows_out_total` | — | rows read / written |
+| `tkati_rows_in_total` / `tkati_rows_out_total` | — | rows read / written, counted when their batch is committed |
 | `tkati_iterations_total` | — | loop iterations |
 | `tkati_starved_iterations_total` | — | iterations that waited on input |
 

@@ -498,7 +498,6 @@ class _NodeBase:
         short = len(data) < self._batch_size
         if short:
             self._stats.starved_iterations += 1
-        self._stats.rows_in += len(data)
 
         event = Batch(data, short)
         self._batch = consumed
@@ -575,7 +574,13 @@ class _NodeBase:
     def _commit(self, batch: ConsumedBatch[Any], rows_out: int) -> None:
         with self._stats.phase("commit"):
             self._consumer.commit(batch)
-        # Counted only once committed, so a failed batch isn't counted.
+        # Counted only once committed, so a failed batch isn't counted (nor
+        # counted twice once re-read). Rows in are counted here too, not at
+        # read: a `PipelinedNode` commits batches later than it reads them,
+        # and a report between the two would otherwise put a batch's rows in
+        # and rows out in different intervals, making "dropped" meaningless.
+        # For `read_pylist` this counts parsed rows, not messages read.
+        self._stats.rows_in += len(batch.data)
         self._stats.rows_out += rows_out
 
     def _oldest_uncommitted(self) -> ConsumedBatch[Any] | None:
@@ -737,7 +742,8 @@ class PipelinedNode(_NodeBase):
     every earlier batch's output is delivered, in read order. So the lines
     after `done()` run *before* the commit. Work that must follow the commit
     (marking keys seen, counting what a batch dropped) goes in
-    `done(..., after_commit=fn)` instead.
+    `done(..., after_commit=fn)` instead. The stats' rows in and out are
+    counted at the commit too, so both lag the read by the batches in flight.
 
     Use as a context manager, and consume inside it::
 

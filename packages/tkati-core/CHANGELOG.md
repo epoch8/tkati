@@ -1,3 +1,11 @@
+# 0.8.1
+
+* Fix: `LoopStats.rows_in` is now counted when a batch is committed, like
+  `rows_out`, not when it is read. Under `PipelinedNode` a report could fall
+  between the two, so the perf line's "dropped" could go negative
+  (`90000 rows in, 100000 out (-10000 dropped)`). `tkati_rows_in_total` now
+  counts only committed batches, so a rewound batch is no longer counted twice
+
 # 0.8.0
 
 * New `PipelinedNode`: `done()` returns before delivery and takes
