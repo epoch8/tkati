@@ -12,6 +12,31 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.0
+
+### klmnkqvx — Per-message Kafka delivery reports [tkati-core, repo]
+
+- The native producer records every delivery report against the tag its
+  message was sent with. `Producer.produce_arrow` / `produce_pylist` take
+  `tag=`, and the new `Producer.wait_delivered(tag, timeout)` raises
+  `DeliveryError` if any of that tag's messages failed.
+- `SyncNode.done()` tags each batch's output and checks it after the flush.
+  Before, a message the broker rejected or librdkafka gave up on still let
+  `flush()` return, and the batch was committed: those rows were lost.
+- `KafkaProducer.flush()` waits on those delivery reports instead of calling
+  librdkafka's flush. That one returned only after its full 100 ms step,
+  because the producer's background thread had already served the reports,
+  so every flush (one per batch in both nodes, since 0.5.0) cost at least
+  100 ms. It now takes as long as the deliveries do: about 6 ms for a
+  1000-row batch against a local broker.
+- Design doc: `design-docs/2026-09-26-pipelined-worker-loop.md` (Phase A).
+
+### pkzwpzlm — Rename Node to SyncNode [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- `tkati_core.Node` is renamed to `SyncNode`, with no alias, ahead of a
+  sibling `PipelinedNode`. The shared parts move to a private `_NodeBase`.
+  Migration notes: `MIGRATION.md`.
+
 ## 0.7.0
 
 ### nxsrlkrt — Worker loop harness [tkati-core, tkati-node-el, tkati-node-dedup, repo]

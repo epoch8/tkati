@@ -5,7 +5,7 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Consumer
-from tkati_core import PRODUCER_PHASES, LoopStats
+from tkati_core import PRODUCER_PHASES, DeliveryError, LoopStats
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import (
     KafkaConnectionSettings,
@@ -284,3 +284,39 @@ def test_produce_pylist_splits_its_time_into_serialize_and_enqueue(
     assert stats.phase_sec["producer/enqueue"] > 0
     assert "producer/deliver" not in stats.phase_sec
     assert len(_consume_all(raw_consumer, kafka_output_topic, count=2)) == 2
+
+
+def test_wait_delivered_is_true_once_a_tags_messages_are_acked(
+    output_settings: KafkaOutputSettings, kafka_output_topic: str
+):
+    producer = KafkaProducer.from_output_settings(output_settings)
+    try:
+        producer.produce_pylist([{"id": "a"}, {"id": "b"}], tag=7)
+        assert producer.wait_delivered(7, timeout=10) is True
+        # A tag nothing was produced with counts as delivered.
+        assert producer.wait_delivered(8, timeout=0) is True
+    finally:
+        producer.close()
+
+
+def test_wait_delivered_raises_when_the_broker_rejects_a_message(
+    output_settings: KafkaOutputSettings, kafka_output_topic: str
+):
+    """flush() returns once nothing is in flight, delivered or not; the
+    rejection must still surface, through wait_delivered."""
+    producer = KafkaProducer(
+        # Let librdkafka send a message larger than the broker accepts, so it
+        # fails at the broker (a delivery report) rather than locally.
+        kafka_config={
+            "bootstrap.servers": output_settings.connection.broker,
+            "message.max.bytes": str(20 << 20),
+        },
+        topic_name=kafka_output_topic,
+    )
+    try:
+        producer.produce_pylist([{"id": "x" * (5 << 20)}], tag=1)
+        producer.flush()
+        with pytest.raises(DeliveryError):
+            producer.wait_delivered(1, timeout=10)
+    finally:
+        producer.close()

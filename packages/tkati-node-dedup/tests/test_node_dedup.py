@@ -269,7 +269,14 @@ def test_keys_are_marked_seen_after_delivery_and_commit(tmp_path, monkeypatch) -
     monkeypatch.setattr(store, "add_many", logged_add_many)
     _run_memory(store, node)
 
-    assert consumer.log[:5] == ["read:0", "produce", "flush", "commit:0", "mark-seen"]
+    assert consumer.log[:6] == [
+        "read:0",
+        "produce",
+        "flush",
+        "wait:1",
+        "commit:0",
+        "mark-seen",
+    ]
     assert store.contains(b"a") is True
     store.close()
 

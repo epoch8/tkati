@@ -1,3 +1,20 @@
+# 0.8.0
+
+* **Breaking:** `Node` is renamed to `SyncNode`, with the same API. There is
+  no alias.
+* **Breaking for `Producer` implementations:** `produce_arrow` and
+  `produce_pylist` take `tag: int | None = None`, and `wait_delivered(tag,
+  timeout=None)` is a new abstract method.
+* **Fixed:** a Kafka message that failed delivery (rejected by the broker, or
+  given up on by librdkafka) no longer lets its batch be committed.
+  `SyncNode.done()` waits on the batch's tag after the flush and raises
+  `DeliveryError`, so the batch is rewound. New export: `DeliveryError`.
+* **Fixed:** `KafkaProducer.flush()` no longer takes at least 100 ms. It
+  waits on the delivery reports instead of librdkafka's flush, which with a
+  threaded producer only returned once its whole 100 ms step had passed.
+* `tkati_core._native`: `NativeProducer.enqueue(batch, tag=0)`,
+  `NativeProducer.wait_delivered(tag, timeout=None)`, `DeliveryError`.
+
 # 0.7.0
 
 * New `Node` (`tkati_core.node`): the worker loop harness.

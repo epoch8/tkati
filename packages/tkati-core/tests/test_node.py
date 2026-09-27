@@ -14,6 +14,7 @@ from tkati_core import (
     SINK_PHASES,
     Batch,
     ConsumedBatch,
+    DeliveryError,
     Idle,
     LoopStats,
     NodeSettings,
@@ -76,10 +77,12 @@ def test_done_flushes_then_commits() -> None:
         "read:0",
         "produce",
         "flush",
+        "wait:1",
         "commit:0",
         "read:1",
         "produce",
         "flush",
+        "wait:2",
         "commit:1",
         "close:consumer",
         "close:producer",
@@ -96,7 +99,7 @@ def test_code_after_done_runs_after_the_commit() -> None:
             node.done(event)
             consumer.log.append("tail")
 
-    assert consumer.log[:4] == ["read:0", "flush", "commit:0", "tail"]
+    assert consumer.log[:5] == ["read:0", "flush", "wait:1", "commit:0", "tail"]
 
 
 def test_rows_out_is_counted_at_done() -> None:
@@ -153,7 +156,7 @@ def test_done_with_both_output_and_rows_out_raises_and_rewinds() -> None:
 
 def test_failed_send_in_done_rewinds() -> None:
     class _FailingProducer(MemoryProducer):
-        def produce_arrow(self, data, stats=None) -> None:
+        def produce_arrow(self, data, stats=None, tag=None) -> None:
             raise RuntimeError("produce failed")
 
     consumer = MemoryConsumer([_table(1)])
@@ -199,6 +202,28 @@ def test_failed_flush_in_done_rewinds_instead_of_committing() -> None:
 
     assert consumer.commits == []
     assert consumer.rewinds == [0]
+
+
+def test_output_is_tagged_with_the_batch_seq_plus_one() -> None:
+    node, _, producer = memory_node([_table(1), _table(2)])
+    with node:
+        _send_all(node)
+
+    assert _producer(producer).tags == [1, 2]
+
+
+def test_failed_delivery_rewinds_instead_of_committing() -> None:
+    """flush() returns once nothing is in flight, delivered or not; a message
+    librdkafka gave up on must fail the batch, not let it be committed."""
+    node, consumer, _ = memory_node(
+        [_table(1), _table(1)], fail_delivery={2: DeliveryError("gave up")}
+    )
+    with pytest.raises(DeliveryError, match="gave up"), node:
+        _send_all(node)
+
+    assert consumer.commits == [0]
+    assert consumer.rewinds == [1]
+    assert node.stats.rows_out == 1
 
 
 class _BrokenRewind(MemoryConsumer):
@@ -451,7 +476,7 @@ def test_consume_pylist_yields_dicts_and_sends_them_with_produce_pylist() -> Non
 
     assert seen == [_rows(2)]
     assert _producer(producer).sent == [_rows(2)]
-    assert consumer.log[:4] == ["read:0", "produce", "flush", "commit:0"]
+    assert consumer.log[:5] == ["read:0", "produce", "flush", "wait:1", "commit:0"]
 
 
 def test_pylist_input_may_send_arrow() -> None:

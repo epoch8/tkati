@@ -21,15 +21,40 @@ class Producer(ABC):
     handing the encoded messages to the client library (`enqueue`), and waiting
     for the sink to accept them (`deliver`). Implementations that cannot tell
     these apart should record all of it as `producer/deliver`.
+
+    `tag` groups the messages of one produce call, or of several, so a caller
+    can wait for exactly those with `wait_delivered(tag)`: the harness tags
+    each input batch's output. None (or 0) leaves them untracked.
     """
 
     @abstractmethod
-    def produce_arrow(self, data: pa.Table, stats: LoopStats | None = None) -> None: ...
+    def produce_arrow(
+        self,
+        data: pa.Table,
+        stats: LoopStats | None = None,
+        tag: int | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def produce_pylist(
-        self, rows: list[dict], stats: LoopStats | None = None
+        self,
+        rows: list[dict],
+        stats: LoopStats | None = None,
+        tag: int | None = None,
     ) -> None: ...
+
+    @abstractmethod
+    def wait_delivered(self, tag: int, timeout: float | None = None) -> bool:
+        """Wait until every message produced with `tag` is delivered.
+
+        Returns True once they are (at once for a tag nothing was produced
+        with), False if `timeout` seconds pass first; None waits as long as it
+        takes, 0 only checks. Raises `DeliveryError` as soon as one of them
+        has failed, e.g. because librdkafka gave up on it.
+
+        An implementation whose produce calls return only once the sink has
+        accepted the data, or raised, returns True straight away.
+        """
 
     @abstractmethod
     def flush(self, stats: LoopStats | None = None) -> None: ...

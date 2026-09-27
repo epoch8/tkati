@@ -1,3 +1,4 @@
+from tkati_core._native import DeliveryError
 from tkati_core.consumer import (
     CONSUMER_PHASES,
     ConsumedBatch,
@@ -18,6 +19,7 @@ __all__ = [
     "Batch",
     "ConsumedBatch",
     "Consumer",
+    "DeliveryError",
     "Event",
     "Idle",
     "InputSettings",

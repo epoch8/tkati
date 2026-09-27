@@ -7,6 +7,9 @@ import pyarrow as pa
 class KafkaError(Exception):
     """An error reported by librdkafka."""
 
+class DeliveryError(Exception):
+    """A produced message could not be delivered."""
+
 class BatchOffsets:
     """Where a consumed batch lies in each partition. Opaque: only handed back
     to `NativeConsumer.commit` / `rewind`."""
@@ -52,5 +55,6 @@ class NativeConsumer:
 
 class NativeProducer:
     def __init__(self, config: Mapping[str, object], topic: str) -> None: ...
-    def enqueue(self, batch: EncodedBatch) -> None: ...
+    def enqueue(self, batch: EncodedBatch, tag: int = 0) -> None: ...
+    def wait_delivered(self, tag: int, timeout: float | None = None) -> bool: ...
     def flush(self) -> None: ...

@@ -89,6 +89,11 @@ class Idle:
 type Event[T: Sized] = Batch[T] | Idle
 
 
+def _tag(batch: ConsumedBatch[Any]) -> int:
+    """The delivery tag for a batch's output. 0 means untracked, hence +1."""
+    return batch.seq + 1
+
+
 class _Stop(BaseException):
     """Raised by the signal handler to cut a blocked read short.
 
@@ -363,8 +368,9 @@ class _NodeBase:
     ) -> tuple[ConsumedBatch[Any], int]:
         """The first half of `done()`, the same in both node classes: check
         the arguments and that `event` is the current batch, then send its
-        output. Returns the batch as read and the rows out. Leaves the batch
-        outstanding, so a failure from here on still rewinds it."""
+        output, tagged with `_tag(batch)`. Returns the batch as read and the
+        rows out. Leaves the batch outstanding, so a failure from here on
+        still rewinds it."""
         given = [output_arrow, output_pylist, rows_out]
         if sum(arg is not None for arg in given) > 1:
             raise ValueError(
@@ -388,11 +394,15 @@ class _NodeBase:
             if output_arrow is not None:
                 rows_out = len(output_arrow)
                 if rows_out > 0:
-                    self._producer.produce_arrow(output_arrow, stats=self._stats)
+                    self._producer.produce_arrow(
+                        output_arrow, stats=self._stats, tag=_tag(batch)
+                    )
             elif output_pylist is not None:
                 rows_out = len(output_pylist)
                 if rows_out > 0:
-                    self._producer.produce_pylist(output_pylist, stats=self._stats)
+                    self._producer.produce_pylist(
+                        output_pylist, stats=self._stats, tag=_tag(batch)
+                    )
         return batch, rows_out or 0
 
     def _commit(self, batch: ConsumedBatch[Any], rows_out: int) -> None:
@@ -504,6 +514,11 @@ class SyncNode(_NodeBase):
             # its offset says it was handled. A no-op for ClickhouseProducer,
             # whose inserts are synchronous.
             self._producer.flush(stats=self._stats)
+            # flush() returns once nothing is in flight, delivered or not.
+            # This raises DeliveryError if any of the batch's messages failed,
+            # so the batch is rewound rather than committed. It doesn't wait:
+            # after the flush every report is in.
+            self._producer.wait_delivered(_tag(batch), timeout=None)
         self._commit(batch, rows)
         # Committed: nothing left to rewind, whatever the node does next.
         self._batch = None

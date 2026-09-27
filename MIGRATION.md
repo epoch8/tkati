@@ -25,6 +25,30 @@ with SyncNode.from_settings(settings) as node:
 Rename type annotations too (`def run(node: SyncNode, ...)`).
 `tkati_core.testing.memory_node` returns a `SyncNode`.
 
+### `Producer` implementations take a delivery tag
+
+Only code that implements `Producer` itself is affected; callers are not.
+`produce_arrow` and `produce_pylist` gain a keyword argument, and there is a
+new abstract method:
+
+```python
+def produce_arrow(self, data, stats=None, tag: int | None = None) -> None: ...
+def produce_pylist(self, rows, stats=None, tag: int | None = None) -> None: ...
+def wait_delivered(self, tag: int, timeout: float | None = None) -> bool: ...
+```
+
+`wait_delivered` returns `True` once every message produced with `tag` is
+delivered, `False` on timeout, and raises `DeliveryError` if one failed. A
+producer whose produce calls finish only once the sink has accepted the data
+can return `True` at once, as `ClickhouseProducer` does.
+
+### Delivery failures now fail the batch
+
+A Kafka message that the broker rejects, or that librdkafka gives up on, now
+raises `DeliveryError` from `SyncNode.done()`, and the batch is rewound. Before
+0.8.0 it was silently committed and its rows were lost. A node that used to
+keep running through such failures now stops on the first one.
+
 # Migrating from v0.6.0 to v0.7.0
 
 `tkati-core` has no breaking changes. Its new API (`Node`, `NodeSettings`,

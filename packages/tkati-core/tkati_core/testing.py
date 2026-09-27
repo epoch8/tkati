@@ -102,17 +102,21 @@ class MemoryConsumer(Consumer):
 
 class MemoryProducer(Producer):
     """Records what it is sent, in `sent`, as given: a table from
-    `produce_arrow`, a list of dicts from `produce_pylist`. `flush` raises
-    `fail_flush` when set."""
+    `produce_arrow`, a list of dicts from `produce_pylist`, and each send's
+    tag in `tags`. `flush` raises `fail_flush` when set, and
+    `wait_delivered(tag)` raises `fail_delivery[tag]` when there is one."""
 
     def __init__(
         self,
         *,
         fail_flush: BaseException | None = None,
+        fail_delivery: dict[int, BaseException] | None = None,
         log: list[str] | None = None,
         name: str = "producer",
     ) -> None:
         self.fail_flush = fail_flush
+        self.fail_delivery: dict[int, BaseException] = dict(fail_delivery or {})
+        self.tags: list[int | None] = []
         self.log: list[str] = log if log is not None else []
         self.name = name
         self.sent: list[_Rows] = []
@@ -120,15 +124,33 @@ class MemoryProducer(Producer):
         self.stats_seen: list[LoopStats | None] = []
         self.closed = False
 
-    def produce_arrow(self, data: pa.Table, stats: LoopStats | None = None) -> None:
-        self.stats_seen.append(stats)
-        self.sent.append(data)
-        self.log.append("produce")
+    def produce_arrow(
+        self,
+        data: pa.Table,
+        stats: LoopStats | None = None,
+        tag: int | None = None,
+    ) -> None:
+        self._record(data, stats, tag)
 
-    def produce_pylist(self, rows: list[dict], stats: LoopStats | None = None) -> None:
+    def produce_pylist(
+        self,
+        rows: list[dict],
+        stats: LoopStats | None = None,
+        tag: int | None = None,
+    ) -> None:
+        self._record(rows, stats, tag)
+
+    def _record(self, rows: _Rows, stats: LoopStats | None, tag: int | None) -> None:
         self.stats_seen.append(stats)
         self.sent.append(rows)
+        self.tags.append(tag)
         self.log.append("produce")
+
+    def wait_delivered(self, tag: int, timeout: float | None = None) -> bool:
+        self.log.append(f"wait:{tag}")
+        if tag in self.fail_delivery:
+            raise self.fail_delivery[tag]
+        return True
 
     def flush(self, stats: LoopStats | None = None) -> None:
         self.stats_seen.append(stats)
@@ -157,13 +179,18 @@ def memory_node(
     phases: tuple[str, ...] | None = None,
     output: bool = True,
     fail_flush: BaseException | None = None,
+    fail_delivery: dict[int, BaseException] | None = None,
 ) -> tuple[SyncNode, MemoryConsumer, MemoryProducer | None]:
     """A `SyncNode` over in-memory doubles that share one log. The loop ends once
     `batches` is used up. With `output=False` the node has no producer, and
     None is returned in its place."""
     log: list[str] = []
     consumer = MemoryConsumer(batches, log=log)
-    producer = MemoryProducer(fail_flush=fail_flush, log=log) if output else None
+    producer = (
+        MemoryProducer(fail_flush=fail_flush, fail_delivery=fail_delivery, log=log)
+        if output
+        else None
+    )
     node = SyncNode(
         consumer,
         producer,

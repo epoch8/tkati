@@ -150,7 +150,8 @@ Non-goals:
   `packages/tkati-core/src/kafka.rs` discards delivery reports, so a message
   librdkafka gives up on still lets `flush()` return and its batch get
   committed. That gap is independent of who owns the loop and gets its own
-  change.
+  change. (Fixed in 0.8.0 by `Producer.wait_delivered`; see
+  `design-docs/2026-09-26-pipelined-worker-loop.md`.)
 
 ## Approach
 

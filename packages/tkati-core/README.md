@@ -171,6 +171,17 @@ Committing or rewinding anything but the oldest outstanding batch raises
 implement `Producer`. This is what lets a generic node pick its input/output kind
 from config instead of hardcoding a concrete class.
 
+**Delivery.** `produce_arrow` and `produce_pylist` take an optional `tag=`,
+which groups the messages you want to wait for together (the node harness tags
+each input batch's output). `producer.wait_delivered(tag, timeout)` returns
+`True` once all of them are acked, and `False` if `timeout` seconds pass
+first; `None` waits as long as it takes, and `0` only checks. It raises
+`DeliveryError` as soon as one of them failed, for example a message the
+broker rejected or librdkafka gave up on. `flush()` alone doesn't tell you
+that: it returns once nothing is in flight, delivered or not.
+`ClickhouseProducer` inserts synchronously, so its `wait_delivered` is always
+`True`.
+
 ### `LoopStats` — where a node's wall clock went
 
 `tkati_core.stats.LoopStats` accumulates per-phase timings across a node's loop
