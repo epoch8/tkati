@@ -1,6 +1,7 @@
 """Kafka consumer utilities for reading messages into PyArrow tables."""
 
 import os
+import threading
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -97,6 +98,10 @@ class KafkaConsumer(ConsumerBase):
         # one `commit` / `rewind` must be called with next.
         self._next_seq = 0
         self._oldest_outstanding = 0
+        # A node's read-ahead thread reads (and numbers batches) while the loop
+        # commits and rewinds, so the numbering and the ordering check go
+        # under one lock.
+        self._seq_lock = threading.Lock()
 
         # Create PyArrow schemas based on input_schema
         wire_schema_fields = []
@@ -140,8 +145,9 @@ class KafkaConsumer(ConsumerBase):
         return batch
 
     def _wrap[T](self, data: T, raw: RawBatch) -> ConsumedBatch[T]:
-        batch = ConsumedBatch(data=data, offsets=raw.offsets, seq=self._next_seq)
-        self._next_seq += 1
+        with self._seq_lock:
+            batch = ConsumedBatch(data=data, offsets=raw.offsets, seq=self._next_seq)
+            self._next_seq += 1
         return batch
 
     # WARNING: This function breaks if any single message is malformed JSON. We may
@@ -284,9 +290,10 @@ class KafkaConsumer(ConsumerBase):
         Commit exactly `batch`'s offsets. It must be the oldest batch not yet
         committed or rewound.
         """
-        self._check_oldest(batch, "commit")
-        self.consumer.commit(batch.offsets)
-        self._oldest_outstanding += 1
+        with self._seq_lock:
+            self._check_oldest(batch, "commit")
+            self.consumer.commit(batch.offsets)
+            self._oldest_outstanding += 1
         logger.debug(f"Committed batch {batch.seq}")
 
     def rewind(self, batch: ConsumedBatch[Any]) -> None:
@@ -295,9 +302,10 @@ class KafkaConsumer(ConsumerBase):
         oldest batch not yet committed or rewound; every batch read after it
         is re-read too, and so is dropped from the outstanding ones.
         """
-        self._check_oldest(batch, "rewind")
-        self.consumer.rewind(batch.offsets)
-        self._oldest_outstanding = self._next_seq
+        with self._seq_lock:
+            self._check_oldest(batch, "rewind")
+            self.consumer.rewind(batch.offsets)
+            self._oldest_outstanding = self._next_seq
         logger.info(f"Rewound batch {batch.seq}; it will be read again")
 
     def close(self) -> None:

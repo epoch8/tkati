@@ -1,3 +1,5 @@
+import contextlib
+import threading
 import time
 from collections.abc import Generator
 
@@ -7,7 +9,14 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer, TopicPartition
 from confluent_kafka.admin import AdminClient, NewTopic
-from tkati_core import CONSUMER_PHASES, Batch, Consumer, LoopStats, Node, build_consumer
+from tkati_core import (
+    CONSUMER_PHASES,
+    Batch,
+    Consumer,
+    LoopStats,
+    SyncNode,
+    build_consumer,
+)
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaInputSettings, KafkaOutputSettings
@@ -470,7 +479,7 @@ def test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it(
     raw_producer: Producer,
     raw_consumer: RawConsumer,
 ):
-    """Through a Node end to end: the malformed message is skipped, the valid
+    """Through a SyncNode end to end: the malformed message is skipped, the valid
     rows are produced, and the commit covers all three messages read."""
     for value in (
         orjson.dumps({"id": "a", "value": 1}),
@@ -480,7 +489,7 @@ def test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it(
         raw_producer.produce(kafka_input_topic, value=value)
     raw_producer.flush()
 
-    node = Node(
+    node = SyncNode(
         KafkaConsumer.from_input_settings(input_settings),
         KafkaProducer.from_output_settings(output_settings),
         batch_size=3,
@@ -503,3 +512,73 @@ def test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it(
         if msg is not None and not msg.error() and (value := msg.value()):
             rows.append(orjson.loads(value))
     assert sorted(row["id"] for row in rows) == ["a", "b"]
+
+
+def test_node_read_ahead_delivers_and_commits_every_batch_in_order(
+    input_settings: KafkaInputSettings,
+    output_settings: KafkaOutputSettings,
+    kafka_input_topic: str,
+    kafka_output_topic: str,
+    raw_producer: Producer,
+    raw_consumer: RawConsumer,
+):
+    """With a read-ahead thread polling while the loop commits: every batch
+    is committed, in order, by its own offsets."""
+    _produce(raw_producer, kafka_input_topic, [str(i) for i in range(6)])
+
+    node = SyncNode(
+        KafkaConsumer.from_input_settings(input_settings),
+        KafkaProducer.from_output_settings(output_settings),
+        batch_size=2,
+        batch_timeout_sec=10,
+        read_ahead=2,
+    )
+    batches = 0
+    with node:
+        for event in node.consume_arrow():
+            if isinstance(event, Batch):
+                node.done(event, output_arrow=event.data)
+                batches += 1
+                if batches == 3:
+                    node.stop()
+
+    assert _wait_committed(input_settings, {0: 6}) == {0: 6}
+
+    raw_consumer.subscribe([kafka_output_topic])
+    ids: list[str] = []
+    deadline = time.monotonic() + 10
+    while len(ids) < 6 and time.monotonic() < deadline:
+        msg = raw_consumer.poll(1.0)
+        if msg is not None and not msg.error() and (value := msg.value()):
+            ids.append(orjson.loads(value)["id"])
+    assert sorted(ids) == [str(i) for i in range(6)]
+
+
+def test_commit_and_close_do_not_wait_for_a_concurrent_poll(
+    input_settings: KafkaInputSettings,
+    kafka_input_topic: str,
+    raw_producer: Producer,
+):
+    """A node's read-ahead thread polls while the loop commits and, at exit,
+    closes. Neither may wait for that poll's batch timeout."""
+    _produce(raw_producer, kafka_input_topic, ["a", "b"])
+    consumer = KafkaConsumer.from_input_settings(input_settings)
+    batch, _ = _ids(consumer, 2)
+
+    def poll_until_closed() -> None:
+        with contextlib.suppress(RuntimeError):  # "consumer is closed"
+            consumer.read_arrow(timeout=10, num_messages=100)
+
+    poller = threading.Thread(target=poll_until_closed)
+    poller.start()
+    time.sleep(0.3)
+
+    started = time.monotonic()
+    consumer.commit(batch)
+    assert time.monotonic() - started < 1
+
+    started = time.monotonic()
+    consumer.close()
+    poller.join(timeout=5)
+    assert time.monotonic() - started < 2
+    assert not poller.is_alive()

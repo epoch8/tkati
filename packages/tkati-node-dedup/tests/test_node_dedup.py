@@ -6,11 +6,11 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
 from prometheus_client import REGISTRY
-from tkati_core import Node
+from tkati_core import DeliveryError, PipelinedNode
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
-from tkati_core.testing import memory_node
+from tkati_core.testing import memory_pipelined_node
 from tkati_node_dedup.main import _PHASES, run
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
@@ -75,7 +75,7 @@ def _run(test_settings: AppSettings, store: BucketedDedupStore) -> None:
     """Run the node over everything already in the input topic, then stop.
     Each call is a fresh consumer in the same group, so a second call resumes
     from the first one's commit — as a restart would."""
-    node = Node(
+    node = PipelinedNode(
         _make_consumer(test_settings),
         _make_producer(test_settings),
         batch_size=test_settings.input.consumer.batch_size,
@@ -219,30 +219,30 @@ def _store(tmp_path) -> BucketedDedupStore:
     return BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
 
 
-def _run_memory(store: BucketedDedupStore, node: Node) -> None:
+def _run_memory(store: BucketedDedupStore, node: PipelinedNode) -> None:
     with node:
         run(node, store, "uid")
 
 
-def test_crash_before_flush_does_not_mark_seen_or_commit(tmp_path) -> None:
-    """If produce/flush fails, the key must not be marked seen and the batch
-    must be rewound rather than committed — re-processing the same message
+def test_failed_delivery_does_not_mark_seen_or_commit(tmp_path) -> None:
+    """If delivery fails, the key must not be marked seen and the batch must
+    be rewound rather than committed — re-processing the same message
     afterward must not treat it as a duplicate."""
     table = pa.table({"uid": ["crash-uid"], "val": [1]})
     store = _store(tmp_path)
 
-    node, consumer, _ = memory_node(
-        [table], phases=_PHASES, fail_flush=RuntimeError("boom")
-    )
-    with pytest.raises(RuntimeError, match="boom"):
+    node, consumer, producer = memory_pipelined_node([table], phases=_PHASES)
+    assert producer is not None
+    producer.fail(1, DeliveryError("gave up"))
+    with pytest.raises(DeliveryError, match="gave up"):
         _run_memory(store, node)
 
     assert consumer.commits == []
     assert consumer.rewinds == [0]
     assert store.contains(b"crash-uid") is False
 
-    # Simulate a restart: same batch re-read, this time produce succeeds.
-    node, consumer, producer = memory_node([table], phases=_PHASES)
+    # Simulate a restart: same batch re-read, this time delivery succeeds.
+    node, consumer, producer = memory_pipelined_node([table], phases=_PHASES)
     _run_memory(store, node)
 
     assert producer is not None
@@ -257,7 +257,7 @@ def test_keys_are_marked_seen_after_delivery_and_commit(tmp_path, monkeypatch) -
     """Deliver, commit, then mark seen: never mark a key seen before its row
     is delivered."""
     store = _store(tmp_path)
-    node, consumer, _ = memory_node(
+    node, consumer, _ = memory_pipelined_node(
         [pa.table({"uid": ["a"], "val": [1]})], phases=_PHASES
     )
     add_many = store.add_many
@@ -269,8 +269,68 @@ def test_keys_are_marked_seen_after_delivery_and_commit(tmp_path, monkeypatch) -
     monkeypatch.setattr(store, "add_many", logged_add_many)
     _run_memory(store, node)
 
-    assert consumer.log[:5] == ["read:0", "produce", "flush", "commit:0", "mark-seen"]
+    assert consumer.log[:4] == ["read:0", "produce", "commit:0", "mark-seen"]
     assert store.contains(b"a") is True
+    store.close()
+
+
+def test_a_key_in_flight_is_a_duplicate_for_the_next_batch(tmp_path) -> None:
+    """Batch 0's key isn't in the store until batch 0 is committed, but batch
+    1 must still drop it: cross-batch dedup stays exact while deliveries are
+    in flight."""
+    store = _store(tmp_path)
+    node, consumer, producer = memory_pipelined_node(
+        [
+            pa.table({"uid": ["a"], "val": [1]}),
+            pa.table({"uid": ["a", "b"], "val": [2, 3]}),
+        ],
+        phases=_PHASES,
+        deliver="manual",
+    )
+    assert producer is not None
+    producer.on_wait = producer.release  # delivered only at the drain on exit
+    _run_memory(store, node)
+
+    uids = [
+        t.column("uid").to_pylist() for t in producer.sent if isinstance(t, pa.Table)
+    ]
+    assert uids == [["a"], ["b"]]
+    assert consumer.commits == [0, 1]
+    assert store.contains(b"a") and store.contains(b"b")
+    store.close()
+
+
+def test_a_crash_with_batches_in_flight_resends_them_after_restart(tmp_path) -> None:
+    """Killed with batches sent but not yet delivered or committed: their keys
+    never reached the store, so the re-read sends them again. A duplicate at
+    worst, never a loss."""
+    tables = [
+        pa.table({"uid": ["a"], "val": [1]}),
+        pa.table({"uid": ["b"], "val": [2]}),
+    ]
+    store = _store(tmp_path)
+
+    node, consumer, producer = memory_pipelined_node(
+        tables, phases=_PHASES, deliver="manual"
+    )
+    assert producer is not None
+
+    def killed(tag: int) -> None:
+        raise KeyboardInterrupt
+
+    producer.on_wait = killed
+    with pytest.raises(KeyboardInterrupt):
+        _run_memory(store, node)
+
+    assert consumer.commits == []
+    assert not store.contains(b"a") and not store.contains(b"b")
+
+    node, consumer, producer = memory_pipelined_node(tables, phases=_PHASES)
+    _run_memory(store, node)
+
+    assert producer is not None
+    assert len(producer.sent) == 2
+    assert consumer.commits == [0, 1]
     store.close()
 
 
@@ -281,7 +341,7 @@ def test_idle_event_runs_store_cleanup(tmp_path, monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(store, "cleanup_expired", lambda: calls.append("cleanup"))
 
-    node, _, _ = memory_node([None, None], phases=_PHASES)
+    node, _, _ = memory_pipelined_node([None, None], phases=_PHASES)
     _run_memory(store, node)
 
     assert calls == ["cleanup", "cleanup"]
@@ -300,7 +360,7 @@ def test_dropped_rows_are_counted(tmp_path) -> None:
     store = _store(tmp_path)
 
     before = _dropped_rows_total()
-    node, consumer, producer = memory_node([table], phases=_PHASES)
+    node, consumer, producer = memory_pipelined_node([table], phases=_PHASES)
     _run_memory(store, node)
     assert _dropped_rows_total() - before == 1
     assert producer is not None
@@ -310,7 +370,7 @@ def test_dropped_rows_are_counted(tmp_path) -> None:
     assert consumer.commits == [0]
 
     # Same batch again: every row is now a cross-batch duplicate.
-    node, _, producer = memory_node([table], phases=_PHASES)
+    node, _, producer = memory_pipelined_node([table], phases=_PHASES)
     _run_memory(store, node)
     assert _dropped_rows_total() - before == 4
     assert producer is not None
@@ -326,8 +386,10 @@ def test_failed_batch_does_not_count_dropped_rows(tmp_path) -> None:
     store = _store(tmp_path)
 
     before = _dropped_rows_total()
-    node, _, _ = memory_node([table], phases=_PHASES, fail_flush=RuntimeError("boom"))
-    with pytest.raises(RuntimeError, match="boom"):
+    node, _, producer = memory_pipelined_node([table], phases=_PHASES)
+    assert producer is not None
+    producer.fail(1, DeliveryError("gave up"))
+    with pytest.raises(DeliveryError):
         _run_memory(store, node)
     assert _dropped_rows_total() == before
 

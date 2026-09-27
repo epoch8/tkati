@@ -3,7 +3,7 @@ import time
 import orjson
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
-from tkati_core import Node
+from tkati_core import PipelinedNode
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
@@ -72,7 +72,7 @@ def test_node_el_kafka_json_roundtrip_preserves_types(
     kafka_producer.flush()
 
     assert isinstance(kafka_test_settings.output, KafkaOutputSettings)
-    node = Node(
+    node = PipelinedNode(
         _make_consumer(kafka_test_settings),
         KafkaProducer.from_output_settings(kafka_test_settings.output),
         batch_size=kafka_test_settings.input.consumer.batch_size,

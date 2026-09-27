@@ -1,3 +1,104 @@
+# Migrating from v0.7.x to v0.8.0
+
+## Breaking changes in `tkati-core`
+
+### `Node` is renamed to `SyncNode`
+
+The harness class is now `SyncNode`, with the same API and behaviour.
+`done()` still returns once the batch is committed. There is no `Node`
+alias: the name now says which of the two node classes you chose.
+
+```python
+# before
+from tkati_core import Node
+
+with Node.from_settings(settings) as node:
+    ...
+
+# after
+from tkati_core import SyncNode
+
+with SyncNode.from_settings(settings) as node:
+    ...
+```
+
+Rename type annotations too (`def run(node: SyncNode, ...)`).
+`tkati_core.testing.memory_node` returns a `SyncNode`.
+
+### `Producer` implementations take a delivery tag
+
+Only code that implements `Producer` itself is affected; callers are not.
+`produce_arrow` and `produce_pylist` gain a keyword argument, and there is a
+new abstract method:
+
+```python
+def produce_arrow(self, data, stats=None, tag: int | None = None) -> None: ...
+def produce_pylist(self, rows, stats=None, tag: int | None = None) -> None: ...
+def wait_delivered(self, tag: int, timeout: float | None = None) -> bool: ...
+```
+
+`wait_delivered` returns `True` once every message produced with `tag` is
+delivered, `False` on timeout, and raises `DeliveryError` if one failed. A
+producer whose produce calls finish only once the sink has accepted the data
+can return `True` at once, as `ClickhouseProducer` does.
+
+### Custom `phases=` tuples need `wait/input`
+
+A node that passes its own `phases=` to `SyncNode` must include the new
+`"wait/input"` phase, or construction raises `ValueError`:
+
+```python
+PHASES = (*CONSUMER_PHASES, "wait/input", "lookup", *PRODUCER_PHASES, "commit")
+```
+
+`DEFAULT_PHASES` and `SINK_PHASES` already include it.
+
+### Read-ahead is on by default
+
+`SyncNode.from_settings` now reads one batch ahead on a background thread
+(`[pipeline] read_ahead = 1`). Node code needs no change. Set
+`read_ahead = 0` to get the 0.7.x behaviour back. `SyncNode(...)` constructed
+directly defaults to 0.
+
+### Delivery failures now fail the batch
+
+A Kafka message that the broker rejects, or that librdkafka gives up on, now
+raises `DeliveryError` from `done()` (either node class), and the batch is rewound. Before
+0.8.0 it was silently committed and its rows were lost. A node that used to
+keep running through such failures now stops on the first one.
+
+## New in v0.8.0
+
+### Moving a node to `PipelinedNode`
+
+`PipelinedNode` is new, and faster, but it is not a drop-in replacement: its
+`done()` returns before the batch is committed. Code after `done()` that
+relies on the commit having happened must move into `after_commit=`:
+
+```python
+# SyncNode
+node.done(event, output_arrow=kept)
+store.add_many(keys)                  # runs after the commit
+
+# PipelinedNode
+node.done(event, output_arrow=kept, after_commit=partial(store.add_many, keys))
+```
+
+Anything the next batches must see before that commit (for example keys
+already sent, for dedup) has to be tracked by the node itself until the
+callback runs. A node with no work after `done()` only changes its class.
+Custom `phases=` tuples add `"wait/in-flight"`; `PIPELINED_PHASES` is the
+default.
+
+## The nodes
+
+`tkati-node-el` and `tkati-node-dedup` need no configuration changes. They now
+run on `PipelinedNode`, with an optional `[pipeline]` section (`read_ahead`,
+default 1; `max_in_flight`, default 4). Their perf line and `/metrics` gain the
+`wait/input` and `wait/in-flight` phases, and a Kafka output's
+`producer/deliver` now reads 0, because acks are no longer waited for per
+batch.
+
 # Migrating from v0.6.0 to v0.7.0
 
 `tkati-core` has no breaking changes. Its new API (`Node`, `NodeSettings`,

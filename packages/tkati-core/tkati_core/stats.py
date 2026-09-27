@@ -67,20 +67,24 @@ class LoopStats:
     _total_rows_out: int = field(default=0, init=False, repr=False)
     _total_iterations: int = field(default=0, init=False, repr=False)
     _total_starved: int = field(default=0, init=False, repr=False)
-    # Taken by `reset()` and `totals()` only — `totals()` is called from a
-    # metrics server thread. Without it a scrape could land between the fold
-    # and the zeroing in `reset()` and see an interval counted twice or not at
-    # all, and a counter that jumps backwards reads as a restart to
-    # Prometheus. `record()` and the `+=` on the counters above deliberately
-    # don't take it: each is a single dict or int update the GIL already makes
-    # atomic, so a scrape sees either the old value or the new one, and the hot
-    # path stays lock-free.
+    # Taken by `reset()`, `totals()` and `record()`. `totals()` is called from
+    # a metrics server thread: without the lock a scrape could land between
+    # the fold and the zeroing in `reset()` and see an interval counted twice
+    # or not at all, and a counter that jumps backwards reads as a restart to
+    # Prometheus. `record()` takes it because phases are also recorded from a
+    # node's read-ahead thread: its get-then-set could otherwise straddle a
+    # `reset()` on the loop thread and write a stale sum into the new
+    # interval. It runs a few times per batch, so the lock costs nothing that
+    # shows. The `+=` on the counters above don't take it: only the loop
+    # thread updates them, and each is a single int update the GIL makes
+    # atomic, so a scrape sees either the old value or the new one.
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
 
     def record(self, phase: str, seconds: float) -> None:
-        self.phase_sec[phase] = self.phase_sec.get(phase, 0.0) + seconds
+        with self._lock:
+            self.phase_sec[phase] = self.phase_sec.get(phase, 0.0) + seconds
 
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:

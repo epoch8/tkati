@@ -1,3 +1,38 @@
+# 0.8.0
+
+* New `PipelinedNode`: `done()` returns before delivery and takes
+  `after_commit=`; batches are committed in read order once delivered, with
+  at most `max_in_flight` (`[pipeline]`, default 4) waiting. New
+  `PIPELINED_PHASES`, and a `wait/in-flight` phase it requires.
+* `tkati_core.testing`: `memory_pipelined_node`; `MemoryProducer` gains
+  `deliver="manual"`, `release`, `fail`, `on_wait` and `waited_on`, and logs
+  `wait:<tag>` only for waits that may block.
+* Read-ahead: `SyncNode(..., read_ahead=n)` reads up to `n` batches on a
+  background thread while the loop body works. `from_settings` takes it from
+  the new `[pipeline]` section (`PipelineSettings`, default `read_ahead = 1`);
+  direct construction defaults to 0.
+* **Breaking for custom `phases=` tuples:** `wait/input` (time the loop waited
+  for the reader) is now required, and is part of `DEFAULT_PHASES` and
+  `SINK_PHASES`.
+* `KafkaConsumer`: its batch numbering and ordering check are thread-safe. The
+  native consumer lets `commit`/`rewind` run while another thread polls, and
+  `close()` interrupts such a poll within one `POLL_STEP`.
+* `LoopStats.record` takes the stats lock.
+* **Breaking:** `Node` is renamed to `SyncNode`, with the same API. There is
+  no alias.
+* **Breaking for `Producer` implementations:** `produce_arrow` and
+  `produce_pylist` take `tag: int | None = None`, and `wait_delivered(tag,
+  timeout=None)` is a new abstract method.
+* **Fixed:** a Kafka message that failed delivery (rejected by the broker, or
+  given up on by librdkafka) no longer lets its batch be committed.
+  `SyncNode.done()` waits on the batch's tag after the flush and raises
+  `DeliveryError`, so the batch is rewound. New export: `DeliveryError`.
+* **Fixed:** `KafkaProducer.flush()` no longer takes at least 100 ms. It
+  waits on the delivery reports instead of librdkafka's flush, which with a
+  threaded producer only returned once its whole 100 ms step had passed.
+* `tkati_core._native`: `NativeProducer.enqueue(batch, tag=0)`,
+  `NativeProducer.wait_delivered(tag, timeout=None)`, `DeliveryError`.
+
 # 0.7.0
 
 * New `Node` (`tkati_core.node`): the worker loop harness.

@@ -92,7 +92,12 @@ class ClickhouseProducer(Producer):
             split_factor=settings.dlq_split_factor,
         )
 
-    def produce_arrow(self, data: pa.Table, stats: LoopStats | None = None) -> None:
+    def produce_arrow(
+        self,
+        data: pa.Table,
+        stats: LoopStats | None = None,
+        tag: int | None = None,
+    ) -> None:
         # All of it is `deliver`: clickhouse_connect serializes and sends inside
         # one call, so there is no seam to put `serialize`/`enqueue` on. That
         # includes the retry and DLQ fallback, whose own producer is deliberately
@@ -121,11 +126,22 @@ class ClickhouseProducer(Producer):
                 )
                 self._dlq_producer.flush()
 
-    def produce_pylist(self, rows: list[dict], stats: LoopStats | None = None) -> None:
+    def produce_pylist(
+        self,
+        rows: list[dict],
+        stats: LoopStats | None = None,
+        tag: int | None = None,
+    ) -> None:
         stats = stats if stats is not None else LoopStats(phases=())
         with stats.phase("producer/serialize"):
             table = pa.Table.from_pylist(rows)
         self.produce_arrow(table, stats=stats)
+
+    def wait_delivered(self, tag: int, timeout: float | None = None) -> bool:
+        """Always True: an insert has either succeeded or raised by the time
+        `produce_arrow` returns, so there is nothing to wait for. `tag` is
+        accepted by the produce methods only to match `Producer`."""
+        return True
 
     def flush(self, stats: LoopStats | None = None) -> None:
         """No-op: ClickHouse inserts are synchronous, nothing to flush. Their

@@ -12,6 +12,64 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.0
+
+### onvqqtpt — PipelinedNode [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- New `PipelinedNode`, a sibling of `SyncNode` (not a subclass). Its `done()`
+  sends the output and returns without waiting for delivery; batches are
+  committed later, in read order, once delivered. Work that must follow the
+  commit goes in `done(..., after_commit=fn)`. `[pipeline] max_in_flight`
+  (default 4) caps how many finished batches may wait, and `done()` blocks
+  past it (`wait/in-flight`). A clean exit or stop drains and commits them.
+- node-el and node-dedup run on `PipelinedNode`. node-dedup checks new batches
+  against the keys sent in uncommitted batches as well as the store, so
+  cross-batch dedup stays exact, and marks keys seen in `after_commit`.
+- `tkati_core.testing`: `memory_pipelined_node`, and `MemoryProducer`
+  `deliver="manual"` with `release`/`fail`/`on_wait`.
+- `benchmarks/bench_node_pipeline.py`: node-el's loop, Kafka to Kafka, 200k
+  rows in batches of 1000 against local Redpanda: `SyncNode` ~90k rows/s,
+  with read-ahead ~97k, `PipelinedNode` ~128k.
+- Design doc: `design-docs/2026-09-26-pipelined-worker-loop.md` (Phase C).
+
+### skswwwqq — Read-ahead [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- Nodes built with `from_settings` read the next batch on a background thread
+  while the loop body processes the current one. `[pipeline] read_ahead`
+  (default 1; 0 turns it off) sets how many batches may wait. `done()` is
+  unchanged, and batches read ahead but not handed out are never committed.
+- New phase `wait/input`: time the loop waited for the reader. It is a
+  required column, so custom `phases=` tuples add it (node-dedup's does).
+- The native consumer takes a read lock for polling, committing and seeking,
+  so a commit no longer waits for a poll on another thread. `close()` stops a
+  concurrent poll within one 100 ms step instead of waiting out its batch
+  timeout. `LoopStats.record` takes the stats lock, since the reader records
+  phases too.
+- Design doc: `design-docs/2026-09-26-pipelined-worker-loop.md` (Phase B).
+
+### klmnkqvx — Per-message Kafka delivery reports [tkati-core, repo]
+
+- The native producer records every delivery report against the tag its
+  message was sent with. `Producer.produce_arrow` / `produce_pylist` take
+  `tag=`, and the new `Producer.wait_delivered(tag, timeout)` raises
+  `DeliveryError` if any of that tag's messages failed.
+- `SyncNode.done()` tags each batch's output and checks it after the flush.
+  Before, a message the broker rejected or librdkafka gave up on still let
+  `flush()` return, and the batch was committed: those rows were lost.
+- `KafkaProducer.flush()` waits on those delivery reports instead of calling
+  librdkafka's flush. That one returned only after its full 100 ms step,
+  because the producer's background thread had already served the reports,
+  so every flush (one per batch in both nodes, since 0.5.0) cost at least
+  100 ms. It now takes as long as the deliveries do: about 6 ms for a
+  1000-row batch against a local broker.
+- Design doc: `design-docs/2026-09-26-pipelined-worker-loop.md` (Phase A).
+
+### pkzwpzlm — Rename Node to SyncNode [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- `tkati_core.Node` is renamed to `SyncNode`, with no alias, ahead of a
+  sibling `PipelinedNode`. The shared parts move to a private `_NodeBase`.
+  Migration notes: `MIGRATION.md`.
+
 ## 0.7.0
 
 ### nxsrlkrt — Worker loop harness [tkati-core, tkati-node-el, tkati-node-dedup, repo]

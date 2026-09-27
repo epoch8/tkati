@@ -88,7 +88,7 @@ Every 10 seconds the node logs where its wall clock went, using
 
 ```
 perf over 10s: 157000 rows in, 153880 out (3120 dropped), 157 iterations (0 input-starved)
-perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) write=0.21s (2%) commit=0.38s (4%)
+perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/input=0.21s (2%) lookup=0.52s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=1.12s (11%) write=0.21s (2%) commit=0.38s (4%)
 ```
 
 `dropped` is the rows this node deduplicated away.
@@ -102,12 +102,19 @@ perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) lookup=0.52s (5%) prod
 * `producer/serialize`: converting the surviving rows to JSON (or to Arrow IPC
   for `arrow-batch`).
 * `producer/enqueue`: handing each encoded message to librdkafka.
-* `producer/deliver`: the blocking `flush`, i.e. waiting for broker acks that
-  hadn't arrived by the end of `enqueue`. A ClickHouse output records its
-  whole insert here.
-* `write`: marking the surviving keys seen.
-* `commit`: the synchronous offset commit, plus bucket cleanup, which is ~0
-  except once an hour when a bucket is destroyed.
+* `producer/deliver`: a ClickHouse output records its whole insert here. A
+  Kafka output doesn't wait for acks per batch, so it reads 0; see
+  `wait/in-flight`.
+* `write`: marking the surviving keys seen, once their batch is committed.
+* `commit`: the offset commit, plus bucket cleanup, which is ~0 except once
+  an hour when a bucket is destroyed.
+* `wait/input`: time the loop waited for the next batch from its read-ahead
+  thread. High means the node is input-bound.
+* `wait/in-flight`: time `done()` waited because `[pipeline] max_in_flight`
+  batches were still undelivered. High means the node is output-bound.
+
+`consumer/poll` and `consumer/parse` run on the read-ahead thread, at the same
+time as the rest, so the percentages can add up to more than 100.
 
 The `consumer/` and `producer/` phases are timed by `tkati-core` rather than by
 this node, which splices them in from `CONSUMER_PHASES` and `PRODUCER_PHASES`.
@@ -163,16 +170,23 @@ benchmark:
 
 ## Delivery & dedup guarantees
 
-**Delivery: at-least-once.** For each batch the node (1) produces the
-filtered batch and waits until it is confirmed delivered, (2) commits the
+**Delivery: at-least-once.** The node runs on `tkati-core`'s
+`PipelinedNode`: it sends a batch and moves on to the next one while the
+first is still being delivered. For each batch it (1) produces the filtered
+batch, (2) once that batch and every earlier one is delivered, commits the
 input offsets, and only then (3) records the surviving keys in the current
-RocksDB bucket. A key is never marked seen before its row is delivered, which
-is what guarantees no event is lost. A crash before (2) re-reads the batch at
-restart and produces it again, which is a duplicate at worst. A crash between
-(2) and (3) leaves those keys unmarked, so a later duplicate of one of them is
-forwarded, which is also a duplicate at worst. That window is one memtable
-write wide, much narrower than the loss the WAL-off store already accepts
-(below).
+RocksDB bucket. Until then the keys are held in memory as *pending*, and the
+next batches are checked against them as well as the store, so a key sent in
+one batch is dropped from the next even before the first is delivered.
+
+A key is never marked seen before its row is delivered, which is what
+guarantees no event is lost. A crash before (2) loses the pending keys along
+with the uncommitted offsets, so the batches are re-read and produced again: a
+duplicate at worst. A crash between (2) and (3) leaves those keys unmarked, so
+a later duplicate of one of them is forwarded, also a duplicate at worst. That
+window is one memtable write wide, much narrower than the loss the WAL-off
+store already accepts (below). Up to `[pipeline] max_in_flight` batches
+(default 4) may wait for delivery at once.
 
 **The dedup store is not crash-durable, by design.** With `disable_wal`
 (the default) writes go to a volatile memtable, so a hard kill can lose up to

@@ -6,12 +6,12 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
-from tkati_core import Node
+from tkati_core import PipelinedNode
 from tkati_core.clickhouse.producer import ClickhouseProducer
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.producer import Producer as ProducerBase
-from tkati_core.testing import memory_node
+from tkati_core.testing import memory_pipelined_node
 from tkati_node_el.main import run
 from tkati_node_el.settings import AppSettings
 
@@ -31,7 +31,7 @@ def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
 
 def _run(test_settings: AppSettings, producer: ProducerBase) -> None:
     """Run the node over everything already in the input topic, then stop."""
-    node = Node(
+    node = PipelinedNode(
         _make_consumer(test_settings),
         producer,
         batch_size=test_settings.input.consumer.batch_size,
@@ -110,7 +110,7 @@ def test_node_el_malformed_data(
 
 def test_every_batch_is_sent_unchanged() -> None:
     tables = [pa.table({"uid": ["a", "b"]}), pa.table({"uid": ["c"]})]
-    node, consumer, producer = memory_node(tables)
+    node, consumer, producer = memory_pipelined_node(tables)
     with node:
         run(node)
 

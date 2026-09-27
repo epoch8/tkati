@@ -27,6 +27,12 @@ use crate::encode::Messages;
 use crate::payloads::Payloads;
 
 create_exception!(_native, KafkaError, PyException, "An error reported by librdkafka.");
+create_exception!(
+    _native,
+    DeliveryError,
+    PyException,
+    "A produced message could not be delivered."
+);
 
 fn kafka_err(err: rdkafka::error::KafkaError) -> PyErr {
     KafkaError::new_err(err.to_string())
@@ -297,9 +303,36 @@ impl NativeProducer {
         })
     }
 
-    fn enqueue(&self, py: Python<'_>, batch: Py<EncodedBatch>) -> PyResult<()> {
+    /// Hand the batch's messages to librdkafka, tagged with `tag` so
+    /// `wait_delivered(tag)` can wait for them. 0 leaves them untracked.
+    #[pyo3(signature = (batch, tag=0))]
+    fn enqueue(&self, py: Python<'_>, batch: Py<EncodedBatch>, tag: usize) -> PyResult<()> {
         let batch = batch.get();
-        py.detach(|| self.inner.enqueue(&batch.messages)).map_err(kafka_err)
+        py.detach(|| self.inner.enqueue(&batch.messages, tag))
+            .map_err(kafka_err)
+    }
+
+    /// Wait until every message enqueued with `tag` is delivered: True once
+    /// they are, False if `timeout` seconds pass first (None waits forever,
+    /// 0 only checks). Raises DeliveryError as soon as one has failed.
+    /// Checks for signals between waits.
+    #[pyo3(signature = (tag, timeout=None))]
+    fn wait_delivered(&self, py: Python<'_>, tag: usize, timeout: Option<f64>) -> PyResult<bool> {
+        let deadline = timeout.map(|t| Instant::now() + Duration::from_secs_f64(t.max(0.0)));
+        loop {
+            let step = deadline.map_or(kafka::POLL_STEP, |d| {
+                d.saturating_duration_since(Instant::now()).min(kafka::POLL_STEP)
+            });
+            match py.detach(|| self.inner.wait_delivered(tag, step)) {
+                Some(Ok(())) => return Ok(true),
+                Some(Err(error)) => return Err(DeliveryError::new_err(error)),
+                None => {}
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(false);
+            }
+            py.check_signals()?;
+        }
     }
 
     /// Block until every enqueued message is delivered (or has failed),
@@ -324,5 +357,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeProducer>()?;
     m.add_function(wrap_pyfunction!(encode_arrow, m)?)?;
     m.add("KafkaError", m.py().get_type::<KafkaError>())?;
+    m.add("DeliveryError", m.py().get_type::<DeliveryError>())?;
     Ok(())
 }

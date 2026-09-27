@@ -51,29 +51,28 @@ broker = "localhost:9092"
 
 ## Usage
 
-### `Node` — the worker loop harness
+### `SyncNode` — the worker loop harness
 
-`tkati_core.Node` runs a node's loop. It owns the input, the output, the DLQ,
+`tkati_core.SyncNode` runs a node's loop. It owns the input, the output, the DLQ,
 `LoopStats`, the metrics server, signal handling and shutdown. Node code is a
 `for` loop over `node.consume_arrow()` or `node.consume_pylist()`, which
 yield a `Batch` for each batch read and `Idle` when a poll comes back empty.
 
 ```python
-from tkati_core import Batch, Node, NodeSettings
+from tkati_core import Batch, NodeSettings, SyncNode
 
 
-class AppSettings(NodeSettings):
-    ...  # the node's own sections
+class AppSettings(NodeSettings): ...  # the node's own sections
 
 
-def run(node: Node) -> None:
+def run(node: SyncNode) -> None:
     for event in node.consume_arrow():
         if isinstance(event, Batch):
             node.done(event, output_arrow=transform(event.data))
 
 
 def main() -> None:
-    with Node.from_settings(AppSettings()) as node:
+    with SyncNode.from_settings(AppSettings()) as node:
         run(node)
 ```
 
@@ -122,7 +121,62 @@ node's own resources belong in the same `with` statement.
 counts iterations, starved iterations and rows in and out itself. A node
 times its own work with `node.phase("name")` and passes the full report order
 as `phases=` (the default is `DEFAULT_PHASES`). That tuple must include every
-phase the harness times.
+phase the harness times, `wait/input` among them.
+
+**Read-ahead.** `from_settings` reads the next batch in the background while
+the loop body processes the current one, on a thread of the node's own. It is
+configured by the `[pipeline]` section:
+
+```toml
+[pipeline]
+read_ahead = 1   # batches read ahead; 0 reads on the loop thread, as before
+```
+
+Nothing changes for node code: `done()` still commits before it returns, and
+it commits the batch's own offsets, never a batch still waiting in the queue.
+A stop drops the batches read ahead without committing them, so they are read
+again after a restart. Time the loop spends waiting for the reader is
+`wait/input`. The reader records `consumer/poll` and `consumer/parse` while
+the loop works, so with read-ahead those phases overlap the others, and the
+percentages can add up to more than 100. Constructing a `SyncNode` directly
+defaults to `read_ahead=0`.
+
+**`PipelinedNode`.** A sibling of `SyncNode` for nodes that shouldn't wait for
+each batch's delivery. Its `done()` sends the output and returns at once; the
+batch is committed later, on the loop thread, once its output and every
+earlier batch's output is delivered, in read order. So **the lines after
+`done()` run before the commit**. Work that must follow the commit goes in a
+callback:
+
+```python
+from functools import partial
+
+with PipelinedNode.from_settings(settings) as node:
+    for event in node.consume_arrow():
+        if isinstance(event, Batch):
+            kept, keys = dedupe(event.data)
+            node.done(event, output_arrow=kept, after_commit=partial(mark_seen, keys))
+```
+
+`after_commit` runs after that batch's commit, between events or inside a
+later `done()`, never at the same time as the loop body, and never for a batch
+that isn't committed. Up to `[pipeline] max_in_flight` finished batches
+(default 4) may wait for delivery; past that, `done()` blocks until the oldest
+is delivered and committed, timed as `wait/in-flight`. A failed delivery raises
+`DeliveryError` from a later `done()` or event request, and the oldest
+uncommitted batch is rewound. A clean exit, or a stop, waits for every
+finished batch to be delivered and commits it; `KeyboardInterrupt` doesn't.
+
+Choose `SyncNode` when the code after `done()` must see the batch committed,
+or throughput doesn't matter; choose `PipelinedNode` when it does, and move
+that code into `after_commit`. The two classes are deliberately unrelated
+types, so a function written for one (`def run(node: SyncNode)`) doesn't
+type-check with the other. `PipelinedNode` requires `wait/in-flight` in any
+custom `phases=` tuple (`PIPELINED_PHASES` is its default).
+
+Against a local Redpanda, node-el's loop moved 200k JSON rows in batches of
+1000 at about 90k rows/s with `SyncNode`, 97k with read-ahead, and 128k with
+`PipelinedNode` (`benchmarks/bench_node_pipeline.py`).
 
 **Nodes without an output producer.** `NodeSettings.output` is optional. When
 it's absent, the node has no producer (`producer=None`), and passing
@@ -132,22 +186,29 @@ which commits the batch, and reports the rows it wrote with
 `node.done(event, rows_out=n)`:
 
 ```python
-def run(node: Node, client: ApiClient) -> None:
+def run(node: SyncNode, client: ApiClient) -> None:
     for event in node.consume_arrow():
         if isinstance(event, Batch):
             with node.phase("upload"):
                 client.upload(event.data)  # returns once the API accepted it
             node.done(event, rows_out=len(event.data))
 
-# phases=(*CONSUMER_PHASES, "upload", "commit"); SINK_PHASES is the default.
+
+# phases=(*CONSUMER_PHASES, "wait/input", "upload", "commit"); SINK_PHASES is
+# the default.
 ```
 
-**Testing.** `tkati_core.testing.memory_node(batches)` returns a `Node` over
+**Testing.** `tkati_core.testing.memory_node(batches)` returns a `SyncNode` over
 an in-memory consumer and producer, along with those two doubles. They record
 what was read, sent, flushed, committed and rewound, in one shared `log`, and
-the loop ends once `batches` runs out. For tests against a real broker,
-construct `Node(consumer, producer, ..., stop_when_idle=True)`: it processes
-what is already in the topic and stops at the first empty poll.
+the loop ends once `batches` runs out. `memory_pipelined_node(batches,
+deliver="manual")` does the same for a `PipelinedNode`, with a producer that
+holds deliveries until the test calls `producer.release(tag)` (or
+`producer.fail(tag, error)`), so a test can hold them back or release them out
+of order; `producer.on_wait` runs whenever the node blocks on one. For tests
+against a real broker, construct `SyncNode(consumer, producer, ...,
+stop_when_idle=True)` (or `PipelinedNode`): it processes what is already in
+the topic and stops at the first empty poll.
 
 ### `Consumer` / `Producer` base classes
 
@@ -171,6 +232,17 @@ Committing or rewinding anything but the oldest outstanding batch raises
 implement `Producer`. This is what lets a generic node pick its input/output kind
 from config instead of hardcoding a concrete class.
 
+**Delivery.** `produce_arrow` and `produce_pylist` take an optional `tag=`,
+which groups the messages you want to wait for together (the node harness tags
+each input batch's output). `producer.wait_delivered(tag, timeout)` returns
+`True` once all of them are acked, and `False` if `timeout` seconds pass
+first; `None` waits as long as it takes, and `0` only checks. It raises
+`DeliveryError` as soon as one of them failed, for example a message the
+broker rejected or librdkafka gave up on. `flush()` alone doesn't tell you
+that: it returns once nothing is in flight, delivered or not.
+`ClickhouseProducer` inserts synchronously, so its `wait_delivered` is always
+`True`.
+
 ### `LoopStats` — where a node's wall clock went
 
 `tkati_core.stats.LoopStats` accumulates per-phase timings across a node's loop
@@ -179,7 +251,7 @@ the log prefix and the cadence are all constructor arguments, because nodes
 have different pipelines — a dedup node has lookup and write phases an
 extract/load node does not.
 
-A `Node` does all of this for you. The loop below is what it runs, and is for
+A `SyncNode` does all of this for you. The loop below is what it runs, and is for
 code that drives a consumer and producer by hand.
 
 ```python
@@ -255,7 +327,9 @@ makes two consecutive lines comparable.
 
 Percentages are of the interval rather than of each other, so they do **not**
 sum to 100 — the shortfall is time in none of the named phases, which keeps
-unaccounted work visible. Track `starved_iterations` for iterations that were
+unaccounted work visible. (With a node's read-ahead, the consumer phases run
+on another thread and overlap the rest, so the sum can exceed 100; see
+`wait/input` for the time the loop actually waited.) Track `starved_iterations` for iterations that were
 blocked waiting on input: `consumer/poll` blocks until the batch fills or the timeout
 expires, so on an under-fed node it approaches 100% and nothing else on the
 line means anything.
@@ -311,7 +385,7 @@ if you serve metrics yourself.
 
 `tkati_core.settings` defines `InputSettings`/`OutputSettings` (discriminated unions
 over every input/output kind `tkati-core` implements), and `NodeSettings`, the
-`input`/`output`/`dlq`/`metrics` sections `Node.from_settings` reads. Use those aliases with the
+`input`/`output`/`dlq`/`metrics` sections `SyncNode.from_settings` reads. Use those aliases with the
 factory helpers in `tkati_core.consumer` and `tkati_core.producer`, or import the
 helpers from the top-level `tkati_core` package for convenience.
 
@@ -319,9 +393,11 @@ helpers from the top-level `tkati_core` package for convenience.
 from tkati_core import InputSettings, OutputSettings, build_consumer, build_producer
 from tkati_core.settings import TomlBaseSettings
 
+
 class AppSettings(TomlBaseSettings):
     input: InputSettings
     output: OutputSettings
+
 
 settings = AppSettings()
 consumer = build_consumer(settings.input)
@@ -344,11 +420,15 @@ from tkati_core.settings import TomlBaseSettings
 from tkati_core.kafka.settings import KafkaInputSettings
 from tkati_core.kafka.consumer import KafkaConsumer
 
+
 class AppSettings(TomlBaseSettings):
     input: KafkaInputSettings
     # ...
 
-settings = AppSettings()  # settings.input.connection.broker, settings.input.topic.name, ...
+
+settings = (
+    AppSettings()
+)  # settings.input.connection.broker, settings.input.topic.name, ...
 consumer = KafkaConsumer.from_input_settings(settings.input)
 
 # Read a batch
@@ -375,9 +455,11 @@ from tkati_core.settings import TomlBaseSettings
 from tkati_core.kafka.settings import KafkaOutputSettings
 from tkati_core.kafka.producer import KafkaProducer
 
+
 class AppSettings(TomlBaseSettings):
     output: KafkaOutputSettings
     # ...
+
 
 settings = AppSettings()
 producer = KafkaProducer.from_output_settings(settings.output)

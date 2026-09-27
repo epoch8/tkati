@@ -107,7 +107,10 @@ class KafkaProducer(ProducerBase):
         return cls.from_topic_settings(settings.connection, settings.topic)
 
     def produce_arrow(
-        self, data: pa.Table | pa.RecordBatch, stats: LoopStats | None = None
+        self,
+        data: pa.Table | pa.RecordBatch,
+        stats: LoopStats | None = None,
+        tag: int | None = None,
     ) -> None:
         """
         Produce data to the configured topic.
@@ -131,7 +134,7 @@ class KafkaProducer(ProducerBase):
                     _to_wire_table(data, self.wire_type_overrides)
                 )
             with stats.phase("producer/enqueue"):
-                self.producer.enqueue(messages)
+                self.producer.enqueue(messages, tag or 0)
         elif self.format == "arrow-batch":
             with stats.phase("producer/serialize"):
                 table = (
@@ -147,9 +150,14 @@ class KafkaProducer(ProducerBase):
                     [(buf.getvalue().to_pybytes(), None)]
                 )
             with stats.phase("producer/enqueue"):
-                self.producer.enqueue(messages)
+                self.producer.enqueue(messages, tag or 0)
 
-    def produce_pylist(self, rows: list[dict], stats: LoopStats | None = None) -> None:
+    def produce_pylist(
+        self,
+        rows: list[dict],
+        stats: LoopStats | None = None,
+        tag: int | None = None,
+    ) -> None:
         """
         Produce a list of dicts to the configured topic as JSON messages.
 
@@ -162,7 +170,7 @@ class KafkaProducer(ProducerBase):
         with stats.phase("producer/serialize"):
             messages = EncodedBatch.from_payloads(self._serialize_rows(rows))
         with stats.phase("producer/enqueue"):
-            self.producer.enqueue(messages)
+            self.producer.enqueue(messages, tag or 0)
 
     def _serialize_arrow(self, data: pa.Table | pa.RecordBatch) -> EncodedBatch:
         """Encode every row natively, in parallel, with no per-row Python
@@ -191,6 +199,11 @@ class KafkaProducer(ProducerBase):
             )
             for row in rows
         ]
+
+    def wait_delivered(self, tag: int, timeout: float | None = None) -> bool:
+        """See `Producer.wait_delivered`. Waits on librdkafka's delivery
+        reports for the messages enqueued with `tag`."""
+        return self.producer.wait_delivered(tag, timeout)
 
     def flush(self, stats: LoopStats | None = None) -> None:
         """

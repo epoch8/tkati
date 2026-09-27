@@ -2,7 +2,7 @@
 
 Reads batches from a configurable input and writes them to a configurable output. Offsets are committed only after the batch is written and confirmed delivered (`produce_arrow` followed by a blocking `flush`), so delivery is at-least-once.
 
-On SIGTERM or SIGINT the node finishes the batch in hand, commits it and exits. A second signal forces an exit, leaving that batch uncommitted, so it is read again on restart. The loop itself is `tkati-core`'s `Node`.
+The loop is `tkati-core`'s `PipelinedNode`: it reads the next batch while producing the current one, and doesn't wait for a batch's delivery before moving on. Batches are still committed only once delivered, in read order (up to `[pipeline] max_in_flight` batches, default 4, may be waiting). On SIGTERM or SIGINT the node finishes the batch in hand, waits for everything in flight to be delivered, commits it and exits. A second signal forces an exit, leaving uncommitted batches to be read again on restart.
 
 Input and output kinds are selected via the `type` field in each section — pick from whatever `tkati-core` supports. Every backend's settings split a **`connection`** tier (server-specific: how to reach the broker/database) from the resource tier (`topic` for Kafka, `table` for ClickHouse) and, where relevant, a tier local to this reader/writer instance (Kafka's `consumer` settings).
 
@@ -107,7 +107,7 @@ from `tkati-core`:
 
 ```
 perf over 10s: 157000 rows in, 157000 out (0 dropped), 157 iterations (0 input-starved)
-perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=1.51s (15%) commit=0.38s (4%)
+perf: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/input=0.21s (2%) producer/serialize=2.10s (21%) producer/enqueue=0.35s (4%) producer/deliver=0.00s (0%) wait/in-flight=1.12s (11%) commit=0.38s (4%)
 ```
 
 This node never drops rows, so `dropped` is always 0.
@@ -116,10 +116,17 @@ This node never drops rows, so `dropped` is always 0.
   and decoding them into an Arrow table.
 * `producer/serialize`, `producer/enqueue`: encoding rows into the output's
   wire format, and handing them to librdkafka.
-* `producer/deliver`: the blocking `flush`, i.e. waiting for broker acks. A
-  ClickHouse output records its whole insert here, retries and DLQ fallback
-  included.
-* `commit`: the synchronous offset commit.
+* `producer/deliver`: a ClickHouse output records its whole insert here,
+  retries and DLQ fallback included. A Kafka output doesn't wait for acks per
+  batch, so it reads 0; see `wait/in-flight`.
+* `commit`: the offset commit.
+* `wait/input`: time the loop waited for the next batch from its read-ahead
+  thread. High means the node is input-bound.
+* `wait/in-flight`: time `done()` waited because `[pipeline] max_in_flight`
+  batches were still undelivered. High means the node is output-bound.
+
+`consumer/poll` and `consumer/parse` run on the read-ahead thread, at the same
+time as the rest, so the percentages can add up to more than 100.
 
 Percentages are of the interval, so they **do not sum to 100**; the remainder
 is time in none of the named phases. `input-starved` counts iterations that

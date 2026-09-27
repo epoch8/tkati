@@ -2,6 +2,7 @@
 
 import os
 import signal
+import threading
 import time
 
 import pyarrow as pa
@@ -10,14 +11,17 @@ from pydantic import ValidationError
 from tkati_core import (
     CONSUMER_PHASES,
     DEFAULT_PHASES,
+    PIPELINED_PHASES,
     PRODUCER_PHASES,
     SINK_PHASES,
     Batch,
     ConsumedBatch,
+    DeliveryError,
     Idle,
     LoopStats,
-    Node,
     NodeSettings,
+    PipelinedNode,
+    SyncNode,
 )
 from tkati_core.clickhouse.settings import (
     ClickHouseConnectionSettings,
@@ -30,14 +34,19 @@ from tkati_core.kafka.settings import (
     KafkaInputSettings,
     KafkaTopicSettings,
 )
-from tkati_core.testing import MemoryConsumer, MemoryProducer, memory_node
+from tkati_core.testing import (
+    MemoryConsumer,
+    MemoryProducer,
+    memory_node,
+    memory_pipelined_node,
+)
 
 
 def _table(n: int) -> pa.Table:
     return pa.table({"uid": [str(i) for i in range(n)]})
 
 
-def _send_all(node: Node) -> list[type]:
+def _send_all(node: SyncNode) -> list[type]:
     """The simplest node: send every batch unchanged. Returns the event types
     it saw."""
     seen: list[type] = []
@@ -48,12 +57,12 @@ def _send_all(node: Node) -> list[type]:
     return seen
 
 
-def _raise_in_body(node: Node, exc: BaseException) -> None:
+def _raise_in_body(node: SyncNode, exc: BaseException) -> None:
     for _ in node.consume_arrow():
         raise exc
 
 
-def _skip_done(node: Node) -> None:
+def _skip_done(node: SyncNode) -> None:
     """A buggy node: never finishes the batch."""
     for event in node.consume_arrow():
         assert isinstance(event, Batch)
@@ -76,10 +85,12 @@ def test_done_flushes_then_commits() -> None:
         "read:0",
         "produce",
         "flush",
+        "wait:1",
         "commit:0",
         "read:1",
         "produce",
         "flush",
+        "wait:2",
         "commit:1",
         "close:consumer",
         "close:producer",
@@ -96,7 +107,7 @@ def test_code_after_done_runs_after_the_commit() -> None:
             node.done(event)
             consumer.log.append("tail")
 
-    assert consumer.log[:4] == ["read:0", "flush", "commit:0", "tail"]
+    assert consumer.log[:5] == ["read:0", "flush", "wait:1", "commit:0", "tail"]
 
 
 def test_rows_out_is_counted_at_done() -> None:
@@ -153,11 +164,11 @@ def test_done_with_both_output_and_rows_out_raises_and_rewinds() -> None:
 
 def test_failed_send_in_done_rewinds() -> None:
     class _FailingProducer(MemoryProducer):
-        def produce_arrow(self, data, stats=None) -> None:
+        def produce_arrow(self, data, stats=None, tag=None) -> None:
             raise RuntimeError("produce failed")
 
     consumer = MemoryConsumer([_table(1)])
-    node = Node(consumer, _FailingProducer(), batch_size=100, batch_timeout_sec=0)
+    node = SyncNode(consumer, _FailingProducer(), batch_size=100, batch_timeout_sec=0)
     with pytest.raises(RuntimeError, match="produce failed"), node:
         _send_all(node)
 
@@ -201,6 +212,28 @@ def test_failed_flush_in_done_rewinds_instead_of_committing() -> None:
     assert consumer.rewinds == [0]
 
 
+def test_output_is_tagged_with_the_batch_seq_plus_one() -> None:
+    node, _, producer = memory_node([_table(1), _table(2)])
+    with node:
+        _send_all(node)
+
+    assert _producer(producer).tags == [1, 2]
+
+
+def test_failed_delivery_rewinds_instead_of_committing() -> None:
+    """flush() returns once nothing is in flight, delivered or not; a message
+    librdkafka gave up on must fail the batch, not let it be committed."""
+    node, consumer, _ = memory_node(
+        [_table(1), _table(1)], fail_delivery={2: DeliveryError("gave up")}
+    )
+    with pytest.raises(DeliveryError, match="gave up"), node:
+        _send_all(node)
+
+    assert consumer.commits == [0]
+    assert consumer.rewinds == [1]
+    assert node.stats.rows_out == 1
+
+
 class _BrokenRewind(MemoryConsumer):
     def rewind(self, batch: ConsumedBatch) -> None:
         raise ValueError("rewind failed")
@@ -208,7 +241,7 @@ class _BrokenRewind(MemoryConsumer):
 
 def test_failing_rewind_does_not_mask_the_original_error() -> None:
     consumer = _BrokenRewind([_table(1)])
-    node = Node(consumer, MemoryProducer(), batch_size=100, batch_timeout_sec=0)
+    node = SyncNode(consumer, MemoryProducer(), batch_size=100, batch_timeout_sec=0)
     with pytest.raises(RuntimeError, match="boom"), node:
         _raise_in_body(node, RuntimeError("boom"))
     assert consumer.closed
@@ -264,7 +297,7 @@ def test_empty_poll_yields_idle() -> None:
 
 def test_stop_when_idle_ends_the_loop_at_the_first_empty_poll() -> None:
     consumer = MemoryConsumer([_table(1), None, _table(1)])
-    node = Node(
+    node = SyncNode(
         consumer,
         MemoryProducer(),
         batch_size=100,
@@ -356,7 +389,7 @@ def test_rows_and_starved_iterations_are_counted() -> None:
 
 
 def test_node_phases_are_timed() -> None:
-    phases = (*CONSUMER_PHASES, "work", *PRODUCER_PHASES, "commit")
+    phases = (*CONSUMER_PHASES, "wait/input", "work", *PRODUCER_PHASES, "commit")
     node, _, _ = memory_node([_table(1)], phases=phases)
     with node:
         for event in node.consume_arrow():
@@ -396,7 +429,7 @@ def test_close_order_is_consumer_producer_dlq_and_survives_a_failing_close() -> 
     consumer = _BrokenClose([], log=log)
     producer = MemoryProducer(log=log)
     dlq = MemoryProducer(log=log, name="dlq")
-    node = Node(consumer, producer, batch_size=1, batch_timeout_sec=0, dlq=dlq)
+    node = SyncNode(consumer, producer, batch_size=1, batch_timeout_sec=0, dlq=dlq)
     consumer.on_exhausted = node.stop
     with pytest.raises(RuntimeError, match="close failed"), node:
         _send_all(node)
@@ -428,7 +461,7 @@ def test_without_a_producer_output_raises_and_the_batch_is_rewound() -> None:
 
 
 def test_without_a_producer_phases_need_not_include_the_producer_phases() -> None:
-    phases = (*CONSUMER_PHASES, "upload", "commit")
+    phases = (*CONSUMER_PHASES, "wait/input", "upload", "commit")
     node, _, _ = memory_node([], output=False, phases=phases)
     assert node.stats.phases == phases
 
@@ -451,7 +484,7 @@ def test_consume_pylist_yields_dicts_and_sends_them_with_produce_pylist() -> Non
 
     assert seen == [_rows(2)]
     assert _producer(producer).sent == [_rows(2)]
-    assert consumer.log[:4] == ["read:0", "produce", "flush", "commit:0"]
+    assert consumer.log[:5] == ["read:0", "produce", "flush", "wait:1", "commit:0"]
 
 
 def test_pylist_input_may_send_arrow() -> None:
@@ -523,11 +556,351 @@ def test_without_a_producer_output_pylist_raises() -> None:
     assert consumer.rewinds == [0]
 
 
+# --- read-ahead -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("read_ahead", [0, 1, 3])
+def test_every_batch_is_committed_in_order_with_or_without_read_ahead(
+    read_ahead: int,
+) -> None:
+    tables = [_table(1), None, _table(2), _table(3)]
+    node, consumer, producer = memory_node(tables, read_ahead=read_ahead)
+    with node:
+        seen = _send_all(node)
+
+    assert seen == [Batch, Idle, Batch, Batch]
+    assert consumer.commits == [0, 1, 2]
+    assert [len(t) for t in _producer(producer).sent] == [1, 2, 3]
+    assert node.stats.rows_in == node.stats.rows_out == 6
+
+
+@pytest.mark.parametrize("read_ahead", [0, 1])
+def test_exception_rewinds_with_or_without_read_ahead(read_ahead: int) -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1)], read_ahead=read_ahead)
+    with pytest.raises(RuntimeError, match="boom"), node:
+        _raise_in_body(node, RuntimeError("boom"))
+
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+@pytest.mark.parametrize("read_ahead", [0, 1])
+def test_failed_delivery_rewinds_with_or_without_read_ahead(read_ahead: int) -> None:
+    node, consumer, _ = memory_node(
+        [_table(1), _table(1)],
+        fail_delivery={1: DeliveryError("gave up")},
+        read_ahead=read_ahead,
+    )
+    with pytest.raises(DeliveryError), node:
+        _send_all(node)
+
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_the_next_batch_is_read_while_the_body_holds_this_one() -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1)], read_ahead=1)
+    read_ahead_seen: list[bool] = []
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            if not read_ahead_seen:
+                read_ahead_seen.append(_wait_for(lambda: "read:1" in consumer.log))
+            node.done(event)
+
+    assert read_ahead_seen == [True]
+    assert consumer.commits == [0, 1]
+
+
+def test_stop_drops_batches_read_ahead_without_committing_them() -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1), _table(1)], read_ahead=2)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            _wait_for(lambda: "read:2" in consumer.log)
+            node.stop()
+            node.done(event)
+
+    assert "read:2" in consumer.log
+    assert consumer.commits == [0]
+    assert consumer.rewinds == []
+
+
+def test_the_reader_is_stopped_before_a_rewind_and_gone_after_exit() -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1)], read_ahead=1)
+    with pytest.raises(RuntimeError, match="boom"), node:
+        _raise_in_body(node, RuntimeError("boom"))
+
+    assert consumer.rewinds == [0]
+    assert node._reader is not None and not node._reader.is_alive()
+
+
+class _FailingRead(MemoryConsumer):
+    def read_arrow(self, timeout, num_messages, stats=None):
+        raise ValueError("JSON parse error")
+
+
+def test_a_failed_read_ahead_surfaces_in_the_loop() -> None:
+    consumer = _FailingRead([])
+    node = SyncNode(
+        consumer, MemoryProducer(), batch_size=100, batch_timeout_sec=0, read_ahead=1
+    )
+    with pytest.raises(ValueError, match="JSON parse error"), node:
+        _send_all(node)
+
+
+def test_waiting_for_the_reader_is_recorded_as_wait_input() -> None:
+    node, _, _ = memory_node([_table(1)], read_ahead=1, delay=0.05)
+    with node:
+        _send_all(node)
+
+    assert node.stats.phase_sec["wait/input"] >= 0.04
+
+
+def test_switching_formats_while_reading_ahead_raises() -> None:
+    node, _, _ = memory_node([_table(1)], read_ahead=1)
+    with node:
+        node.consume_arrow()
+        with pytest.raises(RuntimeError, match="other format"):
+            node.consume_pylist()
+        node.stop()
+
+
+def test_sigterm_while_waiting_on_the_reader_stops_promptly() -> None:
+    """The read-ahead thread can't be interrupted by a signal, but the loop
+    waits on it in short steps, so a stop still takes effect at once."""
+    consumer = MemoryConsumer([_table(1)], delay=5)
+    node = SyncNode(
+        consumer,
+        MemoryProducer(),
+        batch_size=100,
+        batch_timeout_sec=0,
+        handle_signals=True,
+        read_ahead=1,
+    )
+    timer = threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with node:
+            seen = _send_all(node)
+    finally:
+        timer.cancel()
+
+    assert seen == []
+    assert time.monotonic() - started < 2
+
+
+# --- PipelinedNode ----------------------------------------------------------
+
+
+def _finish_all(node: PipelinedNode, after_commit=None) -> list[int]:
+    """Send every batch unchanged; return the order `done()` was called in."""
+    order: list[int] = []
+    for event in node.consume_arrow():
+        if isinstance(event, Batch):
+            order.append(len(order))
+            node.done(
+                event,
+                output_arrow=event.data,
+                after_commit=None
+                if after_commit is None
+                else after_commit(len(order) - 1),
+            )
+    return order
+
+
+def test_pipelined_done_returns_before_delivery_and_commits_after() -> None:
+    node, consumer, producer = memory_pipelined_node([_table(1)], deliver="manual")
+    producer = _producer(producer)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            # Returned with the delivery still in flight: nothing committed.
+            assert consumer.commits == []
+            producer.release(1)
+
+    assert consumer.commits == [0]
+    assert node.stats.rows_out == 1
+
+
+def test_pipelined_commits_in_read_order_whatever_the_ack_order() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1), _table(1)], deliver="manual"
+    )
+    producer = _producer(producer)
+    commits_seen: list[list[int]] = []
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            if len(producer.tags) == 3:
+                producer.release(3, 2)  # the later ones first
+                node._before_read()
+                commits_seen.append(list(consumer.commits))
+                producer.release(1)
+
+    assert commits_seen == [[]]  # batch 0 held back batches 1 and 2
+    assert consumer.commits == [0, 1, 2]
+
+
+def test_pipelined_done_blocks_at_max_in_flight() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1), _table(1)], deliver="manual", max_in_flight=1
+    )
+    producer = _producer(producer)
+    commits_when_blocked: list[list[int]] = []
+
+    def on_wait(tag: int) -> None:
+        commits_when_blocked.append(list(consumer.commits))
+        producer.release(tag)
+
+    producer.on_wait = on_wait
+    with node:
+        _finish_all(node)
+
+    # The second done() found two batches finished, over the limit of one,
+    # and waited for the oldest; likewise the third, and the drain at exit.
+    assert producer.waited_on == [1, 2, 3]
+    assert commits_when_blocked == [[], [0], [0, 1]]
+    assert consumer.commits == [0, 1, 2]
+    assert node.stats.phase_sec["wait/in-flight"] >= 0
+
+
+def test_pipelined_after_commit_runs_after_the_commit_in_order() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(1), _table(1)])
+    with node:
+        _finish_all(
+            node, after_commit=lambda i: lambda: consumer.log.append(f"after:{i}")
+        )
+
+    commits_and_hooks = [
+        entry for entry in consumer.log if entry.startswith(("commit", "after"))
+    ]
+    assert commits_and_hooks == ["commit:0", "after:0", "commit:1", "after:1"]
+
+
+def test_pipelined_failed_delivery_rewinds_the_oldest_uncommitted_batch() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1)], deliver="manual"
+    )
+    producer = _producer(producer)
+    ran: list[int] = []
+    producer.on_wait = lambda tag: producer.fail(tag, DeliveryError("gave up"))
+    with pytest.raises(DeliveryError, match="gave up"), node:
+        _finish_all(node, after_commit=lambda i: lambda: ran.append(i))
+
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+    assert ran == []
+    assert node.stats.rows_out == 0
+
+
+def test_pipelined_exception_rewinds_the_oldest_finished_batch() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(1), _table(1)], deliver="manual")
+
+    def fail_on_second() -> None:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            if consumer.log.count("produce") == 1:
+                raise RuntimeError("boom")
+            node.done(event, output_arrow=event.data)
+
+    with pytest.raises(RuntimeError, match="boom"), node:
+        fail_on_second()
+
+    # Batch 0 was finished but undelivered, batch 1 was being processed:
+    # batch 0 is the oldest uncommitted, and rewinding it rewinds both.
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+def test_pipelined_break_after_done_still_commits_on_exit() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1)], deliver="manual"
+    )
+    producer = _producer(producer)
+    producer.on_wait = producer.release
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            break
+
+    assert consumer.commits == [0]
+    assert producer.waited_on == [1]
+
+
+def test_pipelined_keyboard_interrupt_neither_drains_nor_rewinds() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(1), _table(1)], deliver="manual")
+
+    def interrupt_after_first() -> None:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt), node:
+        interrupt_after_first()
+
+    assert consumer.commits == []
+    assert consumer.rewinds == []
+
+
+def test_pipelined_without_a_producer_commits_at_once() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(2)], output=False)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, rows_out=2)
+            assert consumer.commits == [0]
+
+    assert node.stats.rows_out == 2
+
+
+def test_pipelined_phases() -> None:
+    node, _, _ = memory_pipelined_node([])
+    assert node.stats.phases == PIPELINED_PHASES
+    with pytest.raises(ValueError, match="wait/in-flight"):
+        memory_pipelined_node([], phases=DEFAULT_PHASES)
+
+
+def test_pipelined_with_read_ahead_commits_everything_in_order() -> None:
+    tables = [_table(1), _table(2), None, _table(3)]
+    node, consumer, producer = memory_pipelined_node(tables, read_ahead=2)
+    with node:
+        _finish_all(node)
+
+    assert consumer.commits == [0, 1, 2]
+    assert [len(t) for t in _producer(producer).sent] == [1, 2, 3]
+
+
+def _takes_a_sync_node(node: SyncNode) -> None: ...
+
+
+def _type_check_fixture(node: PipelinedNode) -> None:
+    """Never called. `ty` must reject passing a PipelinedNode where a
+    SyncNode is expected: code written for SyncNode.done() relies on the
+    commit having happened when it returns. If the classes are ever made to
+    share that type, ty reports this ignore as unused."""
+    _takes_a_sync_node(node)  # ty: ignore[invalid-argument-type]
+
+
 # --- signals ----------------------------------------------------------------
 
 
-def _signal_node(consumer: MemoryConsumer) -> Node:
-    node = Node(
+def _signal_node(consumer: MemoryConsumer) -> SyncNode:
+    node = SyncNode(
         consumer,
         MemoryProducer(log=consumer.log),
         batch_size=100,
@@ -638,6 +1011,6 @@ def test_from_settings_without_output_builds_no_producer(monkeypatch) -> None:
 
     monkeypatch.setattr("tkati_core.node.build_producer", no_producer)
 
-    node = Node.from_settings(NodeSettings(input=_input()))
+    node = SyncNode.from_settings(NodeSettings(input=_input()))
     assert node.stats.phases == SINK_PHASES
     assert len(built) == 1
