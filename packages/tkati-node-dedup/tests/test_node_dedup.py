@@ -6,7 +6,7 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer as RawProducer
 from prometheus_client import REGISTRY
-from tkati_core import Node
+from tkati_core import SyncNode
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaOutputSettings
@@ -75,7 +75,7 @@ def _run(test_settings: AppSettings, store: BucketedDedupStore) -> None:
     """Run the node over everything already in the input topic, then stop.
     Each call is a fresh consumer in the same group, so a second call resumes
     from the first one's commit — as a restart would."""
-    node = Node(
+    node = SyncNode(
         _make_consumer(test_settings),
         _make_producer(test_settings),
         batch_size=test_settings.input.consumer.batch_size,
@@ -219,7 +219,7 @@ def _store(tmp_path) -> BucketedDedupStore:
     return BucketedDedupStore(str(tmp_path), window_hours=3, bucket_hours=1)
 
 
-def _run_memory(store: BucketedDedupStore, node: Node) -> None:
+def _run_memory(store: BucketedDedupStore, node: SyncNode) -> None:
     with node:
         run(node, store, "uid")
 

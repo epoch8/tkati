@@ -51,29 +51,28 @@ broker = "localhost:9092"
 
 ## Usage
 
-### `Node` — the worker loop harness
+### `SyncNode` — the worker loop harness
 
-`tkati_core.Node` runs a node's loop. It owns the input, the output, the DLQ,
+`tkati_core.SyncNode` runs a node's loop. It owns the input, the output, the DLQ,
 `LoopStats`, the metrics server, signal handling and shutdown. Node code is a
 `for` loop over `node.consume_arrow()` or `node.consume_pylist()`, which
 yield a `Batch` for each batch read and `Idle` when a poll comes back empty.
 
 ```python
-from tkati_core import Batch, Node, NodeSettings
+from tkati_core import Batch, NodeSettings, SyncNode
 
 
-class AppSettings(NodeSettings):
-    ...  # the node's own sections
+class AppSettings(NodeSettings): ...  # the node's own sections
 
 
-def run(node: Node) -> None:
+def run(node: SyncNode) -> None:
     for event in node.consume_arrow():
         if isinstance(event, Batch):
             node.done(event, output_arrow=transform(event.data))
 
 
 def main() -> None:
-    with Node.from_settings(AppSettings()) as node:
+    with SyncNode.from_settings(AppSettings()) as node:
         run(node)
 ```
 
@@ -132,21 +131,22 @@ which commits the batch, and reports the rows it wrote with
 `node.done(event, rows_out=n)`:
 
 ```python
-def run(node: Node, client: ApiClient) -> None:
+def run(node: SyncNode, client: ApiClient) -> None:
     for event in node.consume_arrow():
         if isinstance(event, Batch):
             with node.phase("upload"):
                 client.upload(event.data)  # returns once the API accepted it
             node.done(event, rows_out=len(event.data))
 
+
 # phases=(*CONSUMER_PHASES, "upload", "commit"); SINK_PHASES is the default.
 ```
 
-**Testing.** `tkati_core.testing.memory_node(batches)` returns a `Node` over
+**Testing.** `tkati_core.testing.memory_node(batches)` returns a `SyncNode` over
 an in-memory consumer and producer, along with those two doubles. They record
 what was read, sent, flushed, committed and rewound, in one shared `log`, and
 the loop ends once `batches` runs out. For tests against a real broker,
-construct `Node(consumer, producer, ..., stop_when_idle=True)`: it processes
+construct `SyncNode(consumer, producer, ..., stop_when_idle=True)`: it processes
 what is already in the topic and stops at the first empty poll.
 
 ### `Consumer` / `Producer` base classes
@@ -179,7 +179,7 @@ the log prefix and the cadence are all constructor arguments, because nodes
 have different pipelines — a dedup node has lookup and write phases an
 extract/load node does not.
 
-A `Node` does all of this for you. The loop below is what it runs, and is for
+A `SyncNode` does all of this for you. The loop below is what it runs, and is for
 code that drives a consumer and producer by hand.
 
 ```python
@@ -311,7 +311,7 @@ if you serve metrics yourself.
 
 `tkati_core.settings` defines `InputSettings`/`OutputSettings` (discriminated unions
 over every input/output kind `tkati-core` implements), and `NodeSettings`, the
-`input`/`output`/`dlq`/`metrics` sections `Node.from_settings` reads. Use those aliases with the
+`input`/`output`/`dlq`/`metrics` sections `SyncNode.from_settings` reads. Use those aliases with the
 factory helpers in `tkati_core.consumer` and `tkati_core.producer`, or import the
 helpers from the top-level `tkati_core` package for convenience.
 
@@ -319,9 +319,11 @@ helpers from the top-level `tkati_core` package for convenience.
 from tkati_core import InputSettings, OutputSettings, build_consumer, build_producer
 from tkati_core.settings import TomlBaseSettings
 
+
 class AppSettings(TomlBaseSettings):
     input: InputSettings
     output: OutputSettings
+
 
 settings = AppSettings()
 consumer = build_consumer(settings.input)
@@ -344,11 +346,15 @@ from tkati_core.settings import TomlBaseSettings
 from tkati_core.kafka.settings import KafkaInputSettings
 from tkati_core.kafka.consumer import KafkaConsumer
 
+
 class AppSettings(TomlBaseSettings):
     input: KafkaInputSettings
     # ...
 
-settings = AppSettings()  # settings.input.connection.broker, settings.input.topic.name, ...
+
+settings = (
+    AppSettings()
+)  # settings.input.connection.broker, settings.input.topic.name, ...
 consumer = KafkaConsumer.from_input_settings(settings.input)
 
 # Read a batch
@@ -375,9 +381,11 @@ from tkati_core.settings import TomlBaseSettings
 from tkati_core.kafka.settings import KafkaOutputSettings
 from tkati_core.kafka.producer import KafkaProducer
 
+
 class AppSettings(TomlBaseSettings):
     output: KafkaOutputSettings
     # ...
+
 
 settings = AppSettings()
 producer = KafkaProducer.from_output_settings(settings.output)

@@ -7,7 +7,14 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer, TopicPartition
 from confluent_kafka.admin import AdminClient, NewTopic
-from tkati_core import CONSUMER_PHASES, Batch, Consumer, LoopStats, Node, build_consumer
+from tkati_core import (
+    CONSUMER_PHASES,
+    Batch,
+    Consumer,
+    LoopStats,
+    SyncNode,
+    build_consumer,
+)
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import KafkaInputSettings, KafkaOutputSettings
@@ -470,7 +477,7 @@ def test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it(
     raw_producer: Producer,
     raw_consumer: RawConsumer,
 ):
-    """Through a Node end to end: the malformed message is skipped, the valid
+    """Through a SyncNode end to end: the malformed message is skipped, the valid
     rows are produced, and the commit covers all three messages read."""
     for value in (
         orjson.dumps({"id": "a", "value": 1}),
@@ -480,7 +487,7 @@ def test_node_consume_pylist_skips_a_malformed_message_and_commits_past_it(
         raw_producer.produce(kafka_input_topic, value=value)
     raw_producer.flush()
 
-    node = Node(
+    node = SyncNode(
         KafkaConsumer.from_input_settings(input_settings),
         KafkaProducer.from_output_settings(output_settings),
         batch_size=3,

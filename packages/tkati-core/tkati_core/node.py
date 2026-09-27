@@ -55,15 +55,15 @@ SINK_PHASES = (*CONSUMER_PHASES, "commit")
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
-# eq=False: a batch is identified by the object, which is how `Node.done`
+# eq=False: a batch is identified by the object, which is how `done()`
 # tells the current batch from one already finished. Comparing two batches
 # by value would compare their tables.
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class Batch[T: Sized]:
-    """A batch read from the input. Finish it with `Node.done`.
+    """A batch read from the input. Finish it with the node's `done()`.
 
-    `data` is a `pa.Table` from `Node.consume_arrow()`, or a `list[dict]` from
-    `Node.consume_pylist()`. The harness keeps the batch as read, to commit or
+    `data` is a `pa.Table` from `consume_arrow()`, or a `list[dict]` from
+    `consume_pylist()`. The harness keeps the batch as read, to commit or
     rewind; the node only sees its data, so filtering or transforming `data`
     never changes what is committed.
     """
@@ -93,25 +93,18 @@ class _Stop(BaseException):
     """Raised by the signal handler to cut a blocked read short.
 
     A BaseException so that `except Exception` blocks in the consumer let it
-    through to `Node._read`, which catches it around the read.
+    through to `_NodeBase._read`, which catches it around the read.
     """
 
 
-class Node:
-    """Runs a node's loop: read, hand the batch to the node, commit it when
-    the node says it is done.
+class _NodeBase:
+    """What the node classes share: building and closing the input and
+    output, consuming, stats, signals and stop. Each subclass adds its own
+    `done()`, which is where they differ.
 
-    Use as a context manager, and consume inside it, choosing the input
-    format with `consume_arrow()` or `consume_pylist()`::
-
-        with Node.from_settings(settings) as node:
-            for event in node.consume_arrow():
-                if isinstance(event, Batch):
-                    node.done(event, output_arrow=transform(event.data))
-
-    `producer` may be None, for a node that delivers its output itself (e.g.
-    through a cloud API client). Such a node must have finished its writes for
-    a batch before it calls `done()`, and reports them with `rows_out=`.
+    Deliberately private, and neither subclass derives from the other: code
+    written against `SyncNode.done()` relies on the batch being committed when
+    it returns, so it must not accept a node for which that isn't true.
     """
 
     def __init__(
@@ -241,9 +234,10 @@ class Node:
             # A failed batch is rewound so it is read again. Not for a bare
             # BaseException (Ctrl-C twice): a forced stop shouldn't wait on a
             # seek, and the batch is uncommitted either way.
-            if self._batch is not None and isinstance(exc, Exception):
+            oldest = self._oldest_uncommitted()
+            if oldest is not None and isinstance(exc, Exception):
                 try:
-                    self._consumer.rewind(self._batch)
+                    self._consumer.rewind(oldest)
                 except Exception:
                     logger.exception("Could not rewind the failed batch")
             self._batch = None
@@ -277,7 +271,7 @@ class Node:
         # Checked here rather than inside the generator, so misuse raises at
         # the call, not at the first iteration.
         if not self._entered:
-            raise RuntimeError("consume from a Node inside `with node:`")
+            raise RuntimeError("consume from a node inside `with node:`")
         return self._events(read)
 
     def _events[T: Sized](
@@ -293,7 +287,7 @@ class Node:
     ) -> Batch[T] | Idle | None:
         """One step of the loop: the next event, or None to end it."""
         if not self._entered:
-            raise RuntimeError("consume from a Node inside `with node:`")
+            raise RuntimeError("consume from a node inside `with node:`")
 
         if self._batch is not None:
             # Raised out of the node's `for` loop, so `__exit__` rewinds the
@@ -360,40 +354,17 @@ class Node:
         except _Stop:
             return None
 
-    def done(
+    def _take_batch(
         self,
         event: Batch[Any],
-        *,
-        output_arrow: pa.Table | None = None,
-        output_pylist: list[dict] | None = None,
-        rows_out: int | None = None,
-    ) -> None:
-        """Finish `event`'s batch: send its output, wait until it is delivered,
-        commit the batch as read, and count the rows out. Returns once the
-        commit is made, so the lines after it run after the commit.
-
-        Pass at most one of the three keyword arguments. The output format is
-        named explicitly and needn't match the input's: a `consume_pylist()`
-        node may send `output_arrow=`.
-
-        Args:
-            event: The batch being finished: the one handed out last.
-            output_arrow: What the batch produced, as an Arrow table, sent with
-                `Producer.produce_arrow`.
-            output_pylist: What the batch produced, as a list of dicts, sent
-                with `Producer.produce_pylist`.
-            rows_out: For a node without a producer: how many rows it
-                delivered itself for this batch. Counted toward `rows_out`
-                like sent rows, so the perf line's "dropped" stays meaningful.
-
-        None or an empty output sends nothing, e.g. when every row was
-        filtered out.
-
-        Raises RuntimeError if `event` isn't the unfinished current batch
-        (e.g. `done()` twice), or if an output is given without a producer.
-        If sending, flushing or committing fails, the batch stays unfinished
-        and is rewound when the loop exits.
-        """
+        output_arrow: pa.Table | None,
+        output_pylist: list[dict] | None,
+        rows_out: int | None,
+    ) -> tuple[ConsumedBatch[Any], int]:
+        """The first half of `done()`, the same in both node classes: check
+        the arguments and that `event` is the current batch, then send its
+        output. Returns the batch as read and the rows out. Leaves the batch
+        outstanding, so a failure from here on still rewinds it."""
         given = [output_arrow, output_pylist, rows_out]
         if sum(arg is not None for arg in given) > 1:
             raise ValueError(
@@ -422,21 +393,18 @@ class Node:
                 rows_out = len(output_pylist)
                 if rows_out > 0:
                     self._producer.produce_pylist(output_pylist, stats=self._stats)
+        return batch, rows_out or 0
 
-        if self._producer is not None:
-            # KafkaProducer.produce_arrow() only enqueues: block until
-            # delivered before committing, or a crash loses the batch while
-            # its offset says it was handled. A no-op for ClickhouseProducer,
-            # whose inserts are synchronous.
-            self._producer.flush(stats=self._stats)
+    def _commit(self, batch: ConsumedBatch[Any], rows_out: int) -> None:
         with self._stats.phase("commit"):
             self._consumer.commit(batch)
-
-        # Committed: nothing left to rewind, whatever the node does next.
-        self._batch = None
-        self._event = None
         # Counted only once committed, so a failed batch isn't counted.
-        self._stats.rows_out += rows_out or 0
+        self._stats.rows_out += rows_out
+
+    def _oldest_uncommitted(self) -> ConsumedBatch[Any] | None:
+        """The batch `__exit__` rewinds when the loop fails: the oldest one
+        not yet committed."""
+        return self._batch
 
     def phase(self, name: str) -> AbstractContextManager[None]:
         """Time a block of the node's own work into phase `name`."""
@@ -476,3 +444,67 @@ class Node:
         # this handler every 100ms, so raising here cuts it short.
         if self._reading:
             raise _Stop
+
+
+class SyncNode(_NodeBase):
+    """Runs a node's loop: read, hand the batch to the node, and commit it
+    when the node says it is done. `done()` returns once the commit is made.
+
+    Use as a context manager, and consume inside it, choosing the input
+    format with `consume_arrow()` or `consume_pylist()`::
+
+        with SyncNode.from_settings(settings) as node:
+            for event in node.consume_arrow():
+                if isinstance(event, Batch):
+                    node.done(event, output_arrow=transform(event.data))
+
+    `producer` may be None, for a node that delivers its output itself (e.g.
+    through a cloud API client). Such a node must have finished its writes for
+    a batch before it calls `done()`, and reports them with `rows_out=`.
+    """
+
+    def done(
+        self,
+        event: Batch[Any],
+        *,
+        output_arrow: pa.Table | None = None,
+        output_pylist: list[dict] | None = None,
+        rows_out: int | None = None,
+    ) -> None:
+        """Finish `event`'s batch: send its output, wait until it is delivered,
+        commit the batch as read, and count the rows out. Returns once the
+        commit is made, so the lines after it run after the commit.
+
+        Pass at most one of the three keyword arguments. The output format is
+        named explicitly and needn't match the input's: a `consume_pylist()`
+        node may send `output_arrow=`.
+
+        Args:
+            event: The batch being finished: the one handed out last.
+            output_arrow: What the batch produced, as an Arrow table, sent with
+                `Producer.produce_arrow`.
+            output_pylist: What the batch produced, as a list of dicts, sent
+                with `Producer.produce_pylist`.
+            rows_out: For a node without a producer: how many rows it
+                delivered itself for this batch. Counted toward `rows_out`
+                like sent rows, so the perf line's "dropped" stays meaningful.
+
+        None or an empty output sends nothing, e.g. when every row was
+        filtered out.
+
+        Raises RuntimeError if `event` isn't the unfinished current batch
+        (e.g. `done()` twice), or if an output is given without a producer.
+        If sending, flushing or committing fails, the batch stays unfinished
+        and is rewound when the loop exits.
+        """
+        batch, rows = self._take_batch(event, output_arrow, output_pylist, rows_out)
+        if self._producer is not None:
+            # KafkaProducer.produce_arrow() only enqueues: block until
+            # delivered before committing, or a crash loses the batch while
+            # its offset says it was handled. A no-op for ClickhouseProducer,
+            # whose inserts are synchronous.
+            self._producer.flush(stats=self._stats)
+        self._commit(batch, rows)
+        # Committed: nothing left to rewind, whatever the node does next.
+        self._batch = None
+        self._event = None

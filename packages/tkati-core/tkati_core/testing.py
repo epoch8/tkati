@@ -1,6 +1,6 @@
-"""In-memory test doubles for nodes built on `Node`.
+"""In-memory test doubles for nodes built on `SyncNode`.
 
-`memory_node(batches)` gives a `Node` over a `MemoryConsumer` that reads the
+`memory_node(batches)` gives a `SyncNode` over a `MemoryConsumer` that reads the
 given batches (Arrow tables or lists of dicts) and then stops the loop, and a `MemoryProducer` that records what
 it is sent. Both append to a shared `log`, so a test can check the order of
 operations across them:
@@ -17,7 +17,7 @@ import pyarrow as pa
 
 from tkati_core._native import BatchOffsets
 from tkati_core.consumer import ConsumedBatch, Consumer
-from tkati_core.node import Node
+from tkati_core.node import SyncNode
 from tkati_core.producer import Producer
 from tkati_core.stats import LoopStats
 
@@ -157,14 +157,14 @@ def memory_node(
     phases: tuple[str, ...] | None = None,
     output: bool = True,
     fail_flush: BaseException | None = None,
-) -> tuple[Node, MemoryConsumer, MemoryProducer | None]:
-    """A `Node` over in-memory doubles that share one log. The loop ends once
+) -> tuple[SyncNode, MemoryConsumer, MemoryProducer | None]:
+    """A `SyncNode` over in-memory doubles that share one log. The loop ends once
     `batches` is used up. With `output=False` the node has no producer, and
     None is returned in its place."""
     log: list[str] = []
     consumer = MemoryConsumer(batches, log=log)
     producer = MemoryProducer(fail_flush=fail_flush, log=log) if output else None
-    node = Node(
+    node = SyncNode(
         consumer,
         producer,
         batch_size=batch_size,

@@ -1,10 +1,10 @@
 from loguru import logger
-from tkati_core import Batch, Node
+from tkati_core import Batch, SyncNode
 
 from tkati_node_el.settings import AppSettings
 
 
-def run(node: Node) -> None:
+def run(node: SyncNode) -> None:
     """Write every batch to the output unchanged.
 
     `done()` waits for delivery before it commits, so delivery is
@@ -18,5 +18,5 @@ def run(node: Node) -> None:
 
 def main() -> None:
     settings = AppSettings()
-    with Node.from_settings(settings) as node:
+    with SyncNode.from_settings(settings) as node:
         run(node)

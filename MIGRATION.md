@@ -1,3 +1,30 @@
+# Migrating from v0.7.x to v0.8.0
+
+## Breaking changes in `tkati-core`
+
+### `Node` is renamed to `SyncNode`
+
+The harness class is now `SyncNode`, with the same API and behaviour.
+`done()` still returns once the batch is committed. There is no `Node`
+alias: the name now says which of the two node classes you chose.
+
+```python
+# before
+from tkati_core import Node
+
+with Node.from_settings(settings) as node:
+    ...
+
+# after
+from tkati_core import SyncNode
+
+with SyncNode.from_settings(settings) as node:
+    ...
+```
+
+Rename type annotations too (`def run(node: SyncNode, ...)`).
+`tkati_core.testing.memory_node` returns a `SyncNode`.
+
 # Migrating from v0.6.0 to v0.7.0
 
 `tkati-core` has no breaking changes. Its new API (`Node`, `NodeSettings`,

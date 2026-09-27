@@ -16,8 +16,8 @@ from tkati_core import (
     ConsumedBatch,
     Idle,
     LoopStats,
-    Node,
     NodeSettings,
+    SyncNode,
 )
 from tkati_core.clickhouse.settings import (
     ClickHouseConnectionSettings,
@@ -37,7 +37,7 @@ def _table(n: int) -> pa.Table:
     return pa.table({"uid": [str(i) for i in range(n)]})
 
 
-def _send_all(node: Node) -> list[type]:
+def _send_all(node: SyncNode) -> list[type]:
     """The simplest node: send every batch unchanged. Returns the event types
     it saw."""
     seen: list[type] = []
@@ -48,12 +48,12 @@ def _send_all(node: Node) -> list[type]:
     return seen
 
 
-def _raise_in_body(node: Node, exc: BaseException) -> None:
+def _raise_in_body(node: SyncNode, exc: BaseException) -> None:
     for _ in node.consume_arrow():
         raise exc
 
 
-def _skip_done(node: Node) -> None:
+def _skip_done(node: SyncNode) -> None:
     """A buggy node: never finishes the batch."""
     for event in node.consume_arrow():
         assert isinstance(event, Batch)
@@ -157,7 +157,7 @@ def test_failed_send_in_done_rewinds() -> None:
             raise RuntimeError("produce failed")
 
     consumer = MemoryConsumer([_table(1)])
-    node = Node(consumer, _FailingProducer(), batch_size=100, batch_timeout_sec=0)
+    node = SyncNode(consumer, _FailingProducer(), batch_size=100, batch_timeout_sec=0)
     with pytest.raises(RuntimeError, match="produce failed"), node:
         _send_all(node)
 
@@ -208,7 +208,7 @@ class _BrokenRewind(MemoryConsumer):
 
 def test_failing_rewind_does_not_mask_the_original_error() -> None:
     consumer = _BrokenRewind([_table(1)])
-    node = Node(consumer, MemoryProducer(), batch_size=100, batch_timeout_sec=0)
+    node = SyncNode(consumer, MemoryProducer(), batch_size=100, batch_timeout_sec=0)
     with pytest.raises(RuntimeError, match="boom"), node:
         _raise_in_body(node, RuntimeError("boom"))
     assert consumer.closed
@@ -264,7 +264,7 @@ def test_empty_poll_yields_idle() -> None:
 
 def test_stop_when_idle_ends_the_loop_at_the_first_empty_poll() -> None:
     consumer = MemoryConsumer([_table(1), None, _table(1)])
-    node = Node(
+    node = SyncNode(
         consumer,
         MemoryProducer(),
         batch_size=100,
@@ -396,7 +396,7 @@ def test_close_order_is_consumer_producer_dlq_and_survives_a_failing_close() -> 
     consumer = _BrokenClose([], log=log)
     producer = MemoryProducer(log=log)
     dlq = MemoryProducer(log=log, name="dlq")
-    node = Node(consumer, producer, batch_size=1, batch_timeout_sec=0, dlq=dlq)
+    node = SyncNode(consumer, producer, batch_size=1, batch_timeout_sec=0, dlq=dlq)
     consumer.on_exhausted = node.stop
     with pytest.raises(RuntimeError, match="close failed"), node:
         _send_all(node)
@@ -526,8 +526,8 @@ def test_without_a_producer_output_pylist_raises() -> None:
 # --- signals ----------------------------------------------------------------
 
 
-def _signal_node(consumer: MemoryConsumer) -> Node:
-    node = Node(
+def _signal_node(consumer: MemoryConsumer) -> SyncNode:
+    node = SyncNode(
         consumer,
         MemoryProducer(log=consumer.log),
         batch_size=100,
@@ -638,6 +638,6 @@ def test_from_settings_without_output_builds_no_producer(monkeypatch) -> None:
 
     monkeypatch.setattr("tkati_core.node.build_producer", no_producer)
 
-    node = Node.from_settings(NodeSettings(input=_input()))
+    node = SyncNode.from_settings(NodeSettings(input=_input()))
     assert node.stats.phases == SINK_PHASES
     assert len(built) == 1

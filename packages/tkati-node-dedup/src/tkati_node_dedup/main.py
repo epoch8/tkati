@@ -21,7 +21,7 @@ from contextlib import closing
 import pyarrow as pa
 from loguru import logger
 from prometheus_client import Counter
-from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, Batch, Node
+from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, Batch, SyncNode
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
@@ -61,7 +61,7 @@ def _dedupe_batch(
     return filtered, new_keys
 
 
-def run(node: Node, store: BucketedDedupStore, field_name: str) -> None:
+def run(node: SyncNode, store: BucketedDedupStore, field_name: str) -> None:
     for event in node.consume_arrow():
         # Runs on every event, a batch or an empty poll, and can never raise.
         # Buckets must be fresh *before* the dedupe check below runs — doing
@@ -129,5 +129,5 @@ def main() -> None:
     )
     # The store is entered first, so it closes last: after the node has
     # stopped and closed its clients.
-    with closing(store), Node.from_settings(settings, phases=_PHASES) as node:
+    with closing(store), SyncNode.from_settings(settings, phases=_PHASES) as node:
         run(node, store, settings.dedup.field)

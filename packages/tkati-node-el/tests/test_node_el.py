@@ -6,7 +6,7 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Producer
-from tkati_core import Node
+from tkati_core import SyncNode
 from tkati_core.clickhouse.producer import ClickhouseProducer
 from tkati_core.clickhouse.settings import ClickHouseOutputSettings
 from tkati_core.kafka.consumer import KafkaConsumer
@@ -31,7 +31,7 @@ def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
 
 def _run(test_settings: AppSettings, producer: ProducerBase) -> None:
     """Run the node over everything already in the input topic, then stop."""
-    node = Node(
+    node = SyncNode(
         _make_consumer(test_settings),
         producer,
         batch_size=test_settings.input.consumer.batch_size,

@@ -52,7 +52,7 @@ OutputSettings = Annotated[
 
 
 class NodeSettings(TomlBaseSettings):
-    """The sections every `Node.from_settings` reads. A node subclasses this
+    """The sections every `SyncNode.from_settings` reads. A node subclasses this
     and adds its own.
 
     `output` is optional because a node may deliver its output itself, e.g.

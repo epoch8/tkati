@@ -5,7 +5,7 @@ from tkati_core.consumer import (
     build_consumer,
 )
 from tkati_core.metrics import LoopStatsCollector, MetricsSettings, start_metrics_server
-from tkati_core.node import DEFAULT_PHASES, SINK_PHASES, Batch, Event, Idle, Node
+from tkati_core.node import DEFAULT_PHASES, SINK_PHASES, Batch, Event, Idle, SyncNode
 from tkati_core.producer import PRODUCER_PHASES, Producer, build_producer
 from tkati_core.settings import InputSettings, NodeSettings, OutputSettings
 from tkati_core.stats import LoopStats, LoopStatsTotals
@@ -25,10 +25,10 @@ __all__ = [
     "LoopStatsCollector",
     "LoopStatsTotals",
     "MetricsSettings",
-    "Node",
     "NodeSettings",
     "OutputSettings",
     "Producer",
+    "SyncNode",
     "build_consumer",
     "build_producer",
     "start_metrics_server",
