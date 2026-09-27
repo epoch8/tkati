@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from tkati_core import (
     CONSUMER_PHASES,
     DEFAULT_PHASES,
+    PIPELINED_PHASES,
     PRODUCER_PHASES,
     SINK_PHASES,
     Batch,
@@ -19,6 +20,7 @@ from tkati_core import (
     Idle,
     LoopStats,
     NodeSettings,
+    PipelinedNode,
     SyncNode,
 )
 from tkati_core.clickhouse.settings import (
@@ -32,7 +34,12 @@ from tkati_core.kafka.settings import (
     KafkaInputSettings,
     KafkaTopicSettings,
 )
-from tkati_core.testing import MemoryConsumer, MemoryProducer, memory_node
+from tkati_core.testing import (
+    MemoryConsumer,
+    MemoryProducer,
+    memory_node,
+    memory_pipelined_node,
+)
 
 
 def _table(n: int) -> pa.Table:
@@ -691,6 +698,202 @@ def test_sigterm_while_waiting_on_the_reader_stops_promptly() -> None:
 
     assert seen == []
     assert time.monotonic() - started < 2
+
+
+# --- PipelinedNode ----------------------------------------------------------
+
+
+def _finish_all(node: PipelinedNode, after_commit=None) -> list[int]:
+    """Send every batch unchanged; return the order `done()` was called in."""
+    order: list[int] = []
+    for event in node.consume_arrow():
+        if isinstance(event, Batch):
+            order.append(len(order))
+            node.done(
+                event,
+                output_arrow=event.data,
+                after_commit=None
+                if after_commit is None
+                else after_commit(len(order) - 1),
+            )
+    return order
+
+
+def test_pipelined_done_returns_before_delivery_and_commits_after() -> None:
+    node, consumer, producer = memory_pipelined_node([_table(1)], deliver="manual")
+    producer = _producer(producer)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            # Returned with the delivery still in flight: nothing committed.
+            assert consumer.commits == []
+            producer.release(1)
+
+    assert consumer.commits == [0]
+    assert node.stats.rows_out == 1
+
+
+def test_pipelined_commits_in_read_order_whatever_the_ack_order() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1), _table(1)], deliver="manual"
+    )
+    producer = _producer(producer)
+    commits_seen: list[list[int]] = []
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            if len(producer.tags) == 3:
+                producer.release(3, 2)  # the later ones first
+                node._before_read()
+                commits_seen.append(list(consumer.commits))
+                producer.release(1)
+
+    assert commits_seen == [[]]  # batch 0 held back batches 1 and 2
+    assert consumer.commits == [0, 1, 2]
+
+
+def test_pipelined_done_blocks_at_max_in_flight() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1), _table(1)], deliver="manual", max_in_flight=1
+    )
+    producer = _producer(producer)
+    commits_when_blocked: list[list[int]] = []
+
+    def on_wait(tag: int) -> None:
+        commits_when_blocked.append(list(consumer.commits))
+        producer.release(tag)
+
+    producer.on_wait = on_wait
+    with node:
+        _finish_all(node)
+
+    # The second done() found two batches finished, over the limit of one,
+    # and waited for the oldest; likewise the third, and the drain at exit.
+    assert producer.waited_on == [1, 2, 3]
+    assert commits_when_blocked == [[], [0], [0, 1]]
+    assert consumer.commits == [0, 1, 2]
+    assert node.stats.phase_sec["wait/in-flight"] >= 0
+
+
+def test_pipelined_after_commit_runs_after_the_commit_in_order() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(1), _table(1)])
+    with node:
+        _finish_all(
+            node, after_commit=lambda i: lambda: consumer.log.append(f"after:{i}")
+        )
+
+    commits_and_hooks = [
+        entry for entry in consumer.log if entry.startswith(("commit", "after"))
+    ]
+    assert commits_and_hooks == ["commit:0", "after:0", "commit:1", "after:1"]
+
+
+def test_pipelined_failed_delivery_rewinds_the_oldest_uncommitted_batch() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1)], deliver="manual"
+    )
+    producer = _producer(producer)
+    ran: list[int] = []
+    producer.on_wait = lambda tag: producer.fail(tag, DeliveryError("gave up"))
+    with pytest.raises(DeliveryError, match="gave up"), node:
+        _finish_all(node, after_commit=lambda i: lambda: ran.append(i))
+
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+    assert ran == []
+    assert node.stats.rows_out == 0
+
+
+def test_pipelined_exception_rewinds_the_oldest_finished_batch() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(1), _table(1)], deliver="manual")
+
+    def fail_on_second() -> None:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            if consumer.log.count("produce") == 1:
+                raise RuntimeError("boom")
+            node.done(event, output_arrow=event.data)
+
+    with pytest.raises(RuntimeError, match="boom"), node:
+        fail_on_second()
+
+    # Batch 0 was finished but undelivered, batch 1 was being processed:
+    # batch 0 is the oldest uncommitted, and rewinding it rewinds both.
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+def test_pipelined_break_after_done_still_commits_on_exit() -> None:
+    node, consumer, producer = memory_pipelined_node(
+        [_table(1), _table(1)], deliver="manual"
+    )
+    producer = _producer(producer)
+    producer.on_wait = producer.release
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            break
+
+    assert consumer.commits == [0]
+    assert producer.waited_on == [1]
+
+
+def test_pipelined_keyboard_interrupt_neither_drains_nor_rewinds() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(1), _table(1)], deliver="manual")
+
+    def interrupt_after_first() -> None:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, output_arrow=event.data)
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt), node:
+        interrupt_after_first()
+
+    assert consumer.commits == []
+    assert consumer.rewinds == []
+
+
+def test_pipelined_without_a_producer_commits_at_once() -> None:
+    node, consumer, _ = memory_pipelined_node([_table(2)], output=False)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            node.done(event, rows_out=2)
+            assert consumer.commits == [0]
+
+    assert node.stats.rows_out == 2
+
+
+def test_pipelined_phases() -> None:
+    node, _, _ = memory_pipelined_node([])
+    assert node.stats.phases == PIPELINED_PHASES
+    with pytest.raises(ValueError, match="wait/in-flight"):
+        memory_pipelined_node([], phases=DEFAULT_PHASES)
+
+
+def test_pipelined_with_read_ahead_commits_everything_in_order() -> None:
+    tables = [_table(1), _table(2), None, _table(3)]
+    node, consumer, producer = memory_pipelined_node(tables, read_ahead=2)
+    with node:
+        _finish_all(node)
+
+    assert consumer.commits == [0, 1, 2]
+    assert [len(t) for t in _producer(producer).sent] == [1, 2, 3]
+
+
+def _takes_a_sync_node(node: SyncNode) -> None: ...
+
+
+def _type_check_fixture(node: PipelinedNode) -> None:
+    """Never called. `ty` must reject passing a PipelinedNode where a
+    SyncNode is expected: code written for SyncNode.done() relies on the
+    commit having happened when it returns. If the classes are ever made to
+    share that type, ty reports this ignore as unused."""
+    _takes_a_sync_node(node)  # ty: ignore[invalid-argument-type]
 
 
 # --- signals ----------------------------------------------------------------

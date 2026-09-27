@@ -27,6 +27,7 @@ import queue
 import signal
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Sized
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
@@ -53,6 +54,14 @@ from tkati_core.stats import LoopStats
 DEFAULT_PHASES = (*CONSUMER_PHASES, "wait/input", *PRODUCER_PHASES, "commit")
 # The default for a node without an output producer.
 SINK_PHASES = (*CONSUMER_PHASES, "wait/input", "commit")
+# PipelinedNode's default: it also times `done()` waiting for a free slot.
+PIPELINED_PHASES = (
+    *CONSUMER_PHASES,
+    "wait/input",
+    *PRODUCER_PHASES,
+    "wait/in-flight",
+    "commit",
+)
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -177,10 +186,11 @@ class _NodeBase:
             *CONSUMER_PHASES,
             "wait/input",
             *(PRODUCER_PHASES if producer is not None else ()),
+            *self._EXTRA_PHASES,
             "commit",
         )
         if phases is None:
-            phases = DEFAULT_PHASES if producer is not None else SINK_PHASES
+            phases = self._default_phases(producer is not None)
         missing = [name for name in required if name not in phases]
         if missing:
             # A column the harness fills in but the report doesn't show would
@@ -248,6 +258,7 @@ class _NodeBase:
                 metrics=settings.metrics,
                 handle_signals=True,
                 read_ahead=settings.pipeline.read_ahead,
+                **cls._settings_kwargs(settings),
             )
             # Built without error: the node owns them now.
             built.pop_all()
@@ -274,12 +285,24 @@ class _NodeBase:
         tb: TracebackType | None,
     ) -> None:
         self._entered = False
+        # A clean exit (the loop ended, or the node broke out of it) finishes
+        # what the node finished: PipelinedNode commits batches still waiting
+        # for delivery. A failure there fails the exit like any other.
+        failure = exc
+        drain_error: Exception | None = None
         try:
+            if exc is None:
+                # Inside the try, so a forced stop while draining (a second
+                # Ctrl-C) still closes everything.
+                try:
+                    self._drain()
+                except Exception as error:
+                    drain_error = failure = error
             # A failed batch is rewound so it is read again. Not for a bare
             # BaseException (Ctrl-C twice): a forced stop shouldn't wait on a
             # seek, and the batch is uncommitted either way.
             oldest = self._oldest_uncommitted()
-            if oldest is not None and isinstance(exc, Exception):
+            if oldest is not None and isinstance(failure, Exception):
                 # The read-ahead thread must not be reading while we seek: a
                 # read in progress could hand out messages fetched before the
                 # seek, under a sequence number that could then be committed.
@@ -312,6 +335,8 @@ class _NodeBase:
                 if self._producer is not None:
                     closing.callback(self._producer.close)
                 closing.callback(self._consumer.close)
+        if drain_error is not None:
+            raise drain_error
 
     def consume_arrow(self) -> Iterator[Batch[pa.Table] | Idle]:
         """Iterate the input as Arrow tables (`Consumer.read_arrow`). A
@@ -442,6 +467,7 @@ class _NodeBase:
                 "event was requested; call `node.done(event)` once the batch is finished"
             )
 
+        self._before_read()
         self._stats.report_if_due()
 
         if self._stop_requested:
@@ -557,6 +583,25 @@ class _NodeBase:
         not yet committed."""
         return self._batch
 
+    # Hooks for the subclasses; the defaults are SyncNode's.
+
+    # Phases the subclass times itself, required in any `phases=` tuple.
+    _EXTRA_PHASES: tuple[str, ...] = ()
+
+    def _default_phases(self, has_producer: bool) -> tuple[str, ...]:
+        return DEFAULT_PHASES if has_producer else SINK_PHASES
+
+    @classmethod
+    def _settings_kwargs(cls, settings: NodeSettings) -> dict[str, Any]:
+        """Extra constructor arguments `from_settings` reads from settings."""
+        return {}
+
+    def _before_read(self) -> None:
+        """Runs at every event request, before the next read."""
+
+    def _drain(self) -> None:
+        """Runs when the loop exits cleanly, before anything is closed."""
+
     def phase(self, name: str) -> AbstractContextManager[None]:
         """Time a block of the node's own work into phase `name`."""
         return self._stats.phase(name)
@@ -671,3 +716,134 @@ class SyncNode(_NodeBase):
         # Committed: nothing left to rewind, whatever the node does next.
         self._batch = None
         self._event = None
+
+
+@dataclass(slots=True)
+class _Finished:
+    """A batch `PipelinedNode.done()` was called for, not yet committed."""
+
+    batch: ConsumedBatch[Any]
+    tag: int
+    rows_out: int
+    after_commit: Callable[[], object] | None
+
+
+class PipelinedNode(_NodeBase):
+    """Runs a node's loop like `SyncNode`, except that `done()` returns
+    without waiting for delivery: the node goes on to the next batch while
+    this one's output is still in flight.
+
+    The batch is committed later, on the loop thread, once its output and
+    every earlier batch's output is delivered, in read order. So the lines
+    after `done()` run *before* the commit. Work that must follow the commit
+    (marking keys seen, counting what a batch dropped) goes in
+    `done(..., after_commit=fn)` instead.
+
+    Use as a context manager, and consume inside it::
+
+        with PipelinedNode.from_settings(settings) as node:
+            for event in node.consume_arrow():
+                if isinstance(event, Batch):
+                    node.done(event, output_arrow=transform(event.data))
+
+    Deliberately not a subclass of `SyncNode`: code written for
+    `SyncNode.done()` relies on the commit having happened when it returns.
+    """
+
+    _EXTRA_PHASES = ("wait/in-flight",)
+
+    def __init__(
+        self,
+        consumer: Consumer,
+        producer: Producer | None,
+        *,
+        max_in_flight: int = 4,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            max_in_flight: Batches `done()` may leave waiting for delivery.
+                When there are more, `done()` blocks until the oldest one is
+                delivered and committed. `from_settings` takes it from
+                `[pipeline] max_in_flight` (default 4).
+            **kwargs: As for `SyncNode`.
+        """
+        if max_in_flight < 1:
+            raise ValueError("max_in_flight must be at least 1 batch")
+        super().__init__(consumer, producer, **kwargs)
+        self._max_in_flight = max_in_flight
+        self._finished: deque[_Finished] = deque()
+
+    def _default_phases(self, has_producer: bool) -> tuple[str, ...]:
+        if has_producer:
+            return PIPELINED_PHASES
+        return (*CONSUMER_PHASES, "wait/input", "wait/in-flight", "commit")
+
+    @classmethod
+    def _settings_kwargs(cls, settings: NodeSettings) -> dict[str, Any]:
+        return {"max_in_flight": settings.pipeline.max_in_flight}
+
+    def done(
+        self,
+        event: Batch[Any],
+        *,
+        output_arrow: pa.Table | None = None,
+        output_pylist: list[dict] | None = None,
+        rows_out: int | None = None,
+        after_commit: Callable[[], object] | None = None,
+    ) -> None:
+        """Finish `event`'s batch: send its output and return, without waiting
+        for delivery (unless `max_in_flight` batches are already waiting, in
+        which case wait for the oldest first).
+
+        The batch is committed once its output and every earlier batch's
+        output is delivered; then `after_commit` runs, on the loop thread,
+        between events or inside a later `done()`. It never runs for a batch
+        that isn't committed. The output arguments are as for
+        `SyncNode.done()`.
+
+        If a delivery fails, `DeliveryError` is raised from a later `done()`
+        or event request, and the oldest uncommitted batch is rewound when the
+        loop exits.
+        """
+        batch, rows = self._take_batch(event, output_arrow, output_pylist, rows_out)
+        self._finished.append(_Finished(batch, _tag(batch), rows, after_commit))
+        # Finished: the node may ask for the next event now.
+        self._batch = None
+        self._event = None
+        self._settle(keep=self._max_in_flight)
+
+    def _settle(self, keep: int) -> None:
+        """Commit finished batches from the oldest while they are delivered,
+        and wait for deliveries while more than `keep` are left. Stops at the
+        first batch not yet delivered: commits never skip ahead."""
+        while self._finished:
+            head = self._finished[0]
+            if not self._delivered(head.tag, wait=len(self._finished) > keep):
+                return
+            self._commit(head.batch, head.rows_out)
+            # Popped only once committed, so a failed commit leaves it the
+            # oldest uncommitted batch, the one `__exit__` rewinds.
+            self._finished.popleft()
+            if head.after_commit is not None:
+                head.after_commit()
+
+    def _delivered(self, tag: int, wait: bool) -> bool:
+        if self._producer is None:
+            return True
+        if not wait:
+            return self._producer.wait_delivered(tag, timeout=0)
+        with self._stats.phase("wait/in-flight"):
+            return self._producer.wait_delivered(tag, timeout=None)
+
+    def _before_read(self) -> None:
+        # Commit what has been delivered since the last event, without waiting.
+        self._settle(keep=self._max_in_flight)
+
+    def _drain(self) -> None:
+        self._settle(keep=0)
+
+    def _oldest_uncommitted(self) -> ConsumedBatch[Any] | None:
+        if self._finished:
+            return self._finished[0].batch
+        return self._batch

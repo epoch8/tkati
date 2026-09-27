@@ -29,7 +29,7 @@ forwarding a possible duplicate over silently dropping a real event.
 import math
 import shutil
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -246,12 +246,15 @@ class BucketedDedupStore:
         return cast("list[bytes | None]", pc.cast(strings, pa.binary()).to_pylist())
 
     def filter_duplicates(
-        self, keys: list[bytes | None]
+        self, keys: list[bytes | None], pending: Collection[bytes] = ()
     ) -> tuple[pa.BooleanArray, list[bytes]]:
         """
         Given per-row encoded keys (None = no key, always kept), returns
         (keep_mask, keys_to_mark_seen). keep_mask[i] corresponds to keys[i]
         and is directly usable with pyarrow.Table.filter().
+
+        Keys in `pending` count as already seen: sent in an earlier batch but
+        not yet in the store, because that batch isn't committed yet.
 
         In-batch duplicates (two rows with the same key, neither yet in the
         store) are resolved locally; the remaining unique candidates are
@@ -267,7 +270,7 @@ class BucketedDedupStore:
             if key is None:
                 keep_mask[i] = True
                 continue
-            if key in seen_in_batch:
+            if key in seen_in_batch or key in pending:
                 continue
             seen_in_batch.add(key)
             to_check.append(key)

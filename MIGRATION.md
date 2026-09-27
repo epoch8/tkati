@@ -25,6 +25,27 @@ with SyncNode.from_settings(settings) as node:
 Rename type annotations too (`def run(node: SyncNode, ...)`).
 `tkati_core.testing.memory_node` returns a `SyncNode`.
 
+### Moving a node to `PipelinedNode` (optional)
+
+`PipelinedNode` is new, and faster, but it is not a drop-in replacement: its
+`done()` returns before the batch is committed. Code after `done()` that
+relies on the commit having happened must move into `after_commit=`:
+
+```python
+# SyncNode
+node.done(event, output_arrow=kept)
+store.add_many(keys)                  # runs after the commit
+
+# PipelinedNode
+node.done(event, output_arrow=kept, after_commit=partial(store.add_many, keys))
+```
+
+Anything the next batches must see before that commit (for example keys
+already sent, for dedup) has to be tracked by the node itself until the
+callback runs. A node with no work after `done()` only changes its class.
+Custom `phases=` tuples add `"wait/in-flight"`; `PIPELINED_PHASES` is the
+default.
+
 ### `Producer` implementations take a delivery tag
 
 Only code that implements `Producer` itself is affected; callers are not.

@@ -377,7 +377,8 @@ it: `on_delivered` for what must follow delivery, and `after_commit` for what
 must follow the commit. Until then, "the commit has been made when `done()`
 returns" holds. Nodes written against it (dedup's mark-seen and counter) will
 move their tail lines into those callbacks as part of that change.
-`design-docs/2026-09-26-pipelined-worker-loop.md` designs that change.
+`design-docs/2026-09-26-pipelined-worker-loop.md` designs that change, built
+in 0.8.0 as a separate class, `PipelinedNode`.
 From 0.8.0, `Node` as described in this doc is named `SyncNode`.
 
 ### One step of the iteration

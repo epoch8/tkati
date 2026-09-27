@@ -141,6 +141,43 @@ the loop works, so with read-ahead those phases overlap the others, and the
 percentages can add up to more than 100. Constructing a `SyncNode` directly
 defaults to `read_ahead=0`.
 
+**`PipelinedNode`.** A sibling of `SyncNode` for nodes that shouldn't wait for
+each batch's delivery. Its `done()` sends the output and returns at once; the
+batch is committed later, on the loop thread, once its output and every
+earlier batch's output is delivered, in read order. So **the lines after
+`done()` run before the commit**. Work that must follow the commit goes in a
+callback:
+
+```python
+from functools import partial
+
+with PipelinedNode.from_settings(settings) as node:
+    for event in node.consume_arrow():
+        if isinstance(event, Batch):
+            kept, keys = dedupe(event.data)
+            node.done(event, output_arrow=kept, after_commit=partial(mark_seen, keys))
+```
+
+`after_commit` runs after that batch's commit, between events or inside a
+later `done()`, never at the same time as the loop body, and never for a batch
+that isn't committed. Up to `[pipeline] max_in_flight` finished batches
+(default 4) may wait for delivery; past that, `done()` blocks until the oldest
+is delivered and committed, timed as `wait/in-flight`. A failed delivery raises
+`DeliveryError` from a later `done()` or event request, and the oldest
+uncommitted batch is rewound. A clean exit, or a stop, waits for every
+finished batch to be delivered and commits it; `KeyboardInterrupt` doesn't.
+
+Choose `SyncNode` when the code after `done()` must see the batch committed,
+or throughput doesn't matter; choose `PipelinedNode` when it does, and move
+that code into `after_commit`. The two classes are deliberately unrelated
+types, so a function written for one (`def run(node: SyncNode)`) doesn't
+type-check with the other. `PipelinedNode` requires `wait/in-flight` in any
+custom `phases=` tuple (`PIPELINED_PHASES` is its default).
+
+Against a local Redpanda, node-el's loop moved 200k JSON rows in batches of
+1000 at about 90k rows/s with `SyncNode`, 97k with read-ahead, and 128k with
+`PipelinedNode` (`benchmarks/bench_node_pipeline.py`).
+
 **Nodes without an output producer.** `NodeSettings.output` is optional. When
 it's absent, the node has no producer (`producer=None`), and passing
 `output_arrow=` or `output_pylist=` to `done()` raises. Such a node writes through its own client, for
@@ -164,9 +201,14 @@ def run(node: SyncNode, client: ApiClient) -> None:
 **Testing.** `tkati_core.testing.memory_node(batches)` returns a `SyncNode` over
 an in-memory consumer and producer, along with those two doubles. They record
 what was read, sent, flushed, committed and rewound, in one shared `log`, and
-the loop ends once `batches` runs out. For tests against a real broker,
-construct `SyncNode(consumer, producer, ..., stop_when_idle=True)`: it processes
-what is already in the topic and stops at the first empty poll.
+the loop ends once `batches` runs out. `memory_pipelined_node(batches,
+deliver="manual")` does the same for a `PipelinedNode`, with a producer that
+holds deliveries until the test calls `producer.release(tag)` (or
+`producer.fail(tag, error)`), so a test can hold them back or release them out
+of order; `producer.on_wait` runs whenever the node blocks on one. For tests
+against a real broker, construct `SyncNode(consumer, producer, ...,
+stop_when_idle=True)` (or `PipelinedNode`): it processes what is already in
+the topic and stops at the first empty poll.
 
 ### `Consumer` / `Producer` base classes
 

@@ -1,27 +1,41 @@
 """Deduplicate a Kafka topic by one field, within a rolling window.
 
-Ordering is what makes this at-least-once without losing events. For each
-batch, in the loop body:
+The node runs on `PipelinedNode`: `done()` sends a batch's survivors and
+returns while they are still in flight, and the batch is committed later,
+once delivered. For each batch:
 
-1. look the keys up and filter out duplicates;
-2. `done()` with the survivors: sent, delivered, then committed;
-3. only then mark their keys seen in the store.
+1. look the keys up, in the store and among the keys still *pending* (sent
+   in a batch not yet committed), and filter out duplicates;
+2. add the survivors' keys to the pending set, and `done()` with the
+   survivors;
+3. once the batch is committed (its `after_commit`), mark its keys seen in
+   the store and drop them from the pending set.
 
-A crash before the commit re-reads the batch at restart, and its rows are
-sent again: a duplicate at worst. A crash between the commit and step 3 means
-the batch isn't re-read and its keys were never marked, so a later duplicate
-of one of them is forwarded: again a duplicate at worst, in a window as wide
-as one memtable write. Either way no event is lost. Marking keys seen before
-delivery is the one dangerous order: a crash in between would drop the event
-on re-read without it ever having been produced.
+Checking the pending set is what keeps cross-batch dedup exact while batches
+are in flight: a key sent in batch N is dropped from batch N+1 even before N
+is delivered.
+
+No event can be lost, because a key reaches the store only after its row is
+delivered and its batch committed. Marking keys seen before delivery is the
+one dangerous order: a crash in between would drop the event on re-read
+without it ever having been produced. The crash cases are all duplicates at
+worst:
+
+- before a batch is committed: the pending set is lost along with the
+  uncommitted offsets, so the batch is re-read, finds its keys unseen, and is
+  sent again;
+- between the commit and the store write: the batch isn't re-read and its
+  keys were never stored, so a later duplicate of one of them is forwarded,
+  in a window as wide as one memtable write.
 """
 
 from contextlib import closing
+from functools import partial
 
 import pyarrow as pa
 from loguru import logger
 from prometheus_client import Counter
-from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, Batch, SyncNode
+from tkati_core import CONSUMER_PHASES, PRODUCER_PHASES, Batch, PipelinedNode
 
 from tkati_node_dedup.settings import AppSettings
 from tkati_node_dedup.store import BucketedDedupStore
@@ -37,6 +51,7 @@ _PHASES = (
     "wait/input",
     "lookup",
     *PRODUCER_PHASES,
+    "wait/in-flight",
     "write",
     "commit",
 )
@@ -51,7 +66,10 @@ _DROPPED_ROWS = Counter(
 
 
 def _dedupe_batch(
-    batch: pa.Table, field_name: str, store: BucketedDedupStore
+    batch: pa.Table,
+    field_name: str,
+    store: BucketedDedupStore,
+    pending: set[bytes],
 ) -> tuple[pa.Table, list[bytes]]:
     """Filter out rows whose dedup key was already seen (in-batch or in the store).
 
@@ -63,12 +81,31 @@ def _dedupe_batch(
     one RocksDB round trip per open bucket) rather than done per row.
     """
     keys = store.encode_keys(batch.column(field_name))
-    keep_mask, new_keys = store.filter_duplicates(keys)
+    keep_mask, new_keys = store.filter_duplicates(keys, pending)
     filtered = batch.filter(keep_mask)
     return filtered, new_keys
 
 
-def run(node: SyncNode, store: BucketedDedupStore, field_name: str) -> None:
+def _mark_seen(
+    node: PipelinedNode,
+    store: BucketedDedupStore,
+    pending: set[bytes],
+    keys: list[bytes],
+    dropped: int,
+) -> None:
+    """A batch's `after_commit`: its keys go from pending to the store, and
+    its drops are counted. Counted only once committed: a batch that fails
+    before then is re-read after restart, and counting its drops too would
+    count them twice."""
+    with node.phase("write"):
+        store.add_many(keys)
+    pending.difference_update(keys)
+    _DROPPED_ROWS.inc(dropped)
+
+
+def run(node: PipelinedNode, store: BucketedDedupStore, field_name: str) -> None:
+    # Keys sent in batches not yet committed. See the module docstring.
+    pending: set[bytes] = set()
     for event in node.consume_arrow():
         # Runs on every event, a batch or an empty poll, and can never raise.
         # Buckets must be fresh *before* the dedupe check below runs — doing
@@ -101,23 +138,17 @@ def run(node: SyncNode, store: BucketedDedupStore, field_name: str) -> None:
             # Includes the table.filter() call, which is Arrow work rather than
             # a store lookup — cheap enough not to be worth a phase of its own.
             with node.phase("lookup"):
-                filtered, new_keys = _dedupe_batch(table, field_name, store)
-
-        # Sent, delivered, then committed. Everything below runs after the
-        # commit.
-        node.done(event, output_arrow=filtered)
-
-        # Only after a confirmed delivery: mark these keys seen. Marking a key
-        # seen before its row is delivered would risk losing the event on a
-        # crash; see the module docstring for why after the commit is safe.
-        with node.phase("write"):
-            store.add_many(new_keys)
+                filtered, new_keys = _dedupe_batch(table, field_name, store, pending)
 
         dropped = len(table) - len(filtered)
-        # Counted only once committed: a batch that fails before then is
-        # re-read after restart, and counting its drops too would count them
-        # twice.
-        _DROPPED_ROWS.inc(dropped)
+        # Before done(): it may commit this very batch (and so run its
+        # after_commit) before returning, if the delivery is already in.
+        pending.update(new_keys)
+        node.done(
+            event,
+            output_arrow=filtered,
+            after_commit=partial(_mark_seen, node, store, pending, new_keys, dropped),
+        )
 
         logger.debug(
             f"Batch of {len(table)} rows: produced {len(filtered)}, "
@@ -136,5 +167,5 @@ def main() -> None:
     )
     # The store is entered first, so it closes last: after the node has
     # stopped and closed its clients.
-    with closing(store), SyncNode.from_settings(settings, phases=_PHASES) as node:
+    with closing(store), PipelinedNode.from_settings(settings, phases=_PHASES) as node:
         run(node, store, settings.dedup.field)

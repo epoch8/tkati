@@ -1,3 +1,13 @@
+# 0.8.0
+
+* Runs on `tkati-core`'s `PipelinedNode`: it reads the next batch while
+  producing the current one and doesn't wait for each batch's delivery.
+  Batches are still committed only once delivered, in read order. About 13x
+  the throughput of 0.7.0 against a local broker (most of it from a
+  `KafkaProducer.flush()` that no longer costs 100 ms per batch)
+* A Kafka delivery failure now stops the node and the batch is re-read,
+  instead of being committed with its rows lost
+
 # 0.7.0
 
 * Runs on `tkati-core`'s `Node`. SIGTERM and SIGINT now stop the node after

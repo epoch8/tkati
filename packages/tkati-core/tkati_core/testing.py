@@ -14,13 +14,13 @@ operations across them:
 import threading
 import time
 from collections.abc import Callable, Iterable, Sized
-from typing import Any
+from typing import Any, Literal
 
 import pyarrow as pa
 
 from tkati_core._native import BatchOffsets
 from tkati_core.consumer import ConsumedBatch, Consumer
-from tkati_core.node import SyncNode
+from tkati_core.node import PipelinedNode, SyncNode
 from tkati_core.producer import Producer
 from tkati_core.stats import LoopStats
 
@@ -122,18 +122,34 @@ class MemoryProducer(Producer):
     """Records what it is sent, in `sent`, as given: a table from
     `produce_arrow`, a list of dicts from `produce_pylist`, and each send's
     tag in `tags`. `flush` raises `fail_flush` when set, and
-    `wait_delivered(tag)` raises `fail_delivery[tag]` when there is one."""
+    `wait_delivered(tag)` raises `fail_delivery[tag]` when there is one.
+
+    With `deliver="immediate"` (the default) everything sent counts as
+    delivered at once. With `deliver="manual"` a tag's messages stay in
+    flight until the test calls `release(tag)` (or `fail(tag, error)`), so it
+    can hold deliveries back and release them out of order. A blocking
+    `wait_delivered` then calls `on_wait(tag)` first, the point at which a
+    single-threaded test can release or fail a delivery, and raises
+    AssertionError if the tag is still in flight after it, rather than hang.
+    A tag nothing was sent with counts as delivered, as with Kafka.
+    """
 
     def __init__(
         self,
         *,
         fail_flush: BaseException | None = None,
         fail_delivery: dict[int, BaseException] | None = None,
+        deliver: Literal["immediate", "manual"] = "immediate",
+        on_wait: Callable[[int], object] | None = None,
         log: list[str] | None = None,
         name: str = "producer",
     ) -> None:
         self.fail_flush = fail_flush
         self.fail_delivery: dict[int, BaseException] = dict(fail_delivery or {})
+        self.deliver = deliver
+        self.on_wait = on_wait
+        self.released: set[int] = set()
+        self.waited_on: list[int] = []
         self.tags: list[int | None] = []
         self.log: list[str] = log if log is not None else []
         self.name = name
@@ -164,11 +180,40 @@ class MemoryProducer(Producer):
         self.tags.append(tag)
         self.log.append("produce")
 
+    def release(self, *tags: int) -> None:
+        """Deliver these tags' messages (`deliver="manual"`)."""
+        self.released.update(tags)
+
+    def fail(self, tag: int, error: BaseException) -> None:
+        """Fail this tag's delivery with `error`."""
+        self.fail_delivery[tag] = error
+
     def wait_delivered(self, tag: int, timeout: float | None = None) -> bool:
-        self.log.append(f"wait:{tag}")
+        # Logged only when it may block: a non-blocking check can run at
+        # every event, and would drown the log.
+        if timeout != 0:
+            self.log.append(f"wait:{tag}")
+        if self._in_flight(tag):
+            if timeout == 0:
+                return False
+            self.waited_on.append(tag)
+            if self.on_wait is not None:
+                self.on_wait(tag)
+            if self._in_flight(tag):
+                raise AssertionError(
+                    f"blocked on tag {tag}, which the test never releases"
+                )
         if tag in self.fail_delivery:
             raise self.fail_delivery[tag]
         return True
+
+    def _in_flight(self, tag: int) -> bool:
+        return (
+            self.deliver == "manual"
+            and tag in self.tags
+            and tag not in self.released
+            and tag not in self.fail_delivery
+        )
 
     def flush(self, stats: LoopStats | None = None) -> None:
         self.stats_seen.append(stats)
@@ -214,6 +259,34 @@ def memory_node(
     node = SyncNode(
         consumer,
         producer,
+        batch_size=batch_size,
+        batch_timeout_sec=0,
+        phases=phases,
+        read_ahead=read_ahead,
+    )
+    consumer.on_exhausted = node._end_of_input
+    return node, consumer, producer
+
+
+def memory_pipelined_node(
+    batches: Iterable[_Rows | None],
+    *,
+    batch_size: int = 100,
+    phases: tuple[str, ...] | None = None,
+    output: bool = True,
+    deliver: Literal["immediate", "manual"] = "immediate",
+    max_in_flight: int = 4,
+    read_ahead: int = 0,
+) -> tuple[PipelinedNode, MemoryConsumer, MemoryProducer | None]:
+    """`memory_node` for a `PipelinedNode`. With `deliver="manual"` the
+    producer holds deliveries until the test releases them."""
+    log: list[str] = []
+    consumer = MemoryConsumer(batches, log=log)
+    producer = MemoryProducer(deliver=deliver, log=log) if output else None
+    node = PipelinedNode(
+        consumer,
+        producer,
+        max_in_flight=max_in_flight,
         batch_size=batch_size,
         batch_timeout_sec=0,
         phases=phases,

@@ -1,3 +1,14 @@
+# 0.8.0
+
+* Runs on `tkati-core`'s `PipelinedNode`: it reads the next batch while
+  producing the current one and doesn't wait for each batch's delivery.
+  Keys sent in batches not yet committed are held as pending and checked
+  along with the store, so dedup across batches stays exact; they are marked
+  seen once their batch is committed
+* A Kafka delivery failure now stops the node and the batch is re-read,
+  instead of being committed with its rows lost
+* The perf line gains `wait/input` and `wait/in-flight` columns
+
 # 0.7.0
 
 * Runs on `tkati-core`'s `Node`. SIGTERM and SIGINT now stop the node after

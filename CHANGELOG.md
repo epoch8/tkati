@@ -14,6 +14,24 @@ config or docs changed.
 
 ## 0.8.0
 
+### onvqqtpt — PipelinedNode [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- New `PipelinedNode`, a sibling of `SyncNode` (not a subclass). Its `done()`
+  sends the output and returns without waiting for delivery; batches are
+  committed later, in read order, once delivered. Work that must follow the
+  commit goes in `done(..., after_commit=fn)`. `[pipeline] max_in_flight`
+  (default 4) caps how many finished batches may wait, and `done()` blocks
+  past it (`wait/in-flight`). A clean exit or stop drains and commits them.
+- node-el and node-dedup run on `PipelinedNode`. node-dedup checks new batches
+  against the keys sent in uncommitted batches as well as the store, so
+  cross-batch dedup stays exact, and marks keys seen in `after_commit`.
+- `tkati_core.testing`: `memory_pipelined_node`, and `MemoryProducer`
+  `deliver="manual"` with `release`/`fail`/`on_wait`.
+- `benchmarks/bench_node_pipeline.py`: node-el's loop, Kafka to Kafka, 200k
+  rows in batches of 1000 against local Redpanda: `SyncNode` ~90k rows/s,
+  with read-ahead ~97k, `PipelinedNode` ~128k.
+- Design doc: `design-docs/2026-09-26-pipelined-worker-loop.md` (Phase C).
+
 ### skswwwqq — Read-ahead [tkati-core, tkati-node-el, tkati-node-dedup, repo]
 
 - Nodes built with `from_settings` read the next batch on a background thread

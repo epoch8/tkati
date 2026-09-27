@@ -1,5 +1,12 @@
 # 0.8.0
 
+* New `PipelinedNode`: `done()` returns before delivery and takes
+  `after_commit=`; batches are committed in read order once delivered, with
+  at most `max_in_flight` (`[pipeline]`, default 4) waiting. New
+  `PIPELINED_PHASES`, and a `wait/in-flight` phase it requires.
+* `tkati_core.testing`: `memory_pipelined_node`; `MemoryProducer` gains
+  `deliver="manual"`, `release`, `fail`, `on_wait` and `waited_on`, and logs
+  `wait:<tag>` only for waits that may block.
 * Read-ahead: `SyncNode(..., read_ahead=n)` reads up to `n` batches on a
   background thread while the loop body works. `from_settings` takes it from
   the new `[pipeline]` section (`PipelineSettings`, default `read_ahead = 1`);

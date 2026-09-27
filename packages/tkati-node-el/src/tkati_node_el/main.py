@@ -1,14 +1,15 @@
 from loguru import logger
-from tkati_core import Batch, SyncNode
+from tkati_core import Batch, PipelinedNode
 
 from tkati_node_el.settings import AppSettings
 
 
-def run(node: SyncNode) -> None:
+def run(node: PipelinedNode) -> None:
     """Write every batch to the output unchanged.
 
-    `done()` waits for delivery before it commits, so delivery is
-    at-least-once: a batch is committed only after it is confirmed delivered.
+    `done()` returns while the batch is still in flight; the node commits it
+    once it is delivered, in read order. Delivery is at-least-once: a batch
+    is committed only after it is confirmed delivered.
     """
     for event in node.consume_arrow():
         if isinstance(event, Batch):
@@ -18,5 +19,5 @@ def run(node: SyncNode) -> None:
 
 def main() -> None:
     settings = AppSettings()
-    with SyncNode.from_settings(settings) as node:
+    with PipelinedNode.from_settings(settings) as node:
         run(node)
