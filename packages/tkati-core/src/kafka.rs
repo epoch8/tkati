@@ -1,7 +1,8 @@
 //! librdkafka consumer and producer, driven without holding the GIL.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -202,7 +203,16 @@ fn record_offset(offsets: &mut Offsets, partition: i32, offset: i64) {
 }
 
 pub struct KafkaConsumer {
-    inner: Mutex<Option<BaseConsumer<StderrContext>>>,
+    // A read lock for polling, committing and seeking, which librdkafka
+    // allows from several threads at once (a harness reader thread polls
+    // while the loop commits); the write lock only for `close`, which takes
+    // the client out.
+    inner: RwLock<Option<BaseConsumer<StderrContext>>>,
+    // Set by `close` before it waits for the write lock. Checked before every
+    // read lock, so a thread polling in steps stops re-taking the lock at its
+    // next step instead of keeping `close` waiting for its whole batch
+    // timeout.
+    closing: AtomicBool,
     topic: String,
 }
 
@@ -211,13 +221,17 @@ impl KafkaConsumer {
         let consumer: BaseConsumer<StderrContext> = client_config(entries).create_with_context(StderrContext)?;
         consumer.subscribe(&[topic])?;
         Ok(Self {
-            inner: Mutex::new(Some(consumer)),
+            inner: RwLock::new(Some(consumer)),
+            closing: AtomicBool::new(false),
             topic: topic.to_owned(),
         })
     }
 
     fn with<T>(&self, f: impl FnOnce(&BaseConsumer<StderrContext>) -> T) -> Result<T, &'static str> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if self.closing.load(Ordering::Acquire) {
+            return Err("consumer is closed");
+        }
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(f).ok_or("consumer is closed")
     }
 
@@ -301,7 +315,8 @@ impl KafkaConsumer {
 
     /// Leave the group and release the client. Idempotent.
     pub fn close(&self) {
-        let consumer = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.closing.store(true, Ordering::Release);
+        let consumer = self.inner.write().unwrap_or_else(|e| e.into_inner()).take();
         drop(consumer);
     }
 }

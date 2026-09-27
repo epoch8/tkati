@@ -32,7 +32,14 @@ from tkati_node_dedup.store import BucketedDedupStore
 # tkati-node-el, for instance, has no lookup or write phase. The consumer's and
 # producer's phases are spliced in from tkati-core, which owns the names it
 # times itself against.
-_PHASES = (*CONSUMER_PHASES, "lookup", *PRODUCER_PHASES, "write", "commit")
+_PHASES = (
+    *CONSUMER_PHASES,
+    "wait/input",
+    "lookup",
+    *PRODUCER_PHASES,
+    "write",
+    "commit",
+)
 
 
 # Exposed as tkati_node_dedup_dropped_rows_total. The perf log line's "dropped",

@@ -23,8 +23,10 @@ Until then, code after `done()` runs after the commit.
 Design doc: design-docs/2026-09-26-worker-loop-harness.md.
 """
 
+import queue
 import signal
 import threading
+import time
 from collections.abc import Callable, Iterator, Sized
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
@@ -48,11 +50,15 @@ from tkati_core.stats import LoopStats
 # The phases the harness times itself (through the consumer and producer it
 # passes its stats to), in report order. A node that adds its own passes the
 # whole tuple, so it decides where its columns go.
-DEFAULT_PHASES = (*CONSUMER_PHASES, *PRODUCER_PHASES, "commit")
+DEFAULT_PHASES = (*CONSUMER_PHASES, "wait/input", *PRODUCER_PHASES, "commit")
 # The default for a node without an output producer.
-SINK_PHASES = (*CONSUMER_PHASES, "commit")
+SINK_PHASES = (*CONSUMER_PHASES, "wait/input", "commit")
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+# How long the loop and the read-ahead thread block on the queue between
+# checks for a stop, as the native poll's POLL_STEP does.
+_WAIT_STEP_SEC = 0.1
 
 
 # eq=False: a batch is identified by the object, which is how `done()`
@@ -87,6 +93,17 @@ class Idle:
 
 
 type Event[T: Sized] = Batch[T] | Idle
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadFailed:
+    """A read on the read-ahead thread raised: handed to the loop to raise."""
+
+    error: BaseException
+
+
+# Handed over by the read-ahead thread after the read that ended the input.
+_END_OF_INPUT: Any = object()
 
 
 def _tag(batch: ConsumedBatch[Any]) -> int:
@@ -124,6 +141,7 @@ class _NodeBase:
         metrics: MetricsSettings | None = None,
         handle_signals: bool = False,
         stop_when_idle: bool = False,
+        read_ahead: int = 0,
     ) -> None:
         """
         Args:
@@ -142,12 +160,22 @@ class _NodeBase:
                 None serves nothing.
             handle_signals: Turn SIGTERM and SIGINT into a stop after the
                 current batch (a second signal forces one).
+            read_ahead: Batches to read in the background, on a thread of the
+                node's own, while the loop body processes the current one.
+                0 reads on the loop thread when the next event is asked for.
+                `from_settings` takes it from `[pipeline] read_ahead`
+                (default 1).
             stop_when_idle: End the loop at the first empty poll instead of
                 yielding `Idle` — for tests and one-shot runs that should
                 process what is in the input and exit.
         """
+        if read_ahead < 0:
+            raise ValueError(
+                "read_ahead must be 0 (off) or a positive number of batches"
+            )
         required = (
             *CONSUMER_PHASES,
+            "wait/input",
             *(PRODUCER_PHASES if producer is not None else ()),
             "commit",
         )
@@ -167,6 +195,16 @@ class _NodeBase:
         self._metrics = metrics
         self._handle_signals = handle_signals
         self._stop_when_idle = stop_when_idle
+        self._read_ahead = read_ahead
+        # The read-ahead thread, started by the first consume_*() call, the
+        # read method it calls, and what it hands the loop: a ConsumedBatch, a
+        # None for an empty poll, or a _ReadFailed.
+        self._reader: threading.Thread | None = None
+        self._reader_read: Callable[..., Any] | None = None
+        self._reader_stop = threading.Event()
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(read_ahead, 1))
+        # Set by `_end_of_input()` during a read that found the input used up.
+        self._input_ended = False
         self._stats = LoopStats(phases=phases)
 
         self._entered = False
@@ -209,6 +247,7 @@ class _NodeBase:
                 dlq=dlq,
                 metrics=settings.metrics,
                 handle_signals=True,
+                read_ahead=settings.pipeline.read_ahead,
             )
             # Built without error: the node owns them now.
             built.pop_all()
@@ -241,18 +280,33 @@ class _NodeBase:
             # seek, and the batch is uncommitted either way.
             oldest = self._oldest_uncommitted()
             if oldest is not None and isinstance(exc, Exception):
-                try:
-                    self._consumer.rewind(oldest)
-                except Exception:
-                    logger.exception("Could not rewind the failed batch")
+                # The read-ahead thread must not be reading while we seek: a
+                # read in progress could hand out messages fetched before the
+                # seek, under a sequence number that could then be committed.
+                if self._stop_reader(timeout=self._batch_timeout_sec + 1):
+                    try:
+                        self._consumer.rewind(oldest)
+                    except Exception:
+                        logger.exception("Could not rewind the failed batch")
+                else:
+                    # Uncommitted either way, so it is read again after a
+                    # restart; the rewind only matters if the process lived on.
+                    logger.warning(
+                        "Read-ahead thread didn't stop in time; not rewinding the failed batch"
+                    )
             self._batch = None
             self._event = None
         finally:
             self._restore_signal_handlers()
+            # Told to stop before the consumer closes, so the error its read
+            # then gets reads as the end, not as a failure to hand on.
+            self._reader_stop.set()
             # Consumer, then output, then DLQ: the output can still route rows
             # to the DLQ. ExitStack runs callbacks last-in first-out, and runs
-            # the rest even if one raises.
+            # the rest even if one raises. The read-ahead thread is joined
+            # last: closing the consumer ends its poll within one POLL_STEP.
             with ExitStack() as closing:
+                closing.callback(self._stop_reader, timeout=self._batch_timeout_sec + 1)
                 if self._dlq is not None:
                     closing.callback(self._dlq.close)
                 if self._producer is not None:
@@ -277,7 +331,92 @@ class _NodeBase:
         # the call, not at the first iteration.
         if not self._entered:
             raise RuntimeError("consume from a node inside `with node:`")
+        if self._read_ahead > 0:
+            if self._reader is None:
+                self._start_reader(read)
+            elif read != self._reader_read:
+                raise RuntimeError(
+                    "this node is already reading ahead in the other format"
+                )
         return self._events(read)
+
+    def _start_reader(self, read: Callable[..., Any]) -> None:
+        self._reader_read = read
+        self._reader = threading.Thread(
+            target=self._read_ahead_loop,
+            args=(read,),
+            name="tkati-read-ahead",
+            daemon=True,
+        )
+        self._reader.start()
+
+    def _read_ahead_loop(self, read: Callable[..., Any]) -> None:
+        """The read-ahead thread: read, hand over, repeat, until stopped. A
+        read that fails is handed over too, for the loop to raise, and ends
+        the thread. It doesn't catch signals: they are only ever handled on
+        the main thread."""
+        while not self._reader_stop.is_set():
+            try:
+                item = read(
+                    timeout=self._batch_timeout_sec,
+                    num_messages=self._batch_size,
+                    stats=self._stats,
+                )
+            except BaseException as error:
+                if not self._reader_stop.is_set():
+                    self._hand_over(_ReadFailed(error))
+                return
+            if self._input_ended:
+                # After everything read before it, so nothing is dropped.
+                self._hand_over(_END_OF_INPUT)
+                return
+            if not self._hand_over(item):
+                return
+
+    def _hand_over(self, item: Any) -> bool:
+        """Put `item` on the queue, waiting for room; False if stopped first."""
+        while not self._reader_stop.is_set():
+            try:
+                self._queue.put(item, timeout=_WAIT_STEP_SEC)
+            except queue.Full:
+                continue
+            return True
+        return False
+
+    def _take(self) -> ConsumedBatch[Any] | None:
+        """The next read from the read-ahead thread: a batch, or None for an
+        empty poll or once a stop is requested. Time spent waiting is the
+        loop being starved of input, recorded as `wait/input`."""
+        started = time.perf_counter()
+        try:
+            while not self._stop_requested:
+                try:
+                    item = self._queue.get(timeout=_WAIT_STEP_SEC)
+                except queue.Empty:
+                    continue
+                if isinstance(item, _ReadFailed):
+                    raise item.error
+                if item is _END_OF_INPUT:
+                    self._stop_requested = True
+                    return None
+                return item
+            return None
+        finally:
+            self._stats.record("wait/input", time.perf_counter() - started)
+
+    def _stop_reader(self, timeout: float) -> bool:
+        """Stop the read-ahead thread and drop what it had read, none of which
+        was handed out, so none of it is committed. True once it has
+        stopped."""
+        self._reader_stop.set()
+        if self._reader is not None:
+            self._reader.join(timeout)
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        return self._reader is None or not self._reader.is_alive()
 
     def _events[T: Sized](
         self, read: Callable[..., ConsumedBatch[T] | None]
@@ -308,7 +447,9 @@ class _NodeBase:
         if self._stop_requested:
             return None
 
-        consumed = self._read(read)
+        consumed = self._take() if self._reader is not None else self._read(read)
+        if self._input_ended and self._reader is None:
+            self._stop_requested = True
         # Requested during the read — by a signal, or by `stop()`. Whatever
         # was read is left uncommitted, to be read again after restart.
         if self._stop_requested:
@@ -419,6 +560,13 @@ class _NodeBase:
     def phase(self, name: str) -> AbstractContextManager[None]:
         """Time a block of the node's own work into phase `name`."""
         return self._stats.phase(name)
+
+    def _end_of_input(self) -> None:
+        """For an input that knows it is finished, such as the in-memory one
+        in `tkati_core.testing`: call it from inside the read that found
+        nothing left. Unlike `stop()`, which drops batches read ahead, the
+        loop ends only after handing out everything read before that point."""
+        self._input_ended = True
 
     def stop(self) -> None:
         """End the loop at the next event request. The current batch still

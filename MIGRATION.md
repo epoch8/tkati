@@ -42,6 +42,24 @@ delivered, `False` on timeout, and raises `DeliveryError` if one failed. A
 producer whose produce calls finish only once the sink has accepted the data
 can return `True` at once, as `ClickhouseProducer` does.
 
+### Custom `phases=` tuples need `wait/input`
+
+A node that passes its own `phases=` to `SyncNode` must include the new
+`"wait/input"` phase, or construction raises `ValueError`:
+
+```python
+PHASES = (*CONSUMER_PHASES, "wait/input", "lookup", *PRODUCER_PHASES, "commit")
+```
+
+`DEFAULT_PHASES` and `SINK_PHASES` already include it.
+
+### Read-ahead is on by default
+
+`SyncNode.from_settings` now reads one batch ahead on a background thread
+(`[pipeline] read_ahead = 1`). Node code needs no change. Set
+`read_ahead = 0` to get the 0.7.x behaviour back. `SyncNode(...)` constructed
+directly defaults to 0.
+
 ### Delivery failures now fail the batch
 
 A Kafka message that the broker rejects, or that librdkafka gives up on, now

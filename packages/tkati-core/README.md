@@ -121,7 +121,25 @@ node's own resources belong in the same `with` statement.
 counts iterations, starved iterations and rows in and out itself. A node
 times its own work with `node.phase("name")` and passes the full report order
 as `phases=` (the default is `DEFAULT_PHASES`). That tuple must include every
-phase the harness times.
+phase the harness times, `wait/input` among them.
+
+**Read-ahead.** `from_settings` reads the next batch in the background while
+the loop body processes the current one, on a thread of the node's own. It is
+configured by the `[pipeline]` section:
+
+```toml
+[pipeline]
+read_ahead = 1   # batches read ahead; 0 reads on the loop thread, as before
+```
+
+Nothing changes for node code: `done()` still commits before it returns, and
+it commits the batch's own offsets, never a batch still waiting in the queue.
+A stop drops the batches read ahead without committing them, so they are read
+again after a restart. Time the loop spends waiting for the reader is
+`wait/input`. The reader records `consumer/poll` and `consumer/parse` while
+the loop works, so with read-ahead those phases overlap the others, and the
+percentages can add up to more than 100. Constructing a `SyncNode` directly
+defaults to `read_ahead=0`.
 
 **Nodes without an output producer.** `NodeSettings.output` is optional. When
 it's absent, the node has no producer (`producer=None`), and passing
@@ -139,7 +157,8 @@ def run(node: SyncNode, client: ApiClient) -> None:
             node.done(event, rows_out=len(event.data))
 
 
-# phases=(*CONSUMER_PHASES, "upload", "commit"); SINK_PHASES is the default.
+# phases=(*CONSUMER_PHASES, "wait/input", "upload", "commit"); SINK_PHASES is
+# the default.
 ```
 
 **Testing.** `tkati_core.testing.memory_node(batches)` returns a `SyncNode` over
@@ -266,7 +285,9 @@ makes two consecutive lines comparable.
 
 Percentages are of the interval rather than of each other, so they do **not**
 sum to 100 — the shortfall is time in none of the named phases, which keeps
-unaccounted work visible. Track `starved_iterations` for iterations that were
+unaccounted work visible. (With a node's read-ahead, the consumer phases run
+on another thread and overlap the rest, so the sum can exceed 100; see
+`wait/input` for the time the loop actually waited.) Track `starved_iterations` for iterations that were
 blocked waiting on input: `consumer/poll` blocks until the batch fills or the timeout
 expires, so on an under-fed node it approaches 100% and nothing else on the
 line means anything.

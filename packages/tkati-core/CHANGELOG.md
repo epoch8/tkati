@@ -1,5 +1,16 @@
 # 0.8.0
 
+* Read-ahead: `SyncNode(..., read_ahead=n)` reads up to `n` batches on a
+  background thread while the loop body works. `from_settings` takes it from
+  the new `[pipeline]` section (`PipelineSettings`, default `read_ahead = 1`);
+  direct construction defaults to 0.
+* **Breaking for custom `phases=` tuples:** `wait/input` (time the loop waited
+  for the reader) is now required, and is part of `DEFAULT_PHASES` and
+  `SINK_PHASES`.
+* `KafkaConsumer`: its batch numbering and ordering check are thread-safe. The
+  native consumer lets `commit`/`rewind` run while another thread polls, and
+  `close()` interrupts such a poll within one `POLL_STEP`.
+* `LoopStats.record` takes the stats lock.
 * **Breaking:** `Node` is renamed to `SyncNode`, with the same API. There is
   no alias.
 * **Breaking for `Producer` implementations:** `produce_arrow` and

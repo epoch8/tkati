@@ -2,7 +2,7 @@ import os
 from typing import Annotated
 
 from loguru import logger
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -51,6 +51,34 @@ OutputSettings = Annotated[
 ]
 
 
+class PipelineSettings(BaseModel):
+    """How far a node's loop runs ahead of itself: `[pipeline]` in a node's
+    settings.
+
+    `read_ahead`: batches read in the background while the node processes the
+    current one. 0 reads on the loop thread, one batch at a time.
+    `max_in_flight`: finished batches a `PipelinedNode` lets wait for
+    delivery before `done()` blocks. `SyncNode` ignores it.
+    """
+
+    read_ahead: int = 1
+    max_in_flight: int = 4
+
+    @field_validator("read_ahead")
+    @classmethod
+    def _read_ahead(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be 0 (off) or a positive number of batches")
+        return v
+
+    @field_validator("max_in_flight")
+    @classmethod
+    def _max_in_flight(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be at least 1 batch")
+        return v
+
+
 class NodeSettings(TomlBaseSettings):
     """The sections every `SyncNode.from_settings` reads. A node subclasses this
     and adds its own.
@@ -64,6 +92,7 @@ class NodeSettings(TomlBaseSettings):
     output: OutputSettings | None = None
     dlq: OutputSettings | None = None
     metrics: MetricsSettings = MetricsSettings()
+    pipeline: PipelineSettings = PipelineSettings()
 
     @model_validator(mode="after")
     def _dlq_needs_output(self) -> "NodeSettings":

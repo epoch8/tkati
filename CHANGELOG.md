@@ -14,6 +14,21 @@ config or docs changed.
 
 ## 0.8.0
 
+### skswwwqq — Read-ahead [tkati-core, tkati-node-el, tkati-node-dedup, repo]
+
+- Nodes built with `from_settings` read the next batch on a background thread
+  while the loop body processes the current one. `[pipeline] read_ahead`
+  (default 1; 0 turns it off) sets how many batches may wait. `done()` is
+  unchanged, and batches read ahead but not handed out are never committed.
+- New phase `wait/input`: time the loop waited for the reader. It is a
+  required column, so custom `phases=` tuples add it (node-dedup's does).
+- The native consumer takes a read lock for polling, committing and seeking,
+  so a commit no longer waits for a poll on another thread. `close()` stops a
+  concurrent poll within one 100 ms step instead of waiting out its batch
+  timeout. `LoopStats.record` takes the stats lock, since the reader records
+  phases too.
+- Design doc: `design-docs/2026-09-26-pipelined-worker-loop.md` (Phase B).
+
 ### klmnkqvx — Per-message Kafka delivery reports [tkati-core, repo]
 
 - The native producer records every delivery report against the tag its

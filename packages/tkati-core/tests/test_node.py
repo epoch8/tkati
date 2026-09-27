@@ -2,6 +2,7 @@
 
 import os
 import signal
+import threading
 import time
 
 import pyarrow as pa
@@ -381,7 +382,7 @@ def test_rows_and_starved_iterations_are_counted() -> None:
 
 
 def test_node_phases_are_timed() -> None:
-    phases = (*CONSUMER_PHASES, "work", *PRODUCER_PHASES, "commit")
+    phases = (*CONSUMER_PHASES, "wait/input", "work", *PRODUCER_PHASES, "commit")
     node, _, _ = memory_node([_table(1)], phases=phases)
     with node:
         for event in node.consume_arrow():
@@ -453,7 +454,7 @@ def test_without_a_producer_output_raises_and_the_batch_is_rewound() -> None:
 
 
 def test_without_a_producer_phases_need_not_include_the_producer_phases() -> None:
-    phases = (*CONSUMER_PHASES, "upload", "commit")
+    phases = (*CONSUMER_PHASES, "wait/input", "upload", "commit")
     node, _, _ = memory_node([], output=False, phases=phases)
     assert node.stats.phases == phases
 
@@ -546,6 +547,150 @@ def test_without_a_producer_output_pylist_raises() -> None:
         send()
 
     assert consumer.rewinds == [0]
+
+
+# --- read-ahead -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("read_ahead", [0, 1, 3])
+def test_every_batch_is_committed_in_order_with_or_without_read_ahead(
+    read_ahead: int,
+) -> None:
+    tables = [_table(1), None, _table(2), _table(3)]
+    node, consumer, producer = memory_node(tables, read_ahead=read_ahead)
+    with node:
+        seen = _send_all(node)
+
+    assert seen == [Batch, Idle, Batch, Batch]
+    assert consumer.commits == [0, 1, 2]
+    assert [len(t) for t in _producer(producer).sent] == [1, 2, 3]
+    assert node.stats.rows_in == node.stats.rows_out == 6
+
+
+@pytest.mark.parametrize("read_ahead", [0, 1])
+def test_exception_rewinds_with_or_without_read_ahead(read_ahead: int) -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1)], read_ahead=read_ahead)
+    with pytest.raises(RuntimeError, match="boom"), node:
+        _raise_in_body(node, RuntimeError("boom"))
+
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+@pytest.mark.parametrize("read_ahead", [0, 1])
+def test_failed_delivery_rewinds_with_or_without_read_ahead(read_ahead: int) -> None:
+    node, consumer, _ = memory_node(
+        [_table(1), _table(1)],
+        fail_delivery={1: DeliveryError("gave up")},
+        read_ahead=read_ahead,
+    )
+    with pytest.raises(DeliveryError), node:
+        _send_all(node)
+
+    assert consumer.commits == []
+    assert consumer.rewinds == [0]
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_the_next_batch_is_read_while_the_body_holds_this_one() -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1)], read_ahead=1)
+    read_ahead_seen: list[bool] = []
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            if not read_ahead_seen:
+                read_ahead_seen.append(_wait_for(lambda: "read:1" in consumer.log))
+            node.done(event)
+
+    assert read_ahead_seen == [True]
+    assert consumer.commits == [0, 1]
+
+
+def test_stop_drops_batches_read_ahead_without_committing_them() -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1), _table(1)], read_ahead=2)
+    with node:
+        for event in node.consume_arrow():
+            assert isinstance(event, Batch)
+            _wait_for(lambda: "read:2" in consumer.log)
+            node.stop()
+            node.done(event)
+
+    assert "read:2" in consumer.log
+    assert consumer.commits == [0]
+    assert consumer.rewinds == []
+
+
+def test_the_reader_is_stopped_before_a_rewind_and_gone_after_exit() -> None:
+    node, consumer, _ = memory_node([_table(1), _table(1)], read_ahead=1)
+    with pytest.raises(RuntimeError, match="boom"), node:
+        _raise_in_body(node, RuntimeError("boom"))
+
+    assert consumer.rewinds == [0]
+    assert node._reader is not None and not node._reader.is_alive()
+
+
+class _FailingRead(MemoryConsumer):
+    def read_arrow(self, timeout, num_messages, stats=None):
+        raise ValueError("JSON parse error")
+
+
+def test_a_failed_read_ahead_surfaces_in_the_loop() -> None:
+    consumer = _FailingRead([])
+    node = SyncNode(
+        consumer, MemoryProducer(), batch_size=100, batch_timeout_sec=0, read_ahead=1
+    )
+    with pytest.raises(ValueError, match="JSON parse error"), node:
+        _send_all(node)
+
+
+def test_waiting_for_the_reader_is_recorded_as_wait_input() -> None:
+    node, _, _ = memory_node([_table(1)], read_ahead=1, delay=0.05)
+    with node:
+        _send_all(node)
+
+    assert node.stats.phase_sec["wait/input"] >= 0.04
+
+
+def test_switching_formats_while_reading_ahead_raises() -> None:
+    node, _, _ = memory_node([_table(1)], read_ahead=1)
+    with node:
+        node.consume_arrow()
+        with pytest.raises(RuntimeError, match="other format"):
+            node.consume_pylist()
+        node.stop()
+
+
+def test_sigterm_while_waiting_on_the_reader_stops_promptly() -> None:
+    """The read-ahead thread can't be interrupted by a signal, but the loop
+    waits on it in short steps, so a stop still takes effect at once."""
+    consumer = MemoryConsumer([_table(1)], delay=5)
+    node = SyncNode(
+        consumer,
+        MemoryProducer(),
+        batch_size=100,
+        batch_timeout_sec=0,
+        handle_signals=True,
+        read_ahead=1,
+    )
+    timer = threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with node:
+            seen = _send_all(node)
+    finally:
+        timer.cancel()
+
+    assert seen == []
+    assert time.monotonic() - started < 2
 
 
 # --- signals ----------------------------------------------------------------

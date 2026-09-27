@@ -11,7 +11,10 @@ operations across them:
     assert consumer.log == ["read:0", "produce", "flush", "commit:0", ...]
 """
 
+import threading
+import time
 from collections.abc import Callable, Iterable, Sized
+from typing import Any
 
 import pyarrow as pa
 
@@ -22,6 +25,9 @@ from tkati_core.producer import Producer
 from tkati_core.stats import LoopStats
 
 type _Rows = pa.Table | list[dict]
+
+# What `MemoryConsumer` reads once its batches have run out.
+_EXHAUSTED: Any = object()
 
 
 class MemoryConsumer(Consumer):
@@ -42,8 +48,14 @@ class MemoryConsumer(Consumer):
         *,
         on_exhausted: Callable[[], object] | None = None,
         log: list[str] | None = None,
+        delay: float = 0.0,
     ) -> None:
         self._batches = iter(batches)
+        # Reads can come from a node's read-ahead thread while the loop
+        # commits, so the shared state is updated under a lock.
+        self._lock = threading.Lock()
+        # Seconds each read takes, to stand in for a poll waiting on a broker.
+        self.delay = delay
         self._next_seq = 0
         self.on_exhausted = on_exhausted
         self.log: list[str] = log if log is not None else []
@@ -71,29 +83,35 @@ class MemoryConsumer(Consumer):
     def _read[T: Sized](
         self, stats: LoopStats | None, convert: Callable[[_Rows], T]
     ) -> ConsumedBatch[T] | None:
-        self.stats_seen.append(stats)
-        try:
-            rows = next(self._batches)
-        except StopIteration:
-            if self.on_exhausted is not None:
-                self.on_exhausted()
-            return None
-        if rows is None:
-            return None
-        batch = ConsumedBatch(
-            data=convert(rows), offsets=BatchOffsets(), seq=self._next_seq
-        )
-        self._next_seq += 1
-        self.log.append(f"read:{batch.seq}")
+        if self.delay:
+            time.sleep(self.delay)
+        with self._lock:
+            self.stats_seen.append(stats)
+            try:
+                rows = next(self._batches)
+            except StopIteration:
+                rows = _EXHAUSTED
+            if rows is None or rows is _EXHAUSTED:
+                batch = None
+            else:
+                batch = ConsumedBatch(
+                    data=convert(rows), offsets=BatchOffsets(), seq=self._next_seq
+                )
+                self._next_seq += 1
+                self.log.append(f"read:{batch.seq}")
+        if rows is _EXHAUSTED and self.on_exhausted is not None:
+            self.on_exhausted()
         return batch
 
     def commit(self, batch: ConsumedBatch) -> None:
-        self.commits.append(batch.seq)
-        self.log.append(f"commit:{batch.seq}")
+        with self._lock:
+            self.commits.append(batch.seq)
+            self.log.append(f"commit:{batch.seq}")
 
     def rewind(self, batch: ConsumedBatch) -> None:
-        self.rewinds.append(batch.seq)
-        self.log.append(f"rewind:{batch.seq}")
+        with self._lock:
+            self.rewinds.append(batch.seq)
+            self.log.append(f"rewind:{batch.seq}")
 
     def close(self) -> None:
         self.closed = True
@@ -180,12 +198,14 @@ def memory_node(
     output: bool = True,
     fail_flush: BaseException | None = None,
     fail_delivery: dict[int, BaseException] | None = None,
+    read_ahead: int = 0,
+    delay: float = 0.0,
 ) -> tuple[SyncNode, MemoryConsumer, MemoryProducer | None]:
     """A `SyncNode` over in-memory doubles that share one log. The loop ends once
     `batches` is used up. With `output=False` the node has no producer, and
     None is returned in its place."""
     log: list[str] = []
-    consumer = MemoryConsumer(batches, log=log)
+    consumer = MemoryConsumer(batches, log=log, delay=delay)
     producer = (
         MemoryProducer(fail_flush=fail_flush, fail_delivery=fail_delivery, log=log)
         if output
@@ -197,6 +217,7 @@ def memory_node(
         batch_size=batch_size,
         batch_timeout_sec=0,
         phases=phases,
+        read_ahead=read_ahead,
     )
-    consumer.on_exhausted = node.stop
+    consumer.on_exhausted = node._end_of_input
     return node, consumer, producer
