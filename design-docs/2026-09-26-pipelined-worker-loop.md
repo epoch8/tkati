@@ -1,5 +1,5 @@
 ---
-status: DRAFT
+status: IMPLEMENTED
 ---
 
 # Pipelined worker loop
@@ -579,3 +579,99 @@ Across all phases, run `uv run ruff check packages/`,
 `uv run pytest` for tkati-core and both nodes against local Redpanda and
 ClickHouse. Also repeat the node-el SIGTERM check: the committed offset must
 equal the output count after a stop, with batches in flight.
+
+## Implementation notes (as built)
+
+Built in five jj changes, as planned: the rename (Phase 0), delivery reports
+(A), read-ahead (B), `PipelinedNode` (C) and the 0.8.0 release (D). Where the
+code differs from the steps above, or goes beyond them:
+
+- **`flush()` cost 100 ms per call (fixed in Phase A).** The Phase C benchmark
+  showed `SyncNode` at about 9.4k rows/s whatever the read-ahead, which is one
+  batch every ~105 ms. `KafkaProducer.flush()` called librdkafka's flush in
+  `POLL_STEP` (100 ms) steps; with a `ThreadedProducer` the delivery reports
+  are served by its own background thread, so the flush call found nothing to
+  serve and returned only when its timeout ran out. Every flush since 0.5.0
+  cost at least 100 ms. `Deliveries` now also counts every message in flight,
+  tagged or not, and `flush()` waits on the same condvar until that count is
+  zero: about 6 ms for a 1000-row batch against a local broker.
+- **The native consumer's lock (Phase B).** Two changes the plan didn't
+  foresee, both found by timing the read-ahead thread:
+  - The consumer's `Mutex` became an `RwLock`. Polling, committing and
+    seeking take the read side, which librdkafka allows from several threads
+    at once. With the `Mutex`, a commit waited behind the reader's poll steps,
+    for up to 3 s.
+  - `close()` sets a `closing` flag before it takes the write lock, and every
+    call checks the flag first. Without it, a reader re-taking the read lock
+    every 100 ms kept `close()` waiting for its whole batch timeout (up to
+    10 s).
+  - `test_commit_and_close_do_not_wait_for_a_concurrent_poll` in
+    `test_consumer.py` pins both behaviours.
+- **End of in-memory input (Phase B).** With read-ahead, the test doubles'
+  "stop when the batches run out" would drop batches already queued, as a
+  real stop does. A private `_NodeBase._end_of_input()`, called from inside
+  the read that found nothing left, makes the loop end in order after them.
+  `memory_node` / `memory_pipelined_node` wire it to `on_exhausted`.
+- **`LoopStats.record` takes the stats lock (Phase B)**, because the reader
+  records phases too. Its get-then-set could otherwise straddle a `reset()`
+  on the loop thread.
+- **`SyncNode(...)` constructed directly defaults to `read_ahead=0`**, and
+  only `from_settings` reads `[pipeline] read_ahead` (default 1). Tests and
+  code that build nodes by hand keep 0.7.0's behaviour unless they ask.
+- **Exit drains on any clean exit (Phase C)**, including a `break` after
+  `done()`, not only on a stop. Draining happens inside `__exit__`'s
+  `try`/`finally`, so a second Ctrl-C while draining still closes everything.
+- **Stopping the reader before a rewind can wait up to one batch timeout.**
+  The reader's poll can only be interrupted by closing the consumer, which a
+  rewind can't do. This only affects the failure path, and if the reader
+  doesn't stop in time the rewind is skipped: the batch is uncommitted either
+  way, so it is read again after a restart.
+- **Test doubles.** `memory_pipelined_node(...)` is a second factory, not a
+  `node_cls=` argument to `memory_node`, so each one returns a precisely typed
+  node. `MemoryProducer` logs `wait:<tag>` only for waits that may block.
+- **Read-ahead tests.** Rather than running the whole harness suite at every
+  `read_ahead`, the ordering, rewind and delivery-failure guarantees are
+  parametrized over it. Tests that assert on the exact interleaving of reads
+  and commits stay at `read_ahead=0`, because read-ahead changes that
+  interleaving by design.
+- **The type-check fixture** (`_type_check_fixture` in `test_node.py`) passes
+  a `PipelinedNode` where a `SyncNode` is expected, under
+  `# ty: ignore[invalid-argument-type]`. If the two classes ever become
+  compatible, ty reports the ignore as unused.
+- **Still untracked:** `ClickhouseProducer`'s DLQ fallback produces to the DLQ
+  without a tag. A DLQ message that fails delivery is waited for by `flush()`,
+  but not reported.
+
+## Verification
+
+- `uv run ruff check packages/` and `uv run ty check packages/` are clean.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` pass. That includes the new `Deliveries` tests: per-tag
+  settling, the first failure winning, cancelled messages, a waiter woken by
+  a report, and `wait_all`.
+- `uv run pytest packages/tkati-core packages/tkati-node-el packages/tkati-node-dedup packages/tkati-dashboard`
+  passes against local Redpanda and ClickHouse (250 tests). 70 of them are
+  broker-free harness tests in `test_node.py`. The read-ahead tests ran 20
+  times in a row without a failure.
+- Broker tests:
+  - A message larger than Redpanda accepts makes `wait_delivered` raise
+    `DeliveryError` after `flush()`.
+  - Read-ahead delivers and commits every batch in order.
+  - `consume_pylist` skips a malformed message and commits past it.
+  - Commit and close don't wait for a concurrent poll.
+- `benchmarks/bench_node_pipeline.py`: node-el's loop, Kafka to Kafka, 200k
+  rows in batches of 1000, best of 3, against local Redpanda:
+
+  | Mode | rows/s |
+  |---|---|
+  | `SyncNode`, `read_ahead=0`, before the `flush()` fix (as in 0.7.0) | ~9,400 |
+  | `SyncNode`, `read_ahead=0` | ~89,700 |
+  | `SyncNode`, `read_ahead=1` | ~96,600 |
+  | `PipelinedNode`, `read_ahead=1`, `max_in_flight=4` | ~128,000 |
+
+- SIGTERM checks: node-el (`from_settings`) with input flowing, stopped
+  mid-stream:
+  - With read-ahead on `SyncNode`: exit code 0 within about 270 ms, and the
+    committed offset equalled the output count (56,000).
+  - As a `PipelinedNode`, run twice: exit code 0 within about 260 ms, with
+    316,000 and 317,000 committed and the same counts in the output topic.

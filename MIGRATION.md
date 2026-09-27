@@ -25,27 +25,6 @@ with SyncNode.from_settings(settings) as node:
 Rename type annotations too (`def run(node: SyncNode, ...)`).
 `tkati_core.testing.memory_node` returns a `SyncNode`.
 
-### Moving a node to `PipelinedNode` (optional)
-
-`PipelinedNode` is new, and faster, but it is not a drop-in replacement: its
-`done()` returns before the batch is committed. Code after `done()` that
-relies on the commit having happened must move into `after_commit=`:
-
-```python
-# SyncNode
-node.done(event, output_arrow=kept)
-store.add_many(keys)                  # runs after the commit
-
-# PipelinedNode
-node.done(event, output_arrow=kept, after_commit=partial(store.add_many, keys))
-```
-
-Anything the next batches must see before that commit (for example keys
-already sent, for dedup) has to be tracked by the node itself until the
-callback runs. A node with no work after `done()` only changes its class.
-Custom `phases=` tuples add `"wait/in-flight"`; `PIPELINED_PHASES` is the
-default.
-
 ### `Producer` implementations take a delivery tag
 
 Only code that implements `Producer` itself is affected; callers are not.
@@ -84,9 +63,41 @@ directly defaults to 0.
 ### Delivery failures now fail the batch
 
 A Kafka message that the broker rejects, or that librdkafka gives up on, now
-raises `DeliveryError` from `SyncNode.done()`, and the batch is rewound. Before
+raises `DeliveryError` from `done()` (either node class), and the batch is rewound. Before
 0.8.0 it was silently committed and its rows were lost. A node that used to
 keep running through such failures now stops on the first one.
+
+## New in v0.8.0
+
+### Moving a node to `PipelinedNode`
+
+`PipelinedNode` is new, and faster, but it is not a drop-in replacement: its
+`done()` returns before the batch is committed. Code after `done()` that
+relies on the commit having happened must move into `after_commit=`:
+
+```python
+# SyncNode
+node.done(event, output_arrow=kept)
+store.add_many(keys)                  # runs after the commit
+
+# PipelinedNode
+node.done(event, output_arrow=kept, after_commit=partial(store.add_many, keys))
+```
+
+Anything the next batches must see before that commit (for example keys
+already sent, for dedup) has to be tracked by the node itself until the
+callback runs. A node with no work after `done()` only changes its class.
+Custom `phases=` tuples add `"wait/in-flight"`; `PIPELINED_PHASES` is the
+default.
+
+## The nodes
+
+`tkati-node-el` and `tkati-node-dedup` need no configuration changes. They now
+run on `PipelinedNode`, with an optional `[pipeline]` section (`read_ahead`,
+default 1; `max_in_flight`, default 4). Their perf line and `/metrics` gain the
+`wait/input` and `wait/in-flight` phases, and a Kafka output's
+`producer/deliver` now reads 0, because acks are no longer waited for per
+batch.
 
 # Migrating from v0.6.0 to v0.7.0
 
