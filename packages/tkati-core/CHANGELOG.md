@@ -1,3 +1,17 @@
+# 0.8.2
+
+* Fix: a ClickHouse outage no longer empties a batch into the DLQ.
+  `ClickhouseProducer` now classifies an insert failure by the ClickHouse error
+  code rather than treating every exception alike. A parse or value error — the
+  codes in the new public `CH_DATA_ERROR_CODES` — skips the retries entirely and
+  goes straight to the recursive split, so isolating a bad row costs round-trips
+  instead of 2 seconds of sleep per level, and the good rows around it still
+  land. Anything else — connection refused, a timeout, auth, a schema error such
+  as `TYPE_MISMATCH`, or no code at all — is retried 3 times and then raised, so
+  the batch is rewound and re-read instead of being filed as rejected. Audit
+  finding F3; see `design-docs/2026-09-28-clickhouse-error-classification.md`
+* `clickhouse-connect` now requires `>=1.4.2`, for `Error.code`
+
 # 0.8.1
 
 * Fix: `LoopStats.rows_in` is now counted when a batch is committed, like

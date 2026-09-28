@@ -108,6 +108,39 @@ def test_node_el_malformed_data(
     assert result.result_rows[0][0] == 0
 
 
+def test_ch_producer_isolates_a_bad_row_against_real_clickhouse(
+    ch_client: ch_driver.Client,
+    ch_uuid_table: str,
+    mock_dlq_producer: MagicMock,
+) -> None:
+    """The only end-to-end check that a real driver exception carries the error
+    code `_is_data_error` reads. A real ClickHouse rejects the whole insert with
+    code 376 CANNOT_PARSE_UUID; the split must still land the three good rows and
+    send only the bad one to the DLQ."""
+    good = [f"1111111{i}-1111-1111-1111-111111111111" for i in range(3)]
+    table = pa.table(
+        {
+            "uid": [good[0], good[1], "not-a-uuid", good[2]],
+            "traffic_in": pa.array([100, 101, 102, 103], pa.uint32()),
+        }
+    )
+
+    producer = ClickhouseProducer(
+        ch_client=ch_client,
+        table=ch_uuid_table,
+        dlq_producer=mock_dlq_producer,
+        split_factor=2,
+    )
+    producer.produce_arrow(table)
+
+    landed = ch_client.query(f"SELECT toString(uid) FROM {ch_uuid_table} ORDER BY uid")
+    assert [row[0] for row in landed.result_rows] == sorted(good)
+
+    mock_dlq_producer.produce_arrow.assert_called_once()
+    sent = mock_dlq_producer.produce_arrow.call_args[0][0]
+    assert sent.column("uid").to_pylist() == ["not-a-uuid"]
+
+
 def test_every_batch_is_sent_unchanged() -> None:
     tables = [pa.table({"uid": ["a", "b"]}), pa.table({"uid": ["c"]})]
     node, consumer, producer = memory_pipelined_node(tables)

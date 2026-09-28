@@ -1,6 +1,6 @@
 [project]
 name = "tkati-core"
-version = "0.8.1"
+version = "0.8.2"
 description = "Core abstractions for Kafka/ClickHouse streaming pipeline nodes"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -15,7 +15,7 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
-    "clickhouse-connect>=0.11.0",
+    "clickhouse-connect>=1.4.2",
     "confluent-kafka>=2.11.0",
     "loguru>=0.7.3",
     "orjson>=3.9.0",

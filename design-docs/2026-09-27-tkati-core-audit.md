@@ -17,8 +17,9 @@ column runs at about 40 ms per 1M rows on 14 cores.
 
 The problems are in the failure paths. One malformed message halts a node
 for good (F1). A failed write to a Kafka DLQ loses rows without an error
-(F2). A ClickHouse outage empties the whole batch into the DLQ (F3). Commit
-failures are invisible (F4). Fix F1 and F2 first: both are small changes.
+(F2). A ClickHouse outage empties the whole batch into the DLQ (F3, since
+fixed). Commit failures are invisible (F4). Fix F1 and F2 first: both are small
+changes.
 
 None of the efficiency findings is urgent. Together they are worth
 single-digit percentages.
@@ -36,7 +37,7 @@ Severity:
 | --- | -------- | ------------------------------------------------------------- | ------ |
 | F1  | Critical | One bad message stops a `consume_arrow()` node for good        | Open   |
 | F2  | Critical | A failed write to a Kafka DLQ loses rows without an error      | Open   |
-| F3  | High     | A ClickHouse outage sends the whole batch to the DLQ           | Open   |
+| F3  | High     | A ClickHouse outage sends the whole batch to the DLQ           | Fixed 0.8.2 |
 | F4  | Medium   | Commit errors are never reported                               | Open   |
 | F5  | Medium   | Kafka settings can't be configured; producer defaults can reorder retried messages | Open |
 | F6  | Low      | No handling of revoked partitions: more duplicates after a rebalance | Open |
@@ -135,6 +136,14 @@ type and parse errors, which can be told apart by their server error code.
 For anything else, raise so the batch is rewound. Limit the retries to
 errors that aren't data errors. Test with a connection error and a type
 error.
+
+**Fixed in 0.8.2.** `_is_data_error` keys on the server error code and drives
+both the retry policy and the split policy, so the split never sleeps and an
+outage never reaches the DLQ. Type and schema errors were deliberately left
+out of the data-error set, against the recommendation above: they reject every
+row alike, so splitting on them would drain whole batches into the DLQ while a
+missed migration went unnoticed. See
+`design-docs/2026-09-28-clickhouse-error-classification.md`.
 
 ### F4. Commit errors are never reported
 

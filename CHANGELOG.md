@@ -12,6 +12,31 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.2
+
+### tzwvropv — ClickHouse insert failures: data errors versus outages [tkati-core, tkati-node-el, repo]
+
+- `ClickhouseProducer` classifies an insert failure by the ClickHouse server
+  error code, not by the driver's exception class (`clickhouse_connect` picks
+  `DatabaseError` vs `OperationalError` by whether it had retried, so the class
+  says nothing). One classifier, `_is_data_error`, drives both the retry policy
+  and the split policy
+- A parse or value error — the codes in the new public `CH_DATA_ERROR_CODES` —
+  is no longer retried: it costs one insert and goes straight into the recursive
+  split. Isolating one bad UUID in a 1 000-row batch used to take ~1 100 inserts
+  × 2s of sleep, over half an hour
+- Any other failure no longer splits to the DLQ. It keeps its 3 retries and is
+  then raised, so the batch is rewound rather than quarantined; schema errors
+  such as `TYPE_MISMATCH` are deliberately in this group, so a missed migration
+  stops the node. Audit finding F3, now closed
+- `clickhouse-connect` floor raised to `>=1.4.2` for `Error.code`
+- `test_ch_producer.py` grew to 28 tests: ten used a bare `Exception` to reach
+  the DLQ, which is the behaviour this removes, so each now names the kind of
+  failure it means. `tkati-node-el` gained the one end-to-end test that a real
+  ClickHouse rejecting a bad UUID really does carry code 376
+- New `design-docs/2026-09-28-clickhouse-error-classification.md`; F3 marked
+  fixed in the audit
+
 ## 0.8.1
 
 ### nvuwnkqr — Perf report: loop and read lines [tkati-core, tkati-node-dedup, tkati-node-el, repo]

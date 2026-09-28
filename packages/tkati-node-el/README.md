@@ -149,13 +149,17 @@ percentages.
 
 ## DLQ semantics
 
-DLQ *fallback triggering* is currently only implemented for the `clickhouse` output kind — `KafkaProducer` has no retry/split logic of its own. The DLQ *sink* itself (where isolated bad rows end up) can be Kafka or ClickHouse, independent of the primary output. When a batch insert fails after all retries, the app switches to a recursive fallback to isolate the problematic rows:
+DLQ *fallback triggering* is currently only implemented for the `clickhouse` output kind — `KafkaProducer` has no retry/split logic of its own. The DLQ *sink* itself (where isolated bad rows end up) can be Kafka or ClickHouse, independent of the primary output.
 
-1. The failing batch is split into `dlq_split_factor` equal sub-batches and each is retried independently.
+The fallback runs only when ClickHouse rejects a batch **because of the data** — a parse or value error, identified by the server's error code. Then the app switches to a recursive fallback to isolate the problematic rows:
+
+1. The failing batch is split into `dlq_split_factor` equal sub-batches and each is inserted independently. Data errors are not retried, so no step of this waits.
 2. If a sub-batch also fails it is split again — this repeats until individual rows are reached.
 3. A single row that ClickHouse still rejects is written to the DLQ sink, preserving the full schema (Arrow IPC `arrow-batch` format for a Kafka DLQ).
 4. After all rows are handled (inserted or DLQ'd), the input offset is committed and the app resumes normal large-batch processing.
 
+**Any other insert failure fails the batch instead.** A connection error, a timeout, auth, or a schema error such as `TYPE_MISMATCH` is retried 3 times 1 second apart and then raised: the batch is rewound and re-read, and nothing goes to the DLQ. An outage means every row in the batch was fine, so quarantining them would be wrong, and a missed migration should stop the node rather than drain batches into the DLQ. See `design-docs/2026-09-28-clickhouse-error-classification.md`.
+
 `dlq_split_factor` is a setting on the `clickhouse` `[output]` block (see above), not on `[dlq]` — it describes how the primary output retries, independent of where the DLQ sink sends isolated rows. With `dlq_split_factor=10` and a 1 000-row batch this takes at most 3 recursive levels (1000 → 100 → 10 → 1).
 
-**Delivery guarantee: at-least-once.** If the process crashes mid-recursion the uncommitted batch is re-read on restart and re-processed from the beginning, which may produce duplicate rows in the output and duplicate messages in the DLQ.
+**Delivery guarantee: at-least-once.** If the recursion is abandoned part-way — the process crashes, or ClickHouse goes away mid-descent and the batch is failed — the uncommitted batch is re-read on restart and re-processed from the beginning, which may produce duplicate rows in the output and duplicate messages in the DLQ.
