@@ -333,7 +333,8 @@ three `PRODUCER_PHASES`:
   this is the *remaining* wait for broker acks, not the batch's total network
   time. `ClickhouseProducer` records its whole insert here, retries and DLQ
   fallback included, because `clickhouse_connect` encodes and sends in a
-  single call.
+  single call. The split itself doesn't sleep, so isolating bad rows costs
+  round-trips here, not minutes.
 
 The prefixes mark these figures as timed inside `tkati-core`. A node's own
 phases stay unprefixed. Splice the tuples into your phase tuple rather than
@@ -434,6 +435,32 @@ producer = build_producer(settings.output)
 for the `"kafka"` output kind, which has no DLQ-fallback logic of its own). The
 recursive-split batch size for that fallback comes from `settings.dlq_split_factor`
 (a field on `ClickHouseOutputSettings` itself), not from a separate parameter.
+
+### ClickHouse insert failures: bad rows versus a bad server
+
+`ClickhouseProducer` tells the two apart by the ClickHouse error code on the
+driver's exception, not by its class: `clickhouse_connect` raises `DatabaseError`
+or `OperationalError` depending on whether it had retried the request, not on
+what went wrong, and sets the code either way.
+
+* A **data error** — a parse or value error, the codes in `CH_DATA_ERROR_CODES` —
+  is not retried at all, because no wait fixes a bad row. The insert goes
+  straight into the recursive split, so the good rows still land and only the
+  rows ClickHouse keeps rejecting reach the DLQ, one at a time.
+* **Anything else** — connection refused, a timeout, auth, or an error the driver
+  could not read a code from — is retried 3 times 1 second apart and then raised.
+  It never splits and never reaches the DLQ: the batch is rewound and read again,
+  because an outage means every row in it was fine. Schema errors such as
+  `TYPE_MISMATCH` (53) and `NO_SUCH_COLUMN_IN_TABLE` (16) are deliberately in
+  this group, so a missed migration stops the node instead of filing whole
+  batches as rejected.
+* A non-data error found part-way through a split aborts the whole split. Rows
+  already sent to the DLQ stay sent, and are sent again when the rewound batch is
+  re-read: the DLQ is at-least-once, like the output.
+
+There is no setting for the code set. Rebind `CH_DATA_ERROR_CODES` at startup to
+change the policy — for example `|= {53}` to quarantine type mismatches too. See
+`design-docs/2026-09-28-clickhouse-error-classification.md`.
 
 ### Constructing a consumer from settings
 

@@ -126,6 +126,21 @@ def ch_table(
 
 
 @pytest.fixture(scope="function")
+def ch_uuid_table(
+    test_settings: AppSettings, ch_client: ch_driver.Client
+) -> Generator[str]:
+    """A table with a UUID column, for the one thing the main table can't express:
+    a row ClickHouse rejects with a parse error (code 376) at insert time."""
+    assert isinstance(test_settings.output, ClickHouseOutputSettings)
+    table = f"{test_settings.output.table.database}.uuid_event_{test_settings.output.table.name}"
+    ch_client.command(
+        f"CREATE TABLE {table} (uid UUID, traffic_in UInt32) ENGINE = MergeTree ORDER BY uid"
+    )
+    yield table
+    ch_client.command(f"DROP TABLE {table}")
+
+
+@pytest.fixture(scope="function")
 def mock_dlq_producer() -> MagicMock:
     producer = MagicMock()
     producer.produce_arrow = MagicMock()
