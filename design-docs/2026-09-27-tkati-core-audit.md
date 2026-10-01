@@ -39,7 +39,7 @@ Severity:
 | F2  | Critical | A failed write to a Kafka DLQ loses rows without an error      | Open   |
 | F3  | High     | A ClickHouse outage sends the whole batch to the DLQ           | Fixed 0.8.2 |
 | F4  | Medium   | Commit errors are never reported                               | Open   |
-| F5  | Medium   | Kafka settings can't be configured; producer defaults can reorder retried messages | Open |
+| F5  | Medium   | Kafka settings can't be configured; producer defaults can reorder retried messages | Partly fixed 0.8.3 |
 | F6  | Low      | No handling of revoked partitions: more duplicates after a rebalance | Open |
 | F7  | Low      | Offset ranges are wrong if a partition is re-assigned mid-poll | Open   |
 | F8  | Low      | Large tables in the `arrow-batch` format fail at enqueue       | Open   |
@@ -197,6 +197,20 @@ requests and keep order across retries. Also default to
 `compression.type=lz4` or `zstd`; the crate already links zstd. TLS is a
 separate change: it is excluded in `Cargo.toml` for build reasons that are
 documented there.
+
+**Status.** The configurability half is fixed in 0.8.3 —
+`design-docs/2026-10-01-kafka-config-passthrough.md`. It differs from the
+recommendation above in two ways, both argued there: the dict sits on
+`KafkaInputSettings` / `KafkaOutputSettings` rather than
+`KafkaConnectionSettings`, because a producer-only property under a shared
+`connection` block would be silently ignored on an input; and it is *not*
+merged last — the properties tkati sets itself are rejected at parse time,
+because librdkafka accepts `enable.auto.commit=true` silently and that would
+turn a node's rewind-on-failure path into data loss.
+
+The defaults are unchanged, so **the reordering half of this finding is still
+open**: `enable.idempotence` is still false unless an operator sets it. That is
+the next change.
 
 ### F6. No handling of revoked partitions: more duplicates after a rebalance
 

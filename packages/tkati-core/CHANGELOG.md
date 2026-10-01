@@ -1,3 +1,17 @@
+# 0.8.3
+
+* `[input.config]` and `[output.config]` pass arbitrary librdkafka properties
+  through to the consumer and producer — compression, `linger.ms`, `acks`,
+  `client.id`, `SASL_PLAINTEXT`/`PLAIN` auth. Values may be strings, ints or
+  bools, and librdkafka validates names and values when the client is built.
+* The properties `tkati-core` sets itself (`PRODUCER_RESERVED`,
+  `CONSUMER_RESERVED`) are rejected in `config` at settings-parse time instead
+  of being silently overridden. `enable.auto.commit` is the one that matters:
+  librdkafka accepts `true` silently, and it would turn a node's rewind-on-
+  failure path into data loss.
+* No defaults changed: compression is still off and `enable.idempotence` still
+  false unless `config` says otherwise.
+
 # 0.8.2
 
 * Fix: a ClickHouse outage no longer empties a batch into the DLQ.

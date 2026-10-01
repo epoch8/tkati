@@ -5,7 +5,9 @@ import orjson
 import pyarrow as pa
 import pytest
 from confluent_kafka import Consumer
+from pydantic import ValidationError
 from tkati_core import PRODUCER_PHASES, DeliveryError, LoopStats
+from tkati_core._native import NativeProducer
 from tkati_core.kafka.producer import KafkaProducer
 from tkati_core.kafka.settings import (
     KafkaConnectionSettings,
@@ -30,14 +32,87 @@ def _consume_all(
     return messages
 
 
-def test_from_output_settings_sets_attributes(output_settings: KafkaOutputSettings):
+def _capture_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, str | int | bool]:
+    """Replace `NativeProducer` with a stub recording the config it is built
+    with, so a test can assert on it without a broker."""
+    captured: dict[str, str | int | bool] = {}
+
+    class CapturingNativeProducer:
+        def __init__(self, config: dict[str, str | int | bool], topic: str) -> None:
+            captured.update(config)
+
+    monkeypatch.setattr(
+        "tkati_core.kafka.producer.NativeProducer", CapturingNativeProducer
+    )
+    return captured
+
+
+def test_from_output_settings_sets_attributes(
+    output_settings: KafkaOutputSettings, monkeypatch: pytest.MonkeyPatch
+):
+    captured_config = _capture_config(monkeypatch)
     producer = KafkaProducer.from_output_settings(output_settings)
-    try:
-        assert producer.topic_name == output_settings.topic.name
-        assert producer.format == output_settings.topic.format
-        assert producer.key_column == output_settings.topic.key_column
-    finally:
-        producer.close()
+    assert producer.topic_name == output_settings.topic.name
+    assert producer.format == output_settings.topic.format
+    assert producer.key_column == output_settings.topic.key_column
+    assert captured_config == {"bootstrap.servers": output_settings.connection.broker}
+
+
+def test_output_config_is_merged_into_the_client_config(
+    output_settings: KafkaOutputSettings, monkeypatch: pytest.MonkeyPatch
+):
+    captured_config = _capture_config(monkeypatch)
+    output_settings.config = {
+        "compression.type": "zstd",
+        "linger.ms": 50,
+        "enable.idempotence": True,
+    }
+    KafkaProducer.from_output_settings(output_settings)
+    # Equality, not containment: an accidental extra or renamed property fails.
+    assert captured_config == {
+        "bootstrap.servers": output_settings.connection.broker,
+        "compression.type": "zstd",
+        "linger.ms": 50,
+        "enable.idempotence": True,
+    }
+
+
+def test_output_config_rejects_a_reserved_property():
+    with pytest.raises(ValidationError, match=r"is set from `connection\.broker`"):
+        KafkaOutputSettings(
+            connection=KafkaConnectionSettings(broker="broker:9092"),
+            topic=KafkaTopicSettings(name="t"),
+            config={"bootstrap.servers": "elsewhere:9092"},
+        )
+
+
+def test_librdkafka_accepts_a_passthrough_of_each_value_type(
+    output_settings: KafkaOutputSettings,
+):
+    """The stub above only checks our own merge. This builds a real client, so
+    the three properties are validated by librdkafka, and a str, an int and a
+    bool are all shown to survive the native layer's lowering."""
+    NativeProducer(
+        {
+            "bootstrap.servers": output_settings.connection.broker,
+            "compression.type": "zstd",
+            "linger.ms": 50,
+            "enable.idempotence": True,
+        },
+        "config-passthrough-probe",
+    )
+
+
+def test_librdkafka_rejects_an_unknown_or_invalid_property(
+    output_settings: KafkaOutputSettings,
+):
+    """Why no property-name validation in pydantic: librdkafka does it, at
+    client construction, naming the property."""
+    broker = output_settings.connection.broker
+    with pytest.raises(Exception, match="No such configuration property"):
+        NativeProducer({"bootstrap.servers": broker, "compresion.type": "zstd"}, "t")
+    with pytest.raises(Exception, match='Invalid value "brotli"'):
+        NativeProducer({"bootstrap.servers": broker, "compression.type": "brotli"}, "t")
 
 
 def test_produce_json_format(
@@ -72,7 +147,9 @@ def test_produce_json_format_preserves_timestamp(
     before JSON serialization, instead of orjson emitting an ISO-8601 string."""
     settings = KafkaOutputSettings(
         connection=KafkaConnectionSettings(broker="localhost:9092"),
-        topic=KafkaTopicSettings(name=kafka_output_topic, schema={"ts": "timestamp[ms]"}),
+        topic=KafkaTopicSettings(
+            name=kafka_output_topic, schema={"ts": "timestamp[ms]"}
+        ),
     )
     table = pa.table({"ts": pa.array([1_700_000_000_000], type=pa.int64())}).cast(
         pa.schema([pa.field("ts", pa.timestamp("ms"))])

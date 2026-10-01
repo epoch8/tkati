@@ -61,12 +61,17 @@ class KafkaConsumer(ConsumerBase):
 
         Sets enable.auto.commit=False — each batch's offsets are committed
         explicitly via .commit(batch).
+
+        `settings.config` holds extra librdkafka properties, merged over the
+        four derived here. All four are in `CONSUMER_RESERVED` and rejected
+        when the settings are parsed, so the merge cannot overwrite them.
         """
-        kafka_config: dict[str, str | bool] = {
+        kafka_config: dict[str, str | int | bool] = {
             "bootstrap.servers": settings.connection.broker,
             "group.id": settings.consumer.group_id,
             "auto.offset.reset": settings.consumer.auto_offset_reset,
             "enable.auto.commit": False,
+            **settings.config,
         }
         return cls(
             kafka_config=kafka_config,
@@ -76,7 +81,7 @@ class KafkaConsumer(ConsumerBase):
 
     def __init__(
         self,
-        kafka_config: dict[str, str | bool],
+        kafka_config: dict[str, str | int | bool],
         topic_name: str,
         input_schema: dict[str, str],
     ) -> None:

@@ -13,6 +13,7 @@ from tkati_core.type_mapping import TYPE_MAPPING
 
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import (
+        KafkaConfigOverrides,
         KafkaConnectionSettings,
         KafkaOutputSettings,
         KafkaTopicSettings,
@@ -66,7 +67,7 @@ class KafkaProducer(ProducerBase):
 
     def __init__(
         self,
-        kafka_config: dict[str, str],
+        kafka_config: dict[str, str | int | bool],
         topic_name: str,
         format: Literal["json", "arrow-batch"] = "json",
         key_column: str | None = None,
@@ -92,10 +93,23 @@ class KafkaProducer(ProducerBase):
 
     @classmethod
     def from_topic_settings(
-        cls, connection: "KafkaConnectionSettings", topic: "KafkaTopicSettings"
+        cls,
+        connection: "KafkaConnectionSettings",
+        topic: "KafkaTopicSettings",
+        config: "KafkaConfigOverrides | None" = None,
     ) -> "KafkaProducer":
+        """Build a producer for one topic.
+
+        `config` holds extra librdkafka properties, merged over the ones
+        derived from `connection`. Properties in `PRODUCER_RESERVED` are
+        rejected when the settings are parsed, so the merge cannot overwrite
+        one of them here.
+        """
         return cls(
-            kafka_config={"bootstrap.servers": connection.broker},
+            kafka_config={
+                "bootstrap.servers": connection.broker,
+                **(config or {}),
+            },
             topic_name=topic.name,
             format=topic.format,
             key_column=topic.key_column,
@@ -104,7 +118,9 @@ class KafkaProducer(ProducerBase):
 
     @classmethod
     def from_output_settings(cls, settings: "KafkaOutputSettings") -> "KafkaProducer":
-        return cls.from_topic_settings(settings.connection, settings.topic)
+        return cls.from_topic_settings(
+            settings.connection, settings.topic, settings.config
+        )
 
     def produce_arrow(
         self,

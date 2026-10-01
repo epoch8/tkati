@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "tkati_core_native"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
