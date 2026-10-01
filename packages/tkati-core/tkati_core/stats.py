@@ -13,7 +13,7 @@ pipelines.
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -81,7 +81,7 @@ class PhaseStats:
             self.phase_sec[phase] = self.phase_sec.get(phase, 0.0) + seconds
 
     @contextmanager
-    def phase(self, name: str) -> Iterator[None]:
+    def phase(self, name: str) -> Generator[None]:
         """Time a block and add it to `name`'s running total."""
         started = time.perf_counter()
         try:
