@@ -12,6 +12,41 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.3
+
+### loopqqlz — Kafka client config passthrough [tkati-core, tkati-node-dedup, tkati-node-el, repo]
+
+- `[input.config]` and `[output.config]` (and `[dlq.config]`) set any librdkafka
+  property on the consumer or producer: compression, `linger.ms`, `acks`,
+  `client.id`, `SASL_PLAINTEXT`/`PLAIN` auth. Values may be strings, ints or
+  bools, and the dict is merged over the properties derived from the typed
+  fields. No Rust change was needed — `config_entries` already stringified
+  values and lowered bools
+- Property names and values are librdkafka's to validate, at client
+  construction: `compresion.type` fails node startup with `No such configuration
+  property`, `compression.type = "brotli"` with `Invalid value "brotli" for
+  configuration property "compression.codec"`. So there is no property list in
+  Python to go stale
+- The properties tkati sets itself — `PRODUCER_RESERVED`, `CONSUMER_RESERVED`,
+  both public — are rejected at settings-parse time rather than merged over.
+  `enable.auto.commit` is the one that matters: librdkafka accepts `true`
+  silently, and the consumer's explicit-commit protocol depends on it being
+  false, so a passthrough that could override it would turn a node's
+  rewind-on-failure path into data loss. The other four are reserved only
+  because a typed field already sets them
+- Compression is set this way rather than through a typed field: librdkafka's
+  own error names the bad codec at the same startup a pydantic error would, so a
+  `Literal` would have bought one better message at the cost of a second
+  mechanism for one property. It pays off far more under `format = "json"`, where
+  the codec sees many small near-identical messages, than under `"arrow-batch"`
+- `KafkaProducer` and `KafkaConsumer` now agree on
+  `kafka_config: dict[str, str | int | bool]`
+- No defaults changed: compression stays off and `enable.idempotence` stays
+  false unless `config` says otherwise. Audit finding F5's configurability half
+  is closed, the reordering half is still open and is the next change
+- New `design-docs/2026-10-01-kafka-config-passthrough.md`; F5 marked partly
+  fixed in the audit
+
 ## 0.8.2
 
 ### tzwvropv — ClickHouse insert failures: data errors versus outages [tkati-core, tkati-node-el, repo]

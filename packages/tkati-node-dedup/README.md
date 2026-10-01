@@ -41,6 +41,12 @@ broker = "redpanda:29092"
 [output.topic]
 name = "raw_event_deduped"
 
+# Optional. Any librdkafka property, passed through to the producer; see
+# "Client configuration" in tkati-core's README. `[input.config]` does the same
+# for the consumer.
+[output.config]
+"compression.type" = "zstd"
+
 [dedup]
 field        = "uid"     # column in input.topic.schema to dedup by
 window_hours = 3         # rolling dedup window

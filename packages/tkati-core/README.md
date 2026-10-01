@@ -530,6 +530,51 @@ same way against `ClickHouseOutputSettings`.
 - `"json"` *(default)*: each row becomes a separate Kafka message serialized with orjson.
 - `"arrow-batch"`: the entire table is serialized as a single Arrow IPC stream message.
 
+**Client configuration** — any librdkafka property, via `[output.config]` for a producer
+or `[input.config]` for a consumer:
+
+```toml
+[output.config]
+"compression.type"   = "zstd"   # librdkafka's default is "none"
+"linger.ms"          = 50
+"batch.num.messages" = 50000
+"client.id"          = "node-el-prod-1"
+```
+
+Values may be strings, ints or bools; each reaches librdkafka in the string form it
+expects. The dict is merged over the properties derived from the typed settings, and
+**property names and values are validated by librdkafka when the client is built** — a
+typo'd `compresion.type` fails node startup with `No such configuration property`, and
+`compression.type = "brotli"` with `Invalid value "brotli" for configuration property
+"compression.codec"`. There is no list of properties here to go stale.
+
+`[dlq.config]` works the same way when the DLQ sink is Kafka.
+
+Properties `tkati-core` sets itself are rejected at settings-parse time rather than
+silently overridden — `PRODUCER_RESERVED` and `CONSUMER_RESERVED` in
+`tkati_core.kafka.settings`:
+
+| Property | Role | Why |
+| --- | --- | --- |
+| `enable.auto.commit` | consumer | Must stay false: a node commits each batch explicitly once it is durable, and rewinds it on failure. |
+| `bootstrap.servers` | both | Set from `connection.broker`. |
+| `group.id` | consumer | Set from `consumer.group_id`. |
+| `auto.offset.reset` | consumer | Set from `consumer.auto_offset_reset`. |
+
+Two notes on properties worth setting:
+
+- **Compression** pays off far more under `format = "json"`, where the codec sees many
+  small, near-identical messages in one message set, than under `"arrow-batch"`, which
+  is a single already-compact Arrow IPC message per table with no cross-message
+  redundancy to exploit. Both are compressed; only one is transformed. Consumers need
+  no setting — decompression is automatic.
+- **Authentication** is settable but only partly usable in the published wheel:
+  `security.protocol = "SASL_PLAINTEXT"` with `sasl.mechanism = "PLAIN"` works, while
+  `SCRAM-SHA-256`, `GSSAPI` and `OAUTHBEARER` fail with *"No provider for SASL
+  mechanism … recompile librdkafka with libsasl2"*, and any `_SSL` protocol with
+  *"OpenSSL not available at build time"*. See the `rdkafka` dependency comment in
+  `Cargo.toml` for what re-enabling them takes.
+
 **Message keys** — controlled by `output.topic.key_column` in `settings.toml`:
 
 ```toml

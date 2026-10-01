@@ -9,6 +9,7 @@ import pytest
 from confluent_kafka import Consumer as RawConsumer
 from confluent_kafka import Producer, TopicPartition
 from confluent_kafka.admin import AdminClient, NewTopic
+from pydantic import ValidationError
 from tkati_core import (
     CONSUMER_PHASES,
     Batch,
@@ -19,7 +20,16 @@ from tkati_core import (
 )
 from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.kafka.producer import KafkaProducer
-from tkati_core.kafka.settings import KafkaInputSettings, KafkaOutputSettings
+from tkati_core.kafka.settings import (
+    _RESERVED_REASONS,
+    CONSUMER_RESERVED,
+    PRODUCER_RESERVED,
+    KafkaConnectionSettings,
+    KafkaConsumerSettings,
+    KafkaInputSettings,
+    KafkaOutputSettings,
+    KafkaTopicSettings,
+)
 
 
 def test_from_input_settings_sets_attributes(input_settings: KafkaInputSettings):
@@ -29,6 +39,57 @@ def test_from_input_settings_sets_attributes(input_settings: KafkaInputSettings)
         assert consumer.input_schema == input_settings.topic.schema
     finally:
         consumer.close()
+
+
+def test_input_config_is_merged_into_the_client_config(
+    input_settings: KafkaInputSettings, monkeypatch: pytest.MonkeyPatch
+):
+    captured_config: dict[str, str | int | bool] = {}
+
+    class CapturingNativeConsumer:
+        def __init__(self, config: dict[str, str | int | bool], topic: str) -> None:
+            captured_config.update(config)
+
+    monkeypatch.setattr(
+        "tkati_core.kafka.consumer.NativeConsumer", CapturingNativeConsumer
+    )
+    input_settings.config = {"fetch.min.bytes": 65536, "client.id": "reader-1"}
+    KafkaConsumer.from_input_settings(input_settings)
+    # Equality, not containment: the four derived properties are pinned too, so
+    # a passthrough that displaced one would fail here as well as at parse time.
+    assert captured_config == {
+        "bootstrap.servers": input_settings.connection.broker,
+        "group.id": input_settings.consumer.group_id,
+        "auto.offset.reset": input_settings.consumer.auto_offset_reset,
+        "enable.auto.commit": False,
+        "fetch.min.bytes": 65536,
+        "client.id": "reader-1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [
+        ("enable.auto.commit", "is managed by tkati"),
+        ("group.id", r"is set from `consumer\.group_id`"),
+    ],
+)
+def test_input_config_rejects_a_reserved_property(key: str, message: str):
+    """One case per reason the set exists: a property owned for correctness, and
+    one owned by a typed field."""
+    with pytest.raises(ValidationError, match=message):
+        KafkaInputSettings(
+            connection=KafkaConnectionSettings(broker="broker:9092"),
+            topic=KafkaTopicSettings(name="t"),
+            consumer=KafkaConsumerSettings(group_id="g"),
+            config={key: True},
+        )
+
+
+def test_every_reserved_property_has_a_reason():
+    """The sets are the policy; the reasons are what an operator reads. A key
+    added to one without the other would raise `KeyError` from the validator."""
+    assert (PRODUCER_RESERVED | CONSUMER_RESERVED) <= _RESERVED_REASONS.keys()
 
 
 def test_from_input_settings_builds_arrow_schemas(input_settings: KafkaInputSettings):

@@ -1,3 +1,10 @@
+# 0.8.3
+
+* Kafka input and output accept `[input.config]` / `[output.config]`: any
+  librdkafka property, passed through to the client. Compression is set this
+  way — `"compression.type" = "zstd"`. See "Client configuration" in
+  `tkati-core`'s README.
+
 # 0.8.1
 
 * Fix: the perf line's rows in and out are counted for the same batches, so

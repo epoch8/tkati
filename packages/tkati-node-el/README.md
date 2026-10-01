@@ -80,6 +80,12 @@ broker = "redpanda:29092"
 name   = "some-other-topic"
 format = "json"        # or "arrow-batch"
 key_column = "uid"     # optional
+
+# Optional. Any librdkafka property, passed through to the producer; see
+# "Client configuration" in tkati-core's README. `[input.config]` and
+# `[dlq.config]` do the same for the consumer and a Kafka DLQ.
+[output.config]
+"compression.type" = "zstd"
 ```
 
 A ClickHouse DLQ instead looks like:
