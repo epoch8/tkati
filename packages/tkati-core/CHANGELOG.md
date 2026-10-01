@@ -1,3 +1,9 @@
+# WIP 0.8.4
+
+* DLQ sinks now receive rejected rows using the DLQ schema
+  `producer`/`data`/`err_message`/`time`; `producer` contains the source
+  ClickHouse URL, database, and table as JSON
+
 # 0.8.3
 
 * `[input.config]` and `[output.config]` pass arbitrary librdkafka properties

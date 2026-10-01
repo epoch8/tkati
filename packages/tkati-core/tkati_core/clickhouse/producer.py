@@ -1,6 +1,9 @@
+from datetime import UTC, datetime
+
 import clickhouse_connect as ch
 import clickhouse_connect.driver as ch_driver
 import clickhouse_connect.driver.exceptions as ch_exc
+import orjson
 import pyarrow as pa
 from loguru import logger
 from tenacity import (
@@ -114,6 +117,30 @@ def _table_slices(table: pa.Table, chunk_size: int) -> list[pa.Table]:
     return [table.slice(i, chunk_size) for i in range(0, len(table), chunk_size)]
 
 
+def _make_dlq_table(
+    ch_client: ch_driver.Client,
+    ch_table: str,
+    row_table: pa.Table,
+    err: Exception,
+) -> pa.Table:
+    return pa.Table.from_pylist(
+        [
+            {
+                "producer": orjson.dumps(
+                    {
+                        "ch_url": ch_client.uri,
+                        "ch_database": ch_client.database,
+                        "ch_table": ch_table,
+                    }
+                ).decode(),
+                "data": orjson.dumps(row_table.to_pylist()[0]).decode(),
+                "err_message": str(err),
+                "time": datetime.now(UTC),
+            }
+        ]
+    )
+
+
 def _insert_with_dlq_fallback(
     table: pa.Table,
     ch_client: ch_driver.Client,
@@ -139,7 +166,14 @@ def _insert_with_dlq_fallback(
             logger.error(
                 f"Single row rejected by ClickHouse ({_describe(err)}), sending to DLQ"
             )
-            dlq_producer.produce_arrow(table)
+            dlq_producer.produce_arrow(
+                _make_dlq_table(
+                    ch_client,
+                    ch_table,
+                    table,
+                    err,
+                )
+            )
             return
         chunk_size = max(1, len(table) // split_factor)
         logger.warning(

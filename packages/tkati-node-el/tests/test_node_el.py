@@ -138,7 +138,8 @@ def test_ch_producer_isolates_a_bad_row_against_real_clickhouse(
 
     mock_dlq_producer.produce_arrow.assert_called_once()
     sent = mock_dlq_producer.produce_arrow.call_args[0][0]
-    assert sent.column("uid").to_pylist() == ["not-a-uuid"]
+    assert sent.column_names == ["producer", "data", "err_message", "time"]
+    assert orjson.loads(sent.column("data")[0].as_py())["uid"] == "not-a-uuid"
 
 
 def test_every_batch_is_sent_unchanged() -> None:
