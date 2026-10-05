@@ -12,6 +12,31 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.9.0
+
+### rlqvvptt — node-el `[transform]`: Python over each Arrow batch [tkati-node-el, repo]
+
+- New optional `[transform]` section in `tkati-node-el`: inline Python defining
+  `transform(batch: pa.Table) -> pa.Table`, run on the loop thread on every
+  batch before `done()`. Covers type adaptation, defaults, computed columns and
+  dropping columns/rows without forking the node. Design:
+  `design-docs/2026-10-05-node-el-transform.md`
+- The code is executed once at startup as module `tkati_transform`, before the
+  node connects to anything; a syntax error, a top-level exception, or no
+  callable `transform` stops it there, with tracebacks naming
+  `<settings: transform.code>`
+- An exception from `transform` fails the batch like any non-data error:
+  rewound, not committed, not sent to the DLQ. A non-table return is a
+  `TypeError`. The output schema is logged on the first batch and warned on
+  whenever it changes
+- With a transform configured, the `perf loop:` line and `/metrics` gain a
+  `transform` phase (`TRANSFORM_PHASES`); deployments without one log exactly
+  as before. Filtered rows count as `dropped`
+- `tkati-node-el` now depends on `polars`, the recommended way to write a
+  transform. A new ClickHouse roundtrip test pins that Polars' `large_string`
+  columns insert into `String`
+- Minor version bump: 0.9.0 across the workspace
+
 ## 0.8.3
 
 ### loopqqlz — Kafka client config passthrough [tkati-core, tkati-node-dedup, tkati-node-el, repo]

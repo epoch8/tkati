@@ -84,6 +84,7 @@ class DedupSettings(BaseModel):
 
 class AppSettings(NodeSettings):
     # Required here, unlike in NodeSettings: this node always writes to an
-    # output producer.
-    output: OutputSettings
+    # output producer. Pydantic intentionally narrows the config field;
+    # ty rejects narrowing mutable attributes under normal inheritance rules.
+    output: OutputSettings  # ty: ignore[invalid-mutable-override]
     dedup: DedupSettings

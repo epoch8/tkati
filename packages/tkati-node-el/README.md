@@ -9,6 +9,7 @@ Input and output kinds are selected via the `type` field in each section — pic
 - **Input**: `"kafka"` (JSON or Arrow-batch messages from a Kafka/Redpanda topic)
 - **Output**: `"kafka"` or `"clickhouse"` (native Arrow insert)
 - **DLQ**: same `OutputSettings` shape as `output` — a DLQ can be Kafka or ClickHouse too
+- **Transform** (optional): a Python function run on every batch between reading and writing; see [Transform](#transform)
 
 ## Configuration
 
@@ -106,6 +107,142 @@ database = "default"
 name     = "traffic_event_dlq"
 ```
 
+## Transform
+
+An optional `[transform]` section holds Python code that the node runs on every
+batch between reading and writing: to cast fields the producer writes in the
+wrong type, fill defaults, compute columns, drop columns or filter rows.
+
+```toml
+[transform]
+code = '''
+import polars as pl
+import pyarrow as pa
+
+def transform(batch: pa.Table) -> pa.Table:
+    return pl.from_arrow(batch).drop("local_ip").to_arrow()
+'''
+```
+
+Use a TOML multi-line literal string (`'''`): it takes Python verbatim, with no
+escaping of backslashes or quotes. Like any setting, it can also come from the
+environment, as `TRANSFORM__CODE`.
+
+The code runs **once, at startup**, as a module of its own, and must define:
+
+```python
+def transform(batch: pa.Table) -> pa.Table: ...
+```
+
+A syntax error, an exception at top level, or no callable `transform` stops
+the node at startup, before it connects to anything. Tracebacks name the code
+`<settings: transform.code>`, with line numbers counted from the first line of
+the string.
+
+- `batch` holds the columns of `[input.topic.schema]`, with their Arrow types.
+  Fields the schema doesn't name never reach the transform, so a computed
+  column's inputs must be declared there.
+- It must return a `pa.Table` (anything else fails the batch with a
+  `TypeError`). It may return fewer rows (they count as `dropped`), none (the
+  batch is committed and nothing is sent), or more.
+- It may add, drop, rename, reorder and retype columns. For a ClickHouse output
+  the returned columns are the insert's column list, so columns it omits get
+  the table's `DEFAULT`; for a Kafka output they are the JSON keys.
+- **An exception fails the batch**: it is rewound, not committed and not sent
+  to the DLQ, and the node exits. On restart it reads the same batch again.
+- The node logs the output schema on the first batch, and warns whenever it
+  differs from the previous batch's. A schema that flips between batches is
+  almost always a bug (e.g. `pa.array` inferring `null` for an all-`None`
+  column).
+- With the pipelined loop, earlier batches may still be in flight while the
+  next is transformed: don't keep references to batches across calls.
+
+[Polars](https://pola.rs) ships with the node and is the recommended way to
+write one: `pl.from_arrow(batch)` and `df.to_arrow()` don't copy the data, and
+its expressions run in parallel without holding the GIL. `pyarrow.compute`
+works just as well. Polars returns strings as `large_string`; both outputs
+accept it.
+
+### Example
+
+Type adaptation, defaults and computed columns, on a stream whose producers
+write timestamps as ISO-8601 and `package_id` as a string:
+
+```toml
+[input.topic.schema]
+time        = "string"        # producers write ISO-8601; read as text
+package_id  = "string"        # producers write "7", not 7
+country     = "string"
+traffic_in  = "uint32"
+traffic_out = "uint32"
+local_ip    = "string"
+# ...
+
+[transform]
+code = '''
+import datetime as dt
+
+import polars as pl
+import pyarrow as pa
+
+DEFAULT_COUNTRY = "ZZ"
+
+
+def transform(batch: pa.Table) -> pa.Table:
+    df = pl.from_arrow(batch)
+    now = dt.datetime.now(dt.UTC)
+    df = (
+        df.with_columns(
+            # Type adaptation. strict=False turns junk into null instead of
+            # failing the batch; leave it strict where junk should stop the node.
+            pl.col("time").str.to_datetime(time_unit="ms"),
+            pl.col("package_id").cast(pl.Int32, strict=False),
+            # Defaults: a missing field arrives as null.
+            pl.col("country").fill_null(DEFAULT_COUNTRY),
+            # Computed columns. Widen first: UInt32 + UInt32 wraps silently.
+            traffic_total=pl.col("traffic_in").cast(pl.UInt64)
+            + pl.col("traffic_out").cast(pl.UInt64),
+            ingested_at=pl.lit(now, dtype=pl.Datetime("ms", "UTC")),
+        )
+        .with_columns(event_date=pl.col("time").dt.date())
+        # Filter rows, drop columns the target doesn't have.
+        .filter(pl.col("traffic_total") > 0)
+        .drop("local_ip")
+    )
+    return df.to_arrow()
+'''
+```
+
+Through a Kafka output, three input rows — one with `package_id` `"x"`, one
+with zero traffic — come out as (`"x"` became null, the zero-traffic row was
+filtered, `4294967295 + 1` did not wrap):
+
+```json
+{"time":"2026-10-05T12:00:00.123000","package_id":7,"country":"RU","traffic_in":4294967295,"traffic_out":1,"traffic_total":4294967296,"ingested_at":"2026-10-05T16:12:47.222000+00:00","event_date":"2026-10-05"}
+{"time":"2026-10-05T12:00:02","package_id":null,"country":"DE","traffic_in":5,"traffic_out":1,"traffic_total":6,"ingested_at":"2026-10-05T16:12:47.222000+00:00","event_date":"2026-10-05"}
+```
+
+### Writing a transform
+
+- **Strict casts fail the whole batch.** Polars casts are strict by default:
+  `pl.col("package_id").cast(pl.Int32)` on `"x"` raises, which stalls the node
+  on that batch. Decide per field whether junk means "null or a default"
+  (`strict=False`, then `fill_null`) or "stop" (strict). The same holds for
+  `str.to_datetime`, which also infers the format from the data: pass
+  `format=` when producers are known to mix spellings.
+- **Overflow is silent.** Arithmetic on narrow integer types wraps; widen
+  first, as `traffic_total` does above.
+- **Stay columnar.** Polars expressions, not `map_elements` or a Python loop
+  over rows; those work, and show up as the `transform` phase.
+- **Top-level code runs once**, at startup: put constants and expensive setup
+  there, not in `transform`.
+- **Test it** by loading the settings:
+  `load_transform(AppSettings().transform)` (from `tkati_node_el.transform`)
+  returns the same function the node calls, to run against a hand-built
+  `pa.table({...})` in pytest, no broker needed.
+- Libraries beyond Polars and pyarrow (DuckDB, a geo-IP reader) are the
+  image's business: build `FROM` the node's image and install them.
+
 ## Metrics and perf log
 
 Every 10 seconds the node logs where its wall clock went, using `LoopStats`
@@ -117,13 +254,17 @@ perf loop: wait/input=0.21s (2%) producer/serialize=2.10s (21%) producer/enqueue
 perf read: consumer/poll=4.43s (44%) consumer/parse=0.48s (5%) wait/loop=5.20s (52%)
 ```
 
-This node never drops rows, so `dropped` is always 0.
+Only a [transform](#transform) drops rows; without one `dropped` is always 0.
 
 `perf loop:` is the node's loop, in the order its phases happen for a batch.
 `perf read:` is its read-ahead thread, which reads the next batches while the
 loop works on this one. The two lines run at the same time, so add up
 percentages within a line, never across them.
 
+* `transform`: the `[transform]` function, only on the line when one is
+  configured. High with low `wait/input` means the transform is the
+  bottleneck. A transform that loops over rows in Python also holds the GIL
+  against the read-ahead thread, so `consumer/parse` slows down with it.
 * `consumer/poll`, `consumer/parse`: fetching message batches from the broker,
   and decoding them into an Arrow table.
 * `producer/serialize`, `producer/enqueue`: encoding rows into the output's

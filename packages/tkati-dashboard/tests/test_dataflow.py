@@ -11,7 +11,7 @@ def test_load_dataflow_merges_fragments(sample_dataflow_dir: Path) -> None:
     assert dataflow.name == "sample-dataflow"
     assert set(dataflow.nodes) == {"raw-orders", "dedup", "deduped-orders"}
     assert dataflow.nodes["raw-orders"].type == "kafka-topic"
-    assert dataflow.nodes["raw-orders"].schema == {
+    assert dataflow.nodes["raw-orders"].schema_ == {
         "id": "string",
         "time": "timestamp[ms]",
         "amount": "int64",
@@ -71,7 +71,7 @@ def test_source_sink_node_without_schema_is_valid(tmp_path: Path) -> None:
 
     dataflow = load_dataflow(tmp_path)
 
-    assert dataflow.nodes["proxy-reboot-requests-cloud-ch"].schema is None
+    assert dataflow.nodes["proxy-reboot-requests-cloud-ch"].schema_ is None
 
 
 def test_singular_node_fragment_is_valid(tmp_path: Path) -> None:
@@ -153,7 +153,7 @@ def test_load_dataflow_reads_yaml_fragments(yaml_dataflow_dir: Path) -> None:
 
     assert dataflow.name == "yaml-dataflow"
     assert set(dataflow.nodes) == {"raw-orders", "dedup", "deduped-orders"}
-    assert dataflow.nodes["raw-orders"].schema == {
+    assert dataflow.nodes["raw-orders"].schema_ == {
         "id": "string",
         "time": "timestamp[ms]",
         "amount": "int64",
