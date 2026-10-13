@@ -12,6 +12,29 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.8.4
+
+### Duplicate field counters [tkati-node-dedup, repo]
+
+- Optional `dedup.counter_fields = ["traffic_in", "traffic_out"]` selects
+  input columns whose values are summed on rows dropped as duplicates.
+  Prometheus exposes a counter for each configured field as
+  `tkati_node_dedup_dropped_field_total{field="traffic_in"}`, in the input
+  field's units. Include the fields in `input.topic.schema`; the environment
+  override is `DEDUP__COUNTER_FIELDS='["traffic_in", "traffic_out"]'`.
+- Counters increase only after their batch commits, alongside the existing
+  dropped-row counter. Duplicates within a batch, in flight and in the store
+  all contribute; batches that fail before commit do not.
+- Integer, floating-point and decimal columns are supported. Missing fields,
+  unsuitable column types, nulls, negative values, NaN and infinities
+  contribute zero. Aggregation uses Arrow kernels in float64; an overflowing
+  sum contributes zero. Each configured series starts at zero, and repeated
+  field names are counted once. The default empty list adds no field series.
+- 22 new broker-free tests cover aggregation, invalid values, commit timing,
+  failed delivery and retry, settings, the main entry point and chunked
+  columns. Package README and changelog document the settings and PromQL.
+  Design doc: `design-docs/2026-10-12-dedup-field-counters.md`.
+
 ## 0.8.3
 
 ### loopqqlz — Kafka client config passthrough [tkati-core, tkati-node-dedup, tkati-node-el, repo]
