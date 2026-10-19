@@ -3,7 +3,7 @@ name = "tkati"
 version = "0.8.3"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.15"
 dependencies = []
 
 [tool.uv.workspace]
