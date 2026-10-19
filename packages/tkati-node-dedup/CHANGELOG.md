@@ -1,3 +1,9 @@
+# 0.8.4
+
+* Optional `dedup.counter_fields` sums numeric input fields on duplicate rows
+  after commit, exposed as `tkati_node_dedup_dropped_field_total{field="..."}`.
+  Missing fields and invalid values contribute zero.
+
 # 0.8.3
 
 * Kafka input and output accept `[input.config]` / `[output.config]`: any
