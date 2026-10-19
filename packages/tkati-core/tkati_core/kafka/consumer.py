@@ -76,7 +76,7 @@ class KafkaConsumer(ConsumerBase):
         return cls(
             kafka_config=kafka_config,
             topic_name=settings.topic.name,
-            input_schema=settings.topic.schema,
+            input_schema=settings.topic.message_schema,
         )
 
     def __init__(

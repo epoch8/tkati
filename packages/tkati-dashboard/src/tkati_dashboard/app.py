@@ -42,7 +42,7 @@ def _graph_json(directory: Path) -> dict[str, Any]:
             "group": "source-sink"
             if node.type in SOURCE_SINK_TYPES
             else "processing-node",
-            "schema": node.schema,
+            "schema": node.schema_,
             "connection": node.connection,
             "config": node.config,
         }

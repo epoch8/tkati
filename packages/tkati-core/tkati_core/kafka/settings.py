@@ -66,7 +66,9 @@ class KafkaConnectionSettings(BaseModel):
 
 class KafkaTopicSettings(BaseModel):
     name: str
-    schema: dict[str, str] = Field(default_factory=dict)
+    # Named `schema` in config; the attribute is renamed because `schema`
+    # would shadow the (deprecated) `BaseModel.schema()` method.
+    message_schema: dict[str, str] = Field(default_factory=dict, alias="schema")
     format: Literal["json", "arrow-batch"] = "json"
     key_column: str | None = None
 

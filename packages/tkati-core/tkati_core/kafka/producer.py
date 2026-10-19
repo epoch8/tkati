@@ -113,7 +113,7 @@ class KafkaProducer(ProducerBase):
             topic_name=topic.name,
             format=topic.format,
             key_column=topic.key_column,
-            output_schema=topic.schema,
+            output_schema=topic.message_schema,
         )
 
     @classmethod

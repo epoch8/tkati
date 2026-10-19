@@ -13,7 +13,8 @@ from tkati_core.kafka.consumer import KafkaConsumer
 from tkati_core.producer import Producer as ProducerBase
 from tkati_core.testing import memory_pipelined_node
 from tkati_node_el.main import run
-from tkati_node_el.settings import AppSettings
+from tkati_node_el.settings import AppSettings, TransformSettings
+from tkati_node_el.transform import Transform, load_transform
 
 
 def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
@@ -25,11 +26,15 @@ def _make_consumer(test_settings: AppSettings) -> KafkaConsumer:
             "enable.auto.commit": False,
         },
         topic_name=test_settings.input.topic.name,
-        input_schema=test_settings.input.topic.schema,
+        input_schema=test_settings.input.topic.message_schema,
     )
 
 
-def _run(test_settings: AppSettings, producer: ProducerBase) -> None:
+def _run(
+    test_settings: AppSettings,
+    producer: ProducerBase,
+    transform: Transform | None = None,
+) -> None:
     """Run the node over everything already in the input topic, then stop."""
     node = PipelinedNode(
         _make_consumer(test_settings),
@@ -39,7 +44,7 @@ def _run(test_settings: AppSettings, producer: ProducerBase) -> None:
         stop_when_idle=True,
     )
     with node:
-        run(node)
+        run(node, transform)
 
 
 def _ch_producer(test_settings: AppSettings, dlq: MagicMock) -> ClickhouseProducer:
@@ -84,6 +89,50 @@ def test_node_el_valid_flow(
 
     result = ch_client.query(f"SELECT uid, traffic_in, traffic_out FROM {ch_table}")
     assert result.result_rows == [("abc123", 100, 200)]
+    mock_dlq_producer.produce_arrow.assert_not_called()
+
+
+def test_node_el_polars_transform_lands_in_clickhouse(
+    kafka_producer_and_topic: Producer,
+    ch_client: ch_driver.Client,
+    ch_table: str,
+    mock_dlq_producer: MagicMock,
+    test_settings: AppSettings,
+) -> None:
+    """A Polars transform adds a column and returns its strings as
+    `large_string`; ClickHouse's Arrow input must take both."""
+    ch_client.command(f"ALTER TABLE {ch_table} ADD COLUMN traffic_total UInt64")
+    transform = load_transform(
+        TransformSettings(
+            code=(
+                "import polars as pl\n"
+                "def transform(batch):\n"
+                "    out = pl.from_arrow(batch).with_columns(\n"
+                "        traffic_total=pl.col('traffic_in').cast(pl.UInt64)\n"
+                "        + pl.col('traffic_out').cast(pl.UInt64),\n"
+                "    ).to_arrow()\n"
+                "    assert str(out.schema.field('uid').type) == 'large_string'\n"
+                "    return out\n"
+            )
+        )
+    )
+    event = {
+        "uid": "abc123",
+        "time": int(time.time() * 1000),
+        "package_id": 1,
+        "country": "US",
+        "traffic_in": 4294967295,
+        "traffic_out": 1,
+    }
+    kafka_producer_and_topic.produce(
+        test_settings.input.topic.name, value=orjson.dumps(event)
+    )
+    kafka_producer_and_topic.flush()
+
+    _run(test_settings, _ch_producer(test_settings, mock_dlq_producer), transform)
+
+    result = ch_client.query(f"SELECT uid, country, traffic_total FROM {ch_table}")
+    assert result.result_rows == [("abc123", "US", 4294967296)]
     mock_dlq_producer.produce_arrow.assert_not_called()
 
 

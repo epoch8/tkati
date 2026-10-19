@@ -20,7 +20,7 @@ def _make_consumer(settings: AppSettings) -> KafkaConsumer:
             "enable.auto.commit": False,
         },
         topic_name=settings.input.topic.name,
-        input_schema=settings.input.topic.schema,
+        input_schema=settings.input.topic.message_schema,
     )
 
 
