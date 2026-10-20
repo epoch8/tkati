@@ -20,6 +20,9 @@ TYPE_MAPPING: dict[str, FieldTypeMapping] = {
     "uint32": FieldTypeMapping(pa.uint32(), pa.uint32()),
     "uint64": FieldTypeMapping(pa.uint64(), pa.uint64()),
     "uint8": FieldTypeMapping(pa.uint8(), pa.uint8()),
+    "float32": FieldTypeMapping(pa.float32(), pa.float32()),
+    "float64": FieldTypeMapping(pa.float64(), pa.float64()),
     "int": FieldTypeMapping(pa.int32(), pa.int32()),
+    "float": FieldTypeMapping(pa.float64(), pa.float64()),
     "timestamp[ms]": FieldTypeMapping(pa.int64(), pa.timestamp("ms")),
 }

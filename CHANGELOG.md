@@ -12,6 +12,15 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.10.0
+
+### Floating-point schema types [tkati-core]
+
+- Kafka JSON input and output schemas now accept `float32`, `float64`, and
+  `float` (an alias for `float64`). Both the wire and in-memory Arrow types
+  use the declared precision
+- Minor version bump: 0.10.0 across the workspace
+
 ## 0.9.0
 
 ### rlqvvptt — node-el `[transform]`: Python over each Arrow batch [tkati-node-el, repo]

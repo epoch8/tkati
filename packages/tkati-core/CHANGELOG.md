@@ -1,3 +1,9 @@
+# 0.10.0
+
+* Kafka JSON input and output schemas now support `float32`, `float64`, and
+  `float` (an alias for `float64`), using the declared Arrow type for both
+  JSON serialization and the in-memory representation
+
 # 0.8.3
 
 * `[input.config]` and `[output.config]` pass arbitrary librdkafka properties
