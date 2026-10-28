@@ -12,6 +12,27 @@ beyond a package's own generated workflows). Because every package's
 make a package a component of the change — list only packages whose code, tests,
 config or docs changed.
 
+## 0.11.0
+
+### ClickHouse insert identity across retries [tkati-core, repo]
+
+- Disable automatic HTTP sessions for ClickHouse clients created from output
+  settings. A timed-out insert may keep its session locked on the server;
+  retries now proceed without `SESSION_IS_LOCKED` (373)
+- Generate an `insert_deduplication_token` once per logical produce call and
+  reuse it on every attempt. Enable `insert_deduplicate` for synchronous
+  inserts. Separate calls get distinct tokens even with identical rows or
+  delivery tags. The DLQ fallback keeps the original token when resending the
+  full batch and derives distinct tokens for child inserts
+- Tokens cover attempts within a produce call, not a new call after a Kafka
+  rewind or process restart. ClickHouse deduplication must be enabled and its
+  history must retain the token. Delivery remains at-least-once
+- Regression tests exercise the real driver with a simulated HTTP transport:
+  an insert commits before its response times out, and its retry avoids both
+  a duplicate write and a session lock. Additional tests cover DLQ splitting
+  and pylist retries. Design:
+  `design-docs/2026-10-28-clickhouse-insert-deduplication.md`
+
 ## 0.10.0
 
 ### Floating-point schema types [tkati-core]
