@@ -23,6 +23,9 @@ from urllib3 import PoolManager
 from urllib3.exceptions import ProtocolError
 from urllib3.response import HTTPResponse
 
+# Mock only this retry controller's wait, leaving other threads' clocks intact.
+_RETRY_SLEEP = "tkati_core.clickhouse.producer._insert_with_retry.retry.sleep"
+
 
 def _make_arrow_table(n: int = 1) -> pa.Table:
     return pa.table({"uid": [f"uid-{i}" for i in range(n)], "traffic_in": [100 + i for i in range(n)]})
@@ -93,7 +96,7 @@ def test_timeout_after_commit_retries_without_duplicate_or_session_lock() -> Non
     with (
         patch.object(Client, "_init_common_settings", new=discover),
         patch.object(PoolManager, "request", side_effect=request),
-        patch("time.sleep"),
+        patch(_RETRY_SLEEP),
     ):
         producer = ClickhouseProducer.from_output_settings(output)
         data = _make_arrow_table()
@@ -134,7 +137,7 @@ def test_dlq_split_tokens_do_not_drop_identical_rows_or_duplicate_on_timeout() -
 
     ch_client.insert_arrow.side_effect = insert
     producer = ClickhouseProducer(ch_client, "traffic_event", dlq, split_factor=2)
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         producer.produce_arrow(pa.table({"uid": ["same", "bad", "same", "same"]}))
 
     assert [uid for rows in committed.values() for uid in rows] == ["same"] * 3
@@ -153,7 +156,7 @@ def test_produce_pylist_reuses_token_across_retries() -> None:
     ch_client = MagicMock()
     ch_client.insert_arrow.side_effect = [_ch_transport_error(), None]
     producer = ClickhouseProducer(ch_client, "traffic_event")
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         producer.produce_pylist([{"uid": "uid-0"}])
 
     calls = ch_client.insert_arrow.call_args_list
@@ -190,7 +193,7 @@ def test_a_data_error_is_not_retried() -> None:
     ch_client = MagicMock()
     ch_client.insert_arrow.side_effect = _ch_data_error()
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         with pytest.raises(ch_exc.DatabaseError):
             _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=_make_arrow_table(), deduplication_token="insert-1")
 
@@ -209,7 +212,7 @@ def test_insert_retry_on_non_data_error() -> None:
         None,
     ]
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=arrow_table, deduplication_token="insert-1")
 
     assert ch_client.insert_arrow.call_count == 3
@@ -222,7 +225,7 @@ def test_insert_retry_all_fail() -> None:
 
     ch_client.insert_arrow.side_effect = _ch_transport_error()
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.OperationalError, match="Connection refused"):
             _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=arrow_table, deduplication_token="insert-1")
 
@@ -243,7 +246,7 @@ def test_fallback_all_succeed() -> None:
 
     ch_producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=2)
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         ch_producer.produce_arrow(arrow_table)
 
     # The whole batch twice — once from produce_arrow, once at the top of the
@@ -262,7 +265,7 @@ def test_dlq_single_bad_row() -> None:
     bad_row = _make_arrow_table(1)
     ch_client.insert_arrow.side_effect = _ch_data_error()
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         _insert_with_dlq_fallback(
             table=bad_row,
             ch_client=ch_client,
@@ -304,7 +307,7 @@ def test_recursive_descent() -> None:
 
     arrow_table = _make_arrow_table(4)  # uid-0, uid-1, uid-2, uid-3
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         _insert_with_dlq_fallback(
             table=arrow_table,
             ch_client=ch_client,
@@ -343,7 +346,7 @@ def test_data_error_splits_without_sleeping() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=10
     )
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         producer.produce_arrow(_make_arrow_table(100))
 
     sleep.assert_not_called()
@@ -363,7 +366,7 @@ def test_connection_error_is_retried_then_fails_the_batch() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=2
     )
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.OperationalError, match="Connection refused"):
             producer.produce_arrow(_make_arrow_table(100))
 
@@ -385,7 +388,7 @@ def test_error_without_a_code_fails_the_batch() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer
     )
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.DatabaseError):
             producer.produce_arrow(_make_arrow_table(100))
 
@@ -413,7 +416,7 @@ def test_non_data_error_mid_descent_aborts_the_whole_descent() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=2
     )
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.OperationalError, match="Connection refused"):
             producer.produce_arrow(_make_arrow_table(4))
 
@@ -470,7 +473,7 @@ def test_ch_producer_failure_without_dlq_raises() -> None:
 
     producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event", dlq_producer=None)
 
-    with patch("time.sleep"), pytest.raises(ch_exc.OperationalError, match="Connection refused"):
+    with patch(_RETRY_SLEEP), pytest.raises(ch_exc.OperationalError, match="Connection refused"):
         producer.produce_arrow(arrow_table)
 
 
