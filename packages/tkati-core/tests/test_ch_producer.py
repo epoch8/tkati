@@ -91,7 +91,9 @@ def test_timeout_after_commit_retries_without_duplicate_or_session_lock() -> Non
             if session is not None:
                 locked_sessions.add(session)
             raise ProtocolError("Connection aborted.", TimeoutError("timed out"))
-        return HTTPResponse(status=200, body=b"")
+        # A completed ClickHouse response includes final HTTP headers. The
+        # driver treats a headerless response as a connection closed mid-reply.
+        return HTTPResponse(status=200, headers={"Content-Type": "text/plain; charset=UTF-8"}, body=b"")
 
     with (
         patch.object(Client, "_init_common_settings", new=discover),
