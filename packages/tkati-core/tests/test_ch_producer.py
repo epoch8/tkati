@@ -1,8 +1,11 @@
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import clickhouse_connect.driver.exceptions as ch_exc
 import pyarrow as pa
 import pytest
+from clickhouse_connect.driver.client import Client
+from clickhouse_connect.driver.models import SettingDef
 from tkati_core import PRODUCER_PHASES, LoopStats
 from tkati_core.clickhouse.producer import (
     CH_DATA_ERROR_CODES,
@@ -11,6 +14,17 @@ from tkati_core.clickhouse.producer import (
     _insert_with_retry,
     _is_data_error,
 )
+from tkati_core.clickhouse.settings import (
+    ClickHouseConnectionSettings,
+    ClickHouseOutputSettings,
+    ClickHouseTableSettings,
+)
+from urllib3 import PoolManager
+from urllib3.exceptions import ProtocolError
+from urllib3.response import HTTPResponse
+
+# Mock only this retry controller's wait, leaving other threads' clocks intact.
+_RETRY_SLEEP = "tkati_core.clickhouse.producer._insert_with_retry.retry.sleep"
 
 
 def _make_arrow_table(n: int = 1) -> pa.Table:
@@ -34,6 +48,123 @@ def _ch_transport_error() -> ch_exc.OperationalError:
     return ch_exc.OperationalError(
         "Error executing HTTP request attempt 1 (http://localhost:8123): Connection refused"
     )
+
+
+def test_timeout_after_commit_retries_without_duplicate_or_session_lock() -> None:
+    """A committed insert loses its reply; its retry must not insert it again.
+
+    Exercise the real driver, replacing server discovery and HTTP transport.
+    A separate call with identical data and the same delivery tag is a new
+    logical insert and must still be written.
+    """
+    output = ClickHouseOutputSettings(
+        connection=ClickHouseConnectionSettings(host="localhost", port=8123),
+        table=ClickHouseTableSettings(name="traffic_event"),
+    )
+    requests: list[dict[str, list[str]]] = []
+    committed_tokens: set[str] = set()
+    locked_sessions: set[str] = set()
+    landed: list[dict] = []
+
+    def discover(client: Client, tz_source: str) -> None:
+        client.server_settings = {
+            "insert_deduplicate": SettingDef("insert_deduplicate", "0", 0),
+            "insert_deduplication_token": SettingDef("insert_deduplication_token", "", 0),
+        }
+
+    def request(method: str, url: str, **kwargs) -> HTTPResponse:
+        params = parse_qs(urlsplit(url).query)
+        requests.append(params)
+        session = params.get("session_id", [None])[0]
+        if session in locked_sessions:
+            return HTTPResponse(
+                status=500,
+                headers={"X-ClickHouse-Exception-Code": "373"},
+                body=b"Code: 373. Session is locked by a concurrent client. (SESSION_IS_LOCKED)",
+            )
+        token = params.get("insert_deduplication_token", [None])[0]
+        if token is None or token not in committed_tokens:
+            landed.extend(pa.ipc.open_file(kwargs["body"]).read_all().to_pylist())
+            if token is not None:
+                committed_tokens.add(token)
+        if len(requests) == 1:
+            if session is not None:
+                locked_sessions.add(session)
+            raise ProtocolError("Connection aborted.", TimeoutError("timed out"))
+        # A completed ClickHouse response includes final HTTP headers. The
+        # driver treats a headerless response as a connection closed mid-reply.
+        return HTTPResponse(status=200, headers={"Content-Type": "text/plain; charset=UTF-8"}, body=b"")
+
+    with (
+        patch.object(Client, "_init_common_settings", new=discover),
+        patch.object(PoolManager, "request", side_effect=request),
+        patch(_RETRY_SLEEP),
+    ):
+        producer = ClickhouseProducer.from_output_settings(output)
+        data = _make_arrow_table()
+        try:
+            producer.produce_arrow(data, tag=1)
+            producer.produce_arrow(data, tag=1)
+        finally:
+            producer.close()
+
+    assert landed == data.to_pylist() * 2
+    assert len(requests) == 3
+    assert all("session_id" not in params for params in requests)
+    assert all(params["insert_deduplicate"] == ["1"] for params in requests)
+    tokens = [params["insert_deduplication_token"][0] for params in requests]
+    assert tokens[0] == tokens[1]
+    assert tokens[0] != tokens[2]
+
+
+def test_dlq_split_tokens_do_not_drop_identical_rows_or_duplicate_on_timeout() -> None:
+    """Each split is an independent insert, even when rows are identical."""
+    ch_client = MagicMock()
+    dlq = MagicMock()
+    attempts: list[tuple[list[str], str]] = []
+    committed: dict[str, list[str]] = {}
+
+    def insert(table, arrow_table, settings):
+        rows = arrow_table.column("uid").to_pylist()
+        token = settings["insert_deduplication_token"]
+        attempts.append((rows, token))
+        if "bad" in rows:
+            raise _ch_data_error()
+        if token in committed:
+            return
+        committed[token] = rows
+        if len(rows) == 2:
+            # The last chunk commits, then loses its acknowledgement.
+            raise _ch_transport_error()
+
+    ch_client.insert_arrow.side_effect = insert
+    producer = ClickhouseProducer(ch_client, "traffic_event", dlq, split_factor=2)
+    with patch(_RETRY_SLEEP) as sleep:
+        producer.produce_arrow(pa.table({"uid": ["same", "bad", "same", "same"]}))
+
+    assert [uid for rows in committed.values() for uid in rows] == ["same"] * 3
+    dlq.produce_arrow.assert_called_once()
+    assert dlq.produce_arrow.call_args.args[0].column("uid").to_pylist() == ["bad"]
+    dlq.flush.assert_called_once()
+    sleep.assert_called_once()
+    # produce_arrow and the entry to the fallback resend the same full batch.
+    assert attempts[0] == attempts[1]
+    # The timed-out child keeps its own identity on retry.
+    assert attempts[-2] == attempts[-1]
+    assert attempts[-1][1] != attempts[0][1]
+
+
+def test_produce_pylist_reuses_token_across_retries() -> None:
+    ch_client = MagicMock()
+    ch_client.insert_arrow.side_effect = [_ch_transport_error(), None]
+    producer = ClickhouseProducer(ch_client, "traffic_event")
+    with patch(_RETRY_SLEEP):
+        producer.produce_pylist([{"uid": "uid-0"}])
+
+    calls = ch_client.insert_arrow.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["settings"] == calls[1].kwargs["settings"]
+    assert calls[0].kwargs["settings"]["insert_deduplication_token"]
 
 
 @pytest.mark.parametrize(
@@ -64,9 +195,9 @@ def test_a_data_error_is_not_retried() -> None:
     ch_client = MagicMock()
     ch_client.insert_arrow.side_effect = _ch_data_error()
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         with pytest.raises(ch_exc.DatabaseError):
-            _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=_make_arrow_table())
+            _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=_make_arrow_table(), deduplication_token="insert-1")
 
     assert ch_client.insert_arrow.call_count == 1
     sleep.assert_not_called()
@@ -83,8 +214,8 @@ def test_insert_retry_on_non_data_error() -> None:
         None,
     ]
 
-    with patch("time.sleep"):
-        _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=arrow_table)
+    with patch(_RETRY_SLEEP):
+        _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=arrow_table, deduplication_token="insert-1")
 
     assert ch_client.insert_arrow.call_count == 3
 
@@ -96,9 +227,9 @@ def test_insert_retry_all_fail() -> None:
 
     ch_client.insert_arrow.side_effect = _ch_transport_error()
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.OperationalError, match="Connection refused"):
-            _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=arrow_table)
+            _insert_with_retry(ch_client=ch_client, table="traffic_event", arrow_table=arrow_table, deduplication_token="insert-1")
 
     assert ch_client.insert_arrow.call_count == 3
 
@@ -109,7 +240,7 @@ def test_fallback_all_succeed() -> None:
     dlq_producer = MagicMock()
     arrow_table = _make_arrow_table(4)
 
-    def insert_side_effect(table, arrow_table):
+    def insert_side_effect(table, arrow_table, settings):
         if len(arrow_table) == 4:
             raise _ch_data_error()
 
@@ -117,7 +248,7 @@ def test_fallback_all_succeed() -> None:
 
     ch_producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=2)
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         ch_producer.produce_arrow(arrow_table)
 
     # The whole batch twice — once from produce_arrow, once at the top of the
@@ -136,13 +267,14 @@ def test_dlq_single_bad_row() -> None:
     bad_row = _make_arrow_table(1)
     ch_client.insert_arrow.side_effect = _ch_data_error()
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         _insert_with_dlq_fallback(
             table=bad_row,
             ch_client=ch_client,
             ch_table="traffic_event",
             dlq_producer=dlq_producer,
             split_factor=10,
+            deduplication_token="insert-1",
         )
 
     assert ch_client.insert_arrow.call_count == 1
@@ -169,7 +301,7 @@ def test_recursive_descent() -> None:
     ch_client = MagicMock()
     dlq_producer = MagicMock()
 
-    def insert_side_effect(table, arrow_table):
+    def insert_side_effect(table, arrow_table, settings):
         if "uid-2" in arrow_table.column("uid").to_pylist():
             raise _ch_data_error()
 
@@ -177,13 +309,14 @@ def test_recursive_descent() -> None:
 
     arrow_table = _make_arrow_table(4)  # uid-0, uid-1, uid-2, uid-3
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         _insert_with_dlq_fallback(
             table=arrow_table,
             ch_client=ch_client,
             ch_table="traffic_event",
             dlq_producer=dlq_producer,
             split_factor=2,
+            deduplication_token="insert-1",
         )
 
     dlq_producer.produce_arrow.assert_called_once()
@@ -205,7 +338,7 @@ def test_data_error_splits_without_sleeping() -> None:
     ch_client = MagicMock()
     dlq_producer = MagicMock()
 
-    def insert_side_effect(table, arrow_table):
+    def insert_side_effect(table, arrow_table, settings):
         if "uid-7" in arrow_table.column("uid").to_pylist():
             raise _ch_data_error()
 
@@ -215,7 +348,7 @@ def test_data_error_splits_without_sleeping() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=10
     )
 
-    with patch("time.sleep") as sleep:
+    with patch(_RETRY_SLEEP) as sleep:
         producer.produce_arrow(_make_arrow_table(100))
 
     sleep.assert_not_called()
@@ -235,7 +368,7 @@ def test_connection_error_is_retried_then_fails_the_batch() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=2
     )
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.OperationalError, match="Connection refused"):
             producer.produce_arrow(_make_arrow_table(100))
 
@@ -257,7 +390,7 @@ def test_error_without_a_code_fails_the_batch() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer
     )
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.DatabaseError):
             producer.produce_arrow(_make_arrow_table(100))
 
@@ -273,7 +406,7 @@ def test_non_data_error_mid_descent_aborts_the_whole_descent() -> None:
     ch_client = MagicMock()
     dlq_producer = MagicMock()
 
-    def insert_side_effect(table, arrow_table):
+    def insert_side_effect(table, arrow_table, settings):
         uids = arrow_table.column("uid").to_pylist()
         if uids == ["uid-1"]:
             raise _ch_transport_error()
@@ -285,7 +418,7 @@ def test_non_data_error_mid_descent_aborts_the_whole_descent() -> None:
         ch_client=ch_client, table="traffic_event", dlq_producer=dlq_producer, split_factor=2
     )
 
-    with patch("time.sleep"):
+    with patch(_RETRY_SLEEP):
         with pytest.raises(ch_exc.OperationalError, match="Connection refused"):
             producer.produce_arrow(_make_arrow_table(4))
 
@@ -342,7 +475,7 @@ def test_ch_producer_failure_without_dlq_raises() -> None:
 
     producer = ClickhouseProducer(ch_client=ch_client, table="traffic_event", dlq_producer=None)
 
-    with patch("time.sleep"), pytest.raises(ch_exc.OperationalError, match="Connection refused"):
+    with patch(_RETRY_SLEEP), pytest.raises(ch_exc.OperationalError, match="Connection refused"):
         producer.produce_arrow(arrow_table)
 
 

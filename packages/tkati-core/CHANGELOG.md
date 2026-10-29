@@ -1,3 +1,14 @@
+# 0.11.0
+
+* ClickHouse clients created from settings no longer generate HTTP sessions,
+  avoiding `SESSION_IS_LOCKED` after a request times out while still executing
+  on the server
+* Each logical produce call now supplies one `insert_deduplication_token` for
+  all its attempts, with `insert_deduplicate=1`. Recursive DLQ child inserts
+  have distinct tokens, stable across their retries. Independent calls remain
+  distinct even when they contain identical rows. Tokens do not survive a new
+  call after a Kafka rewind or process restart; the output remains at-least-once
+
 # 0.10.0
 
 * Kafka JSON input and output schemas now support `float32`, `float64`, and
