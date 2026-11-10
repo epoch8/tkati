@@ -10,7 +10,7 @@ use rdkafka::ClientContext;
 use rdkafka::config::{ClientConfig, RDKafkaLogLevel};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-use rdkafka::message::Message;
+use rdkafka::message::{BorrowedMessage, Header, Headers, Message, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, NoCustomPartitioner, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::{Offset, TopicPartitionList};
 
@@ -202,6 +202,52 @@ fn record_offset(offsets: &mut Offsets, partition: i32, offset: i64) {
     offsets.entry(partition).or_insert((offset, offset + 1)).1 = offset + 1;
 }
 
+/// Validate that a byte sequence conforms to W3C `traceparent` (version 00):
+/// exactly 55 ASCII bytes formatted as `00-{32 hex trace-id}-{16 hex parent-id}-{2 hex flags}`
+/// with non-zero IDs and the sampled flag (bit 0) set.
+pub fn is_valid_traceparent(bytes: &[u8]) -> bool {
+    if bytes.len() != 55 {
+        return false;
+    }
+    if !bytes.starts_with(b"00-") || bytes[35] != b'-' || bytes[52] != b'-' {
+        return false;
+    }
+    let trace_id = &bytes[3..35];
+    if !trace_id.iter().all(|b| b.is_ascii_hexdigit()) || trace_id.iter().all(|&b| b == b'0') {
+        return false;
+    }
+    let parent_id = &bytes[36..52];
+    if !parent_id.iter().all(|b| b.is_ascii_hexdigit()) || parent_id.iter().all(|&b| b == b'0') {
+        return false;
+    }
+    let flags_bytes = &bytes[53..55];
+    if !flags_bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    let Ok(flags_str) = std::str::from_utf8(flags_bytes) else {
+        return false;
+    };
+    let Ok(flags) = u8::from_str_radix(flags_str, 16) else {
+        return false;
+    };
+    (flags & 0x01) == 1
+}
+
+/// Extract sampled W3C `traceparent` header from a Kafka message, if present and valid.
+pub fn extract_sampled_traceparent(msg: &BorrowedMessage<'_>) -> Option<String> {
+    let headers = msg.headers()?;
+    for i in 0..headers.count() {
+        let header = headers.get(i);
+        if header.key == "traceparent"
+            && let Some(val) = header.value
+            && is_valid_traceparent(val)
+        {
+            return std::str::from_utf8(val).ok().map(|s| s.to_owned());
+        }
+    }
+    None
+}
+
 pub struct KafkaConsumer {
     // A read lock for polling, committing and seeking, which librdkafka
     // allows from several threads at once (a harness reader thread polls
@@ -244,6 +290,7 @@ impl KafkaConsumer {
         deadline: Instant,
         max_messages: usize,
         payloads: &mut Payloads,
+        traceparents: &mut Vec<Option<String>>,
         offsets: &mut Offsets,
         errors: &mut Vec<String>,
     ) -> Result<(), &'static str> {
@@ -258,6 +305,7 @@ impl KafkaConsumer {
                     None => break,
                     Some(Ok(msg)) => {
                         record_offset(offsets, msg.partition(), msg.offset());
+                        traceparents.push(extract_sampled_traceparent(&msg));
                         payloads.push(msg.payload());
                     }
                     Some(Err(err)) => errors.push(err.to_string()),
@@ -337,7 +385,12 @@ impl KafkaProducer {
     /// Hand every message to librdkafka, tagged with `tag` (0: untracked).
     /// When its local queue is full, wait for the background thread to drain
     /// some of it and retry, instead of failing the batch halfway through.
-    pub fn enqueue(&self, messages: &Messages, tag: usize) -> Result<(), KafkaError> {
+    pub fn enqueue(
+        &self,
+        messages: &Messages,
+        tag: usize,
+        traceparents: Option<&[Option<String>]>,
+    ) -> Result<(), KafkaError> {
         let deliveries = &self.inner.context().deliveries;
         deliveries.add(tag, messages.len());
         for idx in 0..messages.len() {
@@ -346,6 +399,12 @@ impl KafkaProducer {
                 BaseRecord::<str, [u8], usize>::with_opaque_to(&self.topic, tag).payload(messages.payload(idx));
             if let Some(k) = key {
                 record = record.key(k);
+            }
+            if let Some(tp) = traceparents.and_then(|tps| tps.get(idx)).and_then(|tp| tp.as_deref()) {
+                record = record.headers(OwnedHeaders::new().insert(Header {
+                    key: "traceparent",
+                    value: Some(tp.as_bytes()),
+                }));
             }
             loop {
                 match self.inner.send(record) {
@@ -462,5 +521,50 @@ mod tests {
         record_offset(&mut offsets, 0, 11);
         record_offset(&mut offsets, 0, 14);
         assert_eq!(offsets, Offsets::from([(0, (10, 15)), (1, (3, 4))]));
+    }
+
+    #[test]
+    fn validates_traceparent_format_and_sampled_flag() {
+        // Valid sampled traceparent
+        assert!(is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        ));
+        // Valid with other flags set as long as bit 0 is 1
+        assert!(is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03"
+        ));
+        // Unsampled (bit 0 is 0) -> false
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+        ));
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02"
+        ));
+        // Invalid length
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-010"
+        ));
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-"
+        ));
+        // Invalid version
+        assert!(!is_valid_traceparent(
+            b"01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        ));
+        // All-zero trace-id
+        assert!(!is_valid_traceparent(
+            b"00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+        ));
+        // All-zero parent-id
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"
+        ));
+        // Non-hex chars
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01"
+        ));
+        assert!(!is_valid_traceparent(
+            b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0g"
+        ));
     }
 }

@@ -22,6 +22,7 @@ from tkati_core._native import BatchOffsets
 from tkati_core.consumer import ConsumedBatch, Consumer
 from tkati_core.node import PipelinedNode, SyncNode
 from tkati_core.producer import Producer
+from tkati_core.settings import TracingSettings
 from tkati_core.stats import PhaseStats
 
 type _Rows = pa.Table | list[dict]
@@ -245,6 +246,7 @@ def memory_node(
     fail_delivery: dict[int, BaseException] | None = None,
     read_ahead: int = 0,
     delay: float = 0.0,
+    tracing: TracingSettings | None = None,
 ) -> tuple[SyncNode, MemoryConsumer, MemoryProducer | None]:
     """A `SyncNode` over in-memory doubles that share one log. The loop ends once
     `batches` is used up. With `output=False` the node has no producer, and
@@ -263,6 +265,7 @@ def memory_node(
         batch_timeout_sec=0,
         phases=phases,
         read_ahead=read_ahead,
+        tracing=tracing,
     )
     consumer.on_exhausted = node._end_of_input
     return node, consumer, producer
@@ -277,6 +280,7 @@ def memory_pipelined_node(
     deliver: Literal["immediate", "manual"] = "immediate",
     max_in_flight: int = 4,
     read_ahead: int = 0,
+    tracing: TracingSettings | None = None,
 ) -> tuple[PipelinedNode, MemoryConsumer, MemoryProducer | None]:
     """`memory_node` for a `PipelinedNode`. With `deliver="manual"` the
     producer holds deliveries until the test releases them."""
@@ -291,6 +295,7 @@ def memory_pipelined_node(
         batch_timeout_sec=0,
         phases=phases,
         read_ahead=read_ahead,
+        tracing=tracing,
     )
     consumer.on_exhausted = node._end_of_input
     return node, consumer, producer

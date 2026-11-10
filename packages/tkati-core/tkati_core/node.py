@@ -23,6 +23,7 @@ Until then, code after `done()` runs after the commit.
 Design doc: design-docs/2026-09-26-worker-loop-harness.md.
 """
 
+import os
 import queue
 import signal
 import threading
@@ -36,6 +37,13 @@ from typing import Any, Self
 
 import pyarrow as pa
 from loguru import logger
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import Span, StatusCode, Tracer, set_span_in_context
+from opentelemetry.trace.propagation.tracecontext import (
+    TraceContextTextMapPropagator,
+)
 
 from tkati_core.consumer import (
     CONSUMER_PHASES,
@@ -45,7 +53,7 @@ from tkati_core.consumer import (
 )
 from tkati_core.metrics import MetricsSettings, start_metrics_server
 from tkati_core.producer import PRODUCER_PHASES, Producer, build_producer
-from tkati_core.settings import NodeSettings
+from tkati_core.settings import NodeSettings, TracingSettings
 from tkati_core.stats import LoopStats, PhaseStats
 
 # The phases the harness times on the loop thread (itself, and through the
@@ -124,6 +132,46 @@ class _Stop(BaseException):
     """
 
 
+def _init_tracer(tracing: TracingSettings) -> Tracer | None:
+    if not tracing.enabled:
+        return None
+
+    service_name = (
+        tracing.service_name or os.environ.get("OTEL_SERVICE_NAME") or "tkati-node"
+    )
+    provider = trace.get_tracer_provider()
+    if isinstance(provider, trace.ProxyTracerProvider):
+        resource = Resource.create({"service.name": service_name})
+        sdk_provider = TracerProvider(resource=resource)
+        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        if endpoint:
+            try:
+                import importlib
+
+                otlp_mod = importlib.import_module(
+                    "opentelemetry.exporter.otlp.proto.grpc.trace_exporter"
+                )
+                otlp_exporter_cls = otlp_mod.OTLPSpanExporter
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+                insecure = (
+                    os.environ.get("OTEL_EXPORTER_OTLP_INSECURE", "").lower()
+                    in ("true", "1")
+                    or "localhost" in endpoint
+                    or "127.0.0.1" in endpoint
+                )
+                sdk_provider.add_span_processor(
+                    BatchSpanProcessor(
+                        otlp_exporter_cls(endpoint=endpoint, insecure=insecure)
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Could not initialize OTLPSpanExporter: {e}")
+        trace.set_tracer_provider(sdk_provider)
+
+    return trace.get_tracer("tkati", "0.11.0")
+
+
 class _NodeBase:
     """What the node classes share: building and closing the input and
     output, consuming, stats, signals and stop. Each subclass adds its own
@@ -147,6 +195,7 @@ class _NodeBase:
         handle_signals: bool = False,
         stop_when_idle: bool = False,
         read_ahead: int = 0,
+        tracing: TracingSettings | None = None,
     ) -> None:
         """
         Args:
@@ -230,6 +279,16 @@ class _NodeBase:
             label="read",
         )
 
+        self._tracing = tracing if tracing is not None else TracingSettings()
+        self._tracer = _init_tracer(self._tracing)
+        self._service_name = (
+            self._tracing.service_name
+            or os.environ.get("OTEL_SERVICE_NAME")
+            or "tkati-node"
+        )
+        self._rows_seen = 0
+        self._active_spans: dict[str, list[Span]] = {}
+
         self._entered = False
         # The batch handed out last and not yet done, and the event the node
         # got for it.
@@ -271,6 +330,7 @@ class _NodeBase:
                 metrics=settings.metrics,
                 handle_signals=True,
                 read_ahead=settings.pipeline.read_ahead,
+                tracing=settings.tracing,
                 **cls._settings_kwargs(settings),
             )
             # Built without error: the node owns them now.
@@ -318,6 +378,21 @@ class _NodeBase:
                     self._drain()
                 except Exception as error:
                     drain_error = failure = error
+            if self._active_spans:
+                for spans in self._active_spans.values():
+                    for span in spans:
+                        if failure is not None:
+                            span.record_exception(failure)
+                            span.set_status(StatusCode.ERROR, str(failure))
+                        span.end()
+                self._active_spans.clear()
+            provider = trace.get_tracer_provider()
+            force_flush = getattr(provider, "force_flush", None)
+            if callable(force_flush):
+                try:
+                    force_flush()
+                except Exception as e:
+                    logger.debug(f"Tracer provider force_flush error: {e}")
             # A failed batch is rewound so it is read again. Not for a bare
             # BaseException (Ctrl-C twice): a forced stop shouldn't wait on a
             # seek, and the batch is uncommitted either way.
@@ -531,6 +606,65 @@ class _NodeBase:
         if short:
             self._stats.starved_iterations += 1
 
+        if isinstance(data, pa.Table) and self._tracer is not None:
+            if "tkati_traceparent" in data.schema.names:
+                tps: list[str | None] = data.column("tkati_traceparent").to_pylist()
+            else:
+                tps = [None] * len(data)
+
+            sampled_count = sum(1 for tp in tps if tp is not None)
+            modified = False
+
+            if self._tracing.trace_each_nth > 0:
+                propagator = TraceContextTextMapPropagator()
+                for i in range(len(data)):
+                    if sampled_count >= self._tracing.max_spans_per_batch:
+                        break
+                    if (
+                        tps[i] is None
+                        and (self._rows_seen + i) % self._tracing.trace_each_nth == 0
+                    ):
+                        root_span = self._tracer.start_span(
+                            f"{self._service_name} ingest"
+                        )
+                        root_span.end()
+                        carrier: dict[str, str] = {}
+                        propagator.inject(
+                            carrier, context=set_span_in_context(root_span)
+                        )
+                        tps[i] = carrier.get("traceparent")
+                        sampled_count += 1
+                        modified = True
+
+            self._rows_seen += len(data)
+
+            if modified or ("tkati_traceparent" not in data.schema.names and any(tps)):
+                tp_array = pa.array(tps, type=pa.string())
+                if "tkati_traceparent" in data.schema.names:
+                    idx = data.schema.get_field_index("tkati_traceparent")
+                    data = data.set_column(idx, "tkati_traceparent", tp_array)
+                else:
+                    data = data.append_column("tkati_traceparent", tp_array)
+                consumed = ConsumedBatch(
+                    data=data, offsets=consumed.offsets, seq=consumed.seq
+                )
+
+            propagator = TraceContextTextMapPropagator()
+            process_spans_created = 0
+            for tp in tps:
+                if (
+                    tp is not None
+                    and process_spans_created < self._tracing.max_spans_per_batch
+                ):
+                    parent_ctx = propagator.extract(carrier={"traceparent": tp})
+                    child_span = self._tracer.start_span(
+                        f"{self._service_name} process", context=parent_ctx
+                    )
+                    self._active_spans.setdefault(tp, []).append(child_span)
+                    process_spans_created += 1
+        elif isinstance(data, (pa.Table, list)):
+            self._rows_seen += len(data)
+
         event = Batch(data, short)
         self._batch = consumed
         self._event = event
@@ -600,6 +734,28 @@ class _NodeBase:
                     self._producer.produce_pylist(
                         output_pylist, stats=self._stats, tag=_tag(batch)
                     )
+
+        if self._active_spans:
+            surviving_counts: dict[str, int] = {}
+            if (
+                output_arrow is not None
+                and "tkati_traceparent" in output_arrow.schema.names
+            ):
+                for tp in output_arrow.column("tkati_traceparent").to_pylist():
+                    if tp is not None:
+                        surviving_counts[tp] = surviving_counts.get(tp, 0) + 1
+
+            for tp, spans in self._active_spans.items():
+                surviving = surviving_counts.get(tp, 0)
+                for span in spans[:surviving]:
+                    span.set_status(StatusCode.OK)
+                    span.end()
+                for span in spans[surviving:]:
+                    span.add_event("row_dropped")
+                    span.set_status(StatusCode.OK)
+                    span.end()
+            self._active_spans.clear()
+
         return batch, rows_out or 0
 
     def _commit(self, batch: ConsumedBatch[Any], rows_out: int) -> None:

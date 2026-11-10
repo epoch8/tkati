@@ -145,12 +145,16 @@ class KafkaProducer(ProducerBase):
         stats = stats if stats is not None else PhaseStats(phases=())
 
         if self.format == "json":
+            headers: list[str | None] | None = None
+            if "tkati_traceparent" in data.schema.names:
+                headers = data.column("tkati_traceparent").to_pylist()
+                data = data.drop_columns(["tkati_traceparent"])
             with stats.phase("producer/serialize"):
                 messages = self._serialize_arrow(
                     _to_wire_table(data, self.wire_type_overrides)
                 )
             with stats.phase("producer/enqueue"):
-                self.producer.enqueue(messages, tag or 0)
+                self.producer.enqueue(messages, tag or 0, headers=headers)
         elif self.format == "arrow-batch":
             with stats.phase("producer/serialize"):
                 table = (

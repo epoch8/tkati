@@ -620,6 +620,27 @@ each message is routed to.
 
 ---
 
+## Distributed Tracing
+
+`tkati-core` supports end-to-end distributed tracing across pipeline hops via OpenTelemetry:
+
+```toml
+[tracing]
+enabled = true
+service_name = "event-normalizer"  # optional, falls back to OTEL_SERVICE_NAME or "tkati-node"
+trace_each_nth = 100               # head-sampling stride (0: off, N: sample every Nth row)
+max_spans_per_batch = 16           # max sampled spans processed per batch
+```
+
+### Propagation Architecture
+- **On the wire (Kafka)**: Traces propagate using standard W3C `traceparent` headers (`00-{trace_id}-{parent_id}-{flags}`). Unsampled headers (`flags & 0x01 == 0`) and malformed headers are ignored at ingest.
+- **In memory (Arrow)**: Sampled traceparents are exposed in a nullable string column named `tkati_traceparent`.
+- **Column preservation in transforms**: User transforms should preserve `tkati_traceparent` when selecting/projecting columns. If rows are dropped or filtered out by business logic, `_NodeBase` detects missing traceparents and records a `row_dropped` event on the span before closing it.
+- **Sinks**: `KafkaProducer` (in `"json"` format) strips `tkati_traceparent` from the JSON payload and re-attaches it as Kafka record headers on output. `ClickhouseProducer` strips `tkati_traceparent` immediately before database insert, while keeping it attached for DLQ bisection and single-row error routing.
+- **OTLP Exporters**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `localhost:4317`) and optionally `OTEL_SERVICE_NAME` to export spans to Jaeger, Tempo, or OpenTelemetry Collector via gRPC (`BatchSpanProcessor`). Install the optional exporter dependency via `pip install "tkati-core[tracing]"`.
+
+---
+
 ## Interface
 
 ### Core Classes & Functions

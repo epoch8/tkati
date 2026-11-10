@@ -79,6 +79,35 @@ class PipelineSettings(BaseModel):
         return v
 
 
+class TracingSettings(BaseModel):
+    """Distributed tracing settings: `[tracing]` in a node's settings.
+
+    `enabled`: whether to trace batches through this node.
+    `service_name`: service name reported on spans (defaults to OTEL_SERVICE_NAME or 'tkati-node').
+    `trace_each_nth`: stride head-sampling interval (0 disables sampling on ingest).
+    `max_spans_per_batch`: maximum number of sampled spans to create/propagate per batch.
+    """
+
+    enabled: bool = False
+    service_name: str | None = None
+    trace_each_nth: int = 0
+    max_spans_per_batch: int = 16
+
+    @field_validator("trace_each_nth")
+    @classmethod
+    def _trace_each_nth(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be 0 (off) or a positive integer")
+        return v
+
+    @field_validator("max_spans_per_batch")
+    @classmethod
+    def _max_spans_per_batch(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be at least 1")
+        return v
+
+
 class NodeSettings(TomlBaseSettings):
     """The sections every `SyncNode.from_settings` reads. A node subclasses this
     and adds its own.
@@ -93,6 +122,7 @@ class NodeSettings(TomlBaseSettings):
     dlq: OutputSettings | None = None
     metrics: MetricsSettings = MetricsSettings()
     pipeline: PipelineSettings = PipelineSettings()
+    tracing: TracingSettings = TracingSettings()
 
     @model_validator(mode="after")
     def _dlq_needs_output(self) -> "NodeSettings":

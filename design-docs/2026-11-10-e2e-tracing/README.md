@@ -1,5 +1,5 @@
 ---
-status: DRAFT
+status: IMPLEMENTED
 ---
 
 # End-to-End OpenTelemetry Distributed Tracing across tkati Pipelines
