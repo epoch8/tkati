@@ -310,3 +310,28 @@ The fallback runs only when ClickHouse rejects a batch **because of the data** �
 `dlq_split_factor` is a setting on the `clickhouse` `[output]` block (see above), not on `[dlq]` — it describes how the primary output retries, independent of where the DLQ sink sends isolated rows. With `dlq_split_factor=10` and a 1 000-row batch this takes at most 3 recursive levels (1000 → 100 → 10 → 1).
 
 **Delivery guarantee: at-least-once.** If the recursion is abandoned part-way — the process crashes, or ClickHouse goes away mid-descent and the batch is failed — the uncommitted batch is re-read on restart and re-processed from the beginning, which may produce duplicate rows in the output and duplicate messages in the DLQ.
+
+---
+
+## Interface
+
+### Core Classes & Functions
+- CLI Entry Point: `tkati-node-el` (`tkati_node_el.main:main`).
+- `tkati_node_el.transform.load_transform(cfg: TransformSettings | None) -> TransformFunction | None`: Dynamically compiles user-provided Python/Polars transform function.
+- `tkati_node_el.settings.AppSettings` / `TransformSettings`: Pydantic settings models declaring input, output, DLQ, metrics, and transform configuration.
+
+## Invariants
+- Transform function must return a `pyarrow.Table` or raise an exception to fail the batch.
+- Batch delivery is at-least-once; failed batches are rewound and re-read from input stream on node restart.
+- DLQ fallback isolates data errors via recursive bisection without retrying semantic errors.
+- Unhandled transform exceptions halt processing without producing partial output.
+
+## Side Effects
+- Consumes streaming batches from Kafka input topic.
+- Produces processed batches to Kafka topic or batch-inserts into ClickHouse table.
+- Writes rejected rows to configured DLQ topic/table on data parse failures.
+- Binds HTTP metrics endpoint on configured port.
+
+## Verification
+- Run: `uv run pytest packages/tkati-node-el/tests`
+

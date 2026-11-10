@@ -90,6 +90,7 @@ impl BatchOffsets {
 #[pyclass(frozen, module = "tkati_core._native")]
 struct RawBatch {
     payloads: Payloads,
+    traceparents: Vec<Option<String>>,
     offsets: kafka::Offsets,
     #[pyo3(get)]
     errors: Vec<String>,
@@ -100,20 +101,41 @@ impl RawBatch {
     /// Build a batch from in-memory payloads (`None` for a tombstone), for
     /// tests and benchmarks that don't want a broker.
     #[staticmethod]
-    fn from_payloads(payloads: Vec<Option<Vec<u8>>>) -> Self {
+    #[pyo3(signature = (payloads, traceparents=None))]
+    fn from_payloads(payloads: Vec<Option<Vec<u8>>>, traceparents: Option<Vec<Option<String>>>) -> PyResult<Self> {
+        let count = payloads.len();
+        let tps = match traceparents {
+            Some(tps) => {
+                if tps.len() != count {
+                    return Err(PyValueError::new_err(format!(
+                        "mismatched traceparents length: {} for {} payloads",
+                        tps.len(),
+                        count
+                    )));
+                }
+                tps
+            }
+            None => vec![None; count],
+        };
         let mut p = Payloads::default();
         for payload in &payloads {
             p.push(payload.as_deref());
         }
-        Self {
+        Ok(Self {
             payloads: p,
+            traceparents: tps,
             offsets: kafka::Offsets::new(),
             errors: Vec::new(),
-        }
+        })
     }
 
     fn __len__(&self) -> usize {
         self.payloads.len()
+    }
+
+    /// Extracted W3C traceparents for each message in the batch.
+    fn traceparents(&self) -> Vec<Option<String>> {
+        self.traceparents.clone()
     }
 
     /// Where the batch lies in each partition, to commit or rewind it by.
@@ -249,18 +271,26 @@ impl NativeConsumer {
     fn poll_batch(&self, py: Python<'_>, timeout: f64, max_messages: usize) -> PyResult<RawBatch> {
         let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
         let mut payloads = Payloads::default();
+        let mut traceparents = Vec::new();
         let mut offsets = kafka::Offsets::new();
         let mut errors = Vec::new();
         while payloads.len() < max_messages && Instant::now() < deadline {
             py.detach(|| {
-                self.inner
-                    .poll_step(deadline, max_messages, &mut payloads, &mut offsets, &mut errors)
+                self.inner.poll_step(
+                    deadline,
+                    max_messages,
+                    &mut payloads,
+                    &mut traceparents,
+                    &mut offsets,
+                    &mut errors,
+                )
             })
             .map_err(closed_err)?;
             py.check_signals()?;
         }
         Ok(RawBatch {
             payloads,
+            traceparents,
             offsets,
             errors,
         })
@@ -305,10 +335,25 @@ impl NativeProducer {
 
     /// Hand the batch's messages to librdkafka, tagged with `tag` so
     /// `wait_delivered(tag)` can wait for them. 0 leaves them untracked.
-    #[pyo3(signature = (batch, tag=0))]
-    fn enqueue(&self, py: Python<'_>, batch: Py<EncodedBatch>, tag: usize) -> PyResult<()> {
+    #[pyo3(signature = (batch, tag=0, headers=None))]
+    fn enqueue(
+        &self,
+        py: Python<'_>,
+        batch: Py<EncodedBatch>,
+        tag: usize,
+        headers: Option<Vec<Option<String>>>,
+    ) -> PyResult<()> {
         let batch = batch.get();
-        py.detach(|| self.inner.enqueue(&batch.messages, tag))
+        if let Some(ref h) = headers
+            && h.len() != batch.messages.len()
+        {
+            return Err(PyValueError::new_err(format!(
+                "mismatched headers length: {} for {} messages",
+                h.len(),
+                batch.messages.len()
+            )));
+        }
+        py.detach(|| self.inner.enqueue(&batch.messages, tag, headers.as_deref()))
             .map_err(kafka_err)
     }
 

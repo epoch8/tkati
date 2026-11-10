@@ -18,6 +18,8 @@ from tkati_core.type_mapping import TYPE_MAPPING
 if TYPE_CHECKING:
     from tkati_core.kafka.settings import KafkaInputSettings
 
+TRACEPARENT_COLUMN = "tkati_traceparent"
+
 
 def parse_ndjson(
     batch: RawBatch, wire_schema: pa.Schema, internal_schema: pa.Schema
@@ -218,6 +220,16 @@ class KafkaConsumer(ConsumerBase):
                 else:
                     logger.debug(
                         f"Successfully parsed {actual_rows} rows matching {events_read} consumed messages"
+                    )
+
+                tps = batch.traceparents()
+                if (
+                    TRACEPARENT_COLUMN not in table.schema.names
+                    and any(tps)
+                    and len(tps) == len(table)
+                ):
+                    table = table.append_column(
+                        TRACEPARENT_COLUMN, pa.array(tps, type=pa.string())
                     )
 
             except Exception as e:

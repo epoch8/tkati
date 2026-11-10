@@ -112,6 +112,8 @@ def _insert_with_retry(
     deduplication_token: str,
 ) -> None:
     """Insert, retrying anything that isn't a data error (see `_is_data_error`)."""
+    if "tkati_traceparent" in arrow_table.schema.names:
+        arrow_table = arrow_table.drop_columns(["tkati_traceparent"])
     ch_client.insert_arrow(
         table=table,
         arrow_table=arrow_table,

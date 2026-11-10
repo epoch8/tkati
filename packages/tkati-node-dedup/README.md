@@ -242,3 +242,27 @@ this node with more parallelism than that will let duplicates leak through
 across instance boundaries. This is a direct consequence of choosing an
 embedded local-file store instead of a shared external one — evaluate this
 tradeoff before scaling this node horizontally.
+
+---
+
+## Interface
+
+### Core Classes & Functions
+- CLI Entry Point: `tkati-node-dedup` (`tkati_node_dedup.main:main`).
+- `tkati_node_dedup.store.BucketedDedupStore`: Embedded RocksDB-backed key store bucketed by processing-time hour buckets.
+- `tkati_node_dedup.settings.DedupSettings` / `RocksDBSettings` / `AppSettings`: Pydantic settings models for dedup field, window sizing, and RocksDB tuning.
+
+## Invariants
+- Delivery guarantees are at-least-once; keys are only committed to the persistent store after their batch is acknowledged by downstream Kafka.
+- Store failure policy is fail-forward: internal RocksDB errors treat keys as unseen to strictly avoid event loss.
+- Dedup state is isolated to local disk per-process; partitioned routing by key is required when running multi-instance consumer groups.
+- Expired hour-buckets outside `window_hours + bucket_hours` are deleted automatically from disk.
+
+## Side Effects
+- Reads and writes embedded RocksDB SST files and directories at `store_dir`.
+- Consumes Kafka events from input topic; produces deduplicated batches to output topic.
+- Exports Prometheus metrics on configured port.
+
+## Verification
+- Run: `uv run pytest packages/tkati-node-dedup/tests`
+
