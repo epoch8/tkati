@@ -617,3 +617,35 @@ key_column = "customer_id"   # column whose value becomes the Kafka message key
 When set, the value of that column for each row is used as the Kafka message key
 (JSON format only — ignored for `"arrow-batch"`). This determines which Kafka partition
 each message is routed to.
+
+---
+
+## Interface
+
+### Core Classes & Functions
+- `tkati_core.SyncNode`: Synchronous streaming pipeline node harness managing input, output, DLQ, signal handling, and loop iteration.
+- `tkati_core.PipelinedNode`: Pipelined streaming pipeline node harness separating consume and produce phases.
+- `tkati_core.Consumer` / `tkati_core.build_consumer`: Kafka/source consumer abstraction reading batches of events.
+- `tkati_core.Producer` / `tkati_core.build_producer`: Kafka/ClickHouse sink abstraction writing batches.
+- `tkati_core.Batch` / `tkati_core.ConsumedBatch` / `tkati_core.Idle` / `tkati_core.Event`: Streaming loop message and iteration tokens.
+- `tkati_core.LoopStats` / `tkati_core.PhaseStats` / `tkati_core.LoopStatsTotals`: Wall-clock execution telemetry for node loop phases.
+- `tkati_core.start_metrics_server`: Prometheus HTTP metrics exposition server.
+- `tkati_core.DeliveryError`: Native delivery exception raised on unrecoverable publish errors.
+- `tkati_core.settings.NodeSettings` / `InputSettings` / `OutputSettings` / `MetricsSettings`: Typed settings models.
+
+## Invariants
+- `enable.auto.commit` must strictly remain `false`; batch commits are driven explicitly by node harnesses only after downstream durability is confirmed.
+- `SyncNode` processes batches linearly through loop phases (`wait/input`, `upload`, `commit`) or configured custom phases.
+- On shutdown signals (`SIGINT`, `SIGTERM`), in-flight batches finish or rollback cleanly without partition offset leakage.
+- Kafka producer delivery failures abort the current batch commit and initiate retry or error routing.
+
+## Side Effects
+- TCP network connections to Kafka brokers (`librdkafka`) and ClickHouse servers (`clickhouse-connect`).
+- Spawns background thread for native librdkafka polling and Rayon thread pool for JSON encoding.
+- Binds HTTP server on configured metrics port (default `8000`) for Prometheus scraping.
+- Installs signal handlers on the main execution thread.
+
+## Verification
+- Run: `uv run pytest packages/tkati-core/tests`
+- Run: `cargo test --manifest-path packages/tkati-core/Cargo.toml`
+

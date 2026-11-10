@@ -171,3 +171,28 @@ directory must contain at least one `*.json`/`*.yaml`/`*.yml` fragment, node ids
 present, must use field types known to `tkati_core.type_mapping` — `schema` itself is always
 optional, since it isn't always on hand for a real-world node. A validation failure surfaces as
 an HTTP 422 with the error message, shown inline on the page instead of a blank graph.
+
+---
+
+## Interface
+
+### Core Classes & Functions
+- `tkati_dashboard.create_app(dataflow_dir: Path | str)`: FastAPI application factory serving dashboard endpoints and static assets.
+- `tkati_dashboard.load_dataflow(path: Path | str) -> Dataflow`: Parses and validates dataflow YAML/JSON fragment definitions.
+- `tkati_dashboard.Dataflow`: Dataflow graph representation containing nodes, topics, databases, and connecting edges.
+- `tkati_dashboard.DataflowValidationError`: Exception raised when fragments contain cyclic, dangling, or incompatible definitions.
+- CLI Entry Point: `tkati-dashboard` (`tkati_dashboard.main:main`).
+
+## Invariants
+- Dataflow fragment files must be valid YAML/JSON and resolve to a directed acyclic graph without unreferenced edge endpoints.
+- Any present node schema must strictly use field types defined in `tkati_core.type_mapping`.
+- Graph validation errors must surface as HTTP 422 with actionable diagnostic details rather than crashing the server.
+
+## Side Effects
+- Reads filesystem directory paths containing dataflow fragment definitions.
+- Binds HTTP web server (`uvicorn`) on host interface/port.
+- Queries Kafka broker metadata on-demand to compute consumer group partition lag.
+
+## Verification
+- Run: `uv run pytest packages/tkati-dashboard/tests`
+
