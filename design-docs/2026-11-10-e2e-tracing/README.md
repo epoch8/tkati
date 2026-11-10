@@ -342,6 +342,15 @@ flowchart TD
 
 ---
 
+## Implementation notes (as built)
+
+- **Dynamic OTLP Exporter Loading**: `_init_tracer` in [`packages/tkati-core/tkati_core/node.py`](file:///workspace/packages/tkati-core/tkati_core/node.py) loads `opentelemetry.exporter.otlp.proto.grpc.trace_exporter` via `importlib.import_module` at runtime to ensure `uv run ty check` succeeds across the workspace when the optional `[project.optional-dependencies]` tracing package is not installed.
+- **Insecure Endpoint Detection**: `_init_tracer` checks if `OTEL_EXPORTER_OTLP_INSECURE` is set or if the endpoint points to `localhost` / `127.0.0.1` and passes `insecure=True` automatically.
+- **Span Force Flush**: `_NodeBase.__exit__` calls `provider.force_flush()` when available on the active tracer provider before shutting down, ensuring spans are delivered before the process exits in short-lived jobs.
+- **Test Doubles**: `memory_node` and `memory_pipelined_node` in [`packages/tkati-core/tkati_core/testing.py`](file:///workspace/packages/tkati-core/tkati_core/testing.py) accept `tracing: TracingSettings | None = None` so in-memory pipeline tests can verify end-to-end trace span collection.
+
+---
+
 ## Verification
 
 * **Compilation & Environment Sync**: Run `uv sync --all-packages` to rebuild `tkati_core._native` and update `uv.lock`.
