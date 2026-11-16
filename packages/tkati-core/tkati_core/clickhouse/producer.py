@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import clickhouse_connect as ch
 import clickhouse_connect.driver as ch_driver
 import clickhouse_connect.driver.exceptions as ch_exc
@@ -104,10 +106,17 @@ def log_retry_attempt(retry_state: RetryCallState) -> None:
     reraise=True,
 )
 def _insert_with_retry(
-    ch_client: ch_driver.Client, table: str, arrow_table: pa.Table
+    ch_client: ch_driver.Client,
+    table: str,
+    arrow_table: pa.Table,
+    deduplication_token: str,
 ) -> None:
     """Insert, retrying anything that isn't a data error (see `_is_data_error`)."""
-    ch_client.insert_arrow(table=table, arrow_table=arrow_table)
+    ch_client.insert_arrow(
+        table=table,
+        arrow_table=arrow_table,
+        settings={"insert_deduplicate": 1, "insert_deduplication_token": deduplication_token},
+    )
 
 
 def _table_slices(table: pa.Table, chunk_size: int) -> list[pa.Table]:
@@ -120,9 +129,15 @@ def _insert_with_dlq_fallback(
     ch_table: str,
     dlq_producer: Producer,
     split_factor: int,
+    deduplication_token: str,
 ) -> None:
     try:
-        _insert_with_retry(ch_client=ch_client, table=ch_table, arrow_table=table)
+        _insert_with_retry(
+            ch_client=ch_client,
+            table=ch_table,
+            arrow_table=table,
+            deduplication_token=deduplication_token,
+        )
         return
     except Exception as err:
         if not _is_data_error(err):
@@ -146,9 +161,14 @@ def _insert_with_dlq_fallback(
             f"Chunk of {len(table)} rows rejected ({_describe(err)}), "
             f"splitting into chunks of {chunk_size} rows"
         )
-        for chunk in _table_slices(table, chunk_size):
+        for i, chunk in enumerate(_table_slices(table, chunk_size)):
             _insert_with_dlq_fallback(
-                chunk, ch_client, ch_table, dlq_producer, split_factor
+                chunk,
+                ch_client,
+                ch_table,
+                dlq_producer,
+                split_factor,
+                f"{deduplication_token}/{i}",
             )
 
 
@@ -178,6 +198,9 @@ class ClickhouseProducer(Producer):
             password=settings.connection.password,
             database=settings.table.database,
             secure=settings.connection.secure,
+            # A timed-out insert can keep its session locked on the server.
+            # Inserts need no session state; retries use a deduplication token.
+            autogenerate_session_id=False,
         )
         return cls(
             ch_client=ch_client,
@@ -202,9 +225,15 @@ class ClickhouseProducer(Producer):
         stats = stats if stats is not None else PhaseStats(phases=())
 
         with stats.phase("producer/deliver"):
+            # One identity per logical insert, shared by every retry. Do not
+            # use tag: it is a process-local delivery counter and can repeat.
+            deduplication_token = uuid4().hex
             try:
                 _insert_with_retry(
-                    ch_client=self._ch_client, table=self._table, arrow_table=data
+                    ch_client=self._ch_client,
+                    table=self._table,
+                    arrow_table=data,
+                    deduplication_token=deduplication_token,
                 )
             except Exception as err:
                 if not _is_data_error(err) or self._dlq_producer is None:
@@ -220,6 +249,7 @@ class ClickhouseProducer(Producer):
                     ch_table=self._table,
                     dlq_producer=self._dlq_producer,
                     split_factor=self._split_factor,
+                    deduplication_token=deduplication_token,
                 )
                 self._dlq_producer.flush()
 

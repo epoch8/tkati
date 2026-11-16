@@ -36,7 +36,7 @@ def test_from_input_settings_sets_attributes(input_settings: KafkaInputSettings)
     consumer = KafkaConsumer.from_input_settings(input_settings)
     try:
         assert consumer.topic_name == input_settings.topic.name
-        assert consumer.input_schema == input_settings.topic.schema
+        assert consumer.input_schema == input_settings.topic.message_schema
     finally:
         consumer.close()
 

@@ -1,3 +1,14 @@
+# 0.9.0
+
+* New optional `[transform]` section: Python code defining
+  `transform(batch: pa.Table) -> pa.Table`, run on every batch between reading
+  and writing — for type adaptation, defaults, computed columns, dropping
+  columns and filtering rows. Broken code fails at startup; an exception on a
+  batch rewinds it. Its time is the `transform` phase on the `perf loop:` line
+  and in `/metrics`, and filtered rows count as `dropped`. See the README's
+  *Transform*
+* Depends on `polars`, so transforms can `import polars` without a custom image
+
 # 0.8.3
 
 * Kafka input and output accept `[input.config]` / `[output.config]`: any

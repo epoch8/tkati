@@ -462,6 +462,33 @@ There is no setting for the code set. Rebind `CH_DATA_ERROR_CODES` at startup to
 change the policy — for example `|= {53}` to quarantine type mismatches too. See
 `design-docs/2026-09-28-clickhouse-error-classification.md`.
 
+### ClickHouse sessions and insert deduplication
+
+Clients created by `ClickhouseProducer.from_output_settings` disable automatic
+HTTP sessions. A timed-out insert may still execute on the server; another
+attempt must not be blocked by its session lock. If you supply a client directly
+to the constructor, configure it with `autogenerate_session_id=False` yourself.
+
+Each `produce_arrow` or `produce_pylist` call generates one
+`insert_deduplication_token`, reused across all its attempts. Inserts send
+`insert_deduplicate=1`. The DLQ fallback reuses the original token when it
+resends the full batch; each child insert gets a distinct token derived from
+its position in the split tree, also reused across retries. Independent produce
+calls get different tokens even if their rows or delivery tags are identical.
+
+This lets a compatible ClickHouse table recognize a replay when the original
+write succeeded but the response was lost. It requires effective insert
+deduplication and a large enough server deduplication window. The synchronous
+deduplication switch alone does not enable deduplication for asynchronous
+inserts on older servers such as 24.1; those require compatible server settings.
+On newer versions, the effective `deduplicate_insert` setting also matters.
+
+Delivery remains **at-least-once**. A new produce call after a process restart
+or Kafka rewind gets a new token, and a parent that partially committed before
+a data error may overlap its differently grouped DLQ child inserts. Tokens do
+not provide row-level uniqueness or make the split transactional. See
+`design-docs/2026-10-28-clickhouse-insert-deduplication.md`.
+
 ### Constructing a consumer from settings
 
 Use `KafkaConsumer.from_input_settings` to construct a consumer directly from
