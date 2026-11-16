@@ -1,4 +1,4 @@
-# 0.8.4
+# 0.12.0
 
 * Optional `dedup.counter_fields` sums numeric input fields on duplicate rows
   after commit, exposed as `tkati_node_dedup_dropped_field_total{field="..."}`.
