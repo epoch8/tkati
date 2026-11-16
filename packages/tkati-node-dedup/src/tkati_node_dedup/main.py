@@ -29,10 +29,14 @@ worst:
   in a window as wide as one memtable write.
 """
 
+from collections.abc import Sequence
 from contextlib import closing
 from functools import partial
+from math import isfinite
+from typing import Any, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from loguru import logger
 from prometheus_client import Counter
 from tkati_core import PRODUCER_PHASES, Batch, PipelinedNode
@@ -66,17 +70,42 @@ _DROPPED_ROWS = Counter(
 )
 
 
+_DROPPED_FIELDS = Counter(
+    "tkati_node_dedup_dropped_field",
+    "Sum of nonnegative numeric field values on rows dropped as duplicates.",
+    ["field"],
+)
+
+
+def _sum_counter_column(column: pa.ChunkedArray) -> float:
+    """Invalid values contribute zero; never decrease or poison a counter."""
+    if not (
+        pa.types.is_integer(column.type)
+        or pa.types.is_floating(column.type)
+        or pa.types.is_decimal(column.type)
+    ):
+        return 0.0
+
+    values = column.cast(pa.float64(), safe=False)
+
+    compute = cast("Any", pc)
+    valid = compute.and_(compute.is_finite(values), compute.greater_equal(values, 0))
+    total = compute.sum(compute.if_else(valid, values, 0.0)).as_py() or 0.0
+    return total if isfinite(total) else 0.0
+
+
 def _dedupe_batch(
     batch: pa.Table,
     field_name: str,
     store: BucketedDedupStore,
     pending: set[bytes],
-) -> tuple[pa.Table, list[bytes]]:
+    counter_fields: Sequence[str] = (),
+) -> tuple[pa.Table, list[bytes], dict[str, float]]:
     """Filter out rows whose dedup key was already seen (in-batch or in the store).
 
-    Returns (filtered_batch, keys_to_mark_seen). Null values in `field_name`
-    always pass through and are never added to the store — we can't dedup on
-    nothing.
+    Returns (filtered_batch, keys_to_mark_seen, dropped_field_sums). Null values
+    in `field_name` always pass through and are never added to the store — we
+    can't dedup on nothing.
 
     Encoding and the store lookup are both batched (one pass over the column,
     one RocksDB round trip per open bucket) rather than done per row.
@@ -84,7 +113,14 @@ def _dedupe_batch(
     keys = store.encode_keys(batch.column(field_name))
     keep_mask, new_keys = store.filter_duplicates(keys, pending)
     filtered = batch.filter(keep_mask)
-    return filtered, new_keys
+    sums: dict[str, float] = {}
+    if counter_fields and len(filtered) < len(batch):
+        # `invert` is another dynamically published Arrow kernel.
+        drop_mask = cast("Any", pc).invert(keep_mask)
+        for field in counter_fields:
+            if field in batch.column_names:
+                sums[field] = _sum_counter_column(batch.column(field).filter(drop_mask))
+    return filtered, new_keys, sums
 
 
 def _mark_seen(
@@ -93,6 +129,7 @@ def _mark_seen(
     pending: set[bytes],
     keys: list[bytes],
     dropped: int,
+    field_sums: dict[str, float],
 ) -> None:
     """A batch's `after_commit`: its keys go from pending to the store, and
     its drops are counted. Counted only once committed: a batch that fails
@@ -102,9 +139,20 @@ def _mark_seen(
         store.add_many(keys)
     pending.difference_update(keys)
     _DROPPED_ROWS.inc(dropped)
+    for field, total in field_sums.items():
+        _DROPPED_FIELDS.labels(field=field).inc(total)
 
 
-def run(node: PipelinedNode, store: BucketedDedupStore, field_name: str) -> None:
+def run(
+    node: PipelinedNode,
+    store: BucketedDedupStore,
+    field_name: str,
+    counter_fields: Sequence[str] = (),
+) -> None:
+    counter_fields = tuple(dict.fromkeys(counter_fields))
+    for field in counter_fields:
+        # Expose zero even if the field is missing or no duplicates arrive.
+        _DROPPED_FIELDS.labels(field=field)
     # Keys sent in batches not yet committed. See the module docstring.
     pending: set[bytes] = set()
     for event in node.consume_arrow():
@@ -134,12 +182,14 @@ def run(node: PipelinedNode, store: BucketedDedupStore, field_name: str) -> None
                 f"Dedup field '{field_name}' missing from batch schema; "
                 "passing batch through unfiltered"
             )
-            filtered, new_keys = table, []
+            filtered, new_keys, field_sums = table, [], {}
         else:
             # Includes the table.filter() call, which is Arrow work rather than
             # a store lookup — cheap enough not to be worth a phase of its own.
             with node.phase("lookup"):
-                filtered, new_keys = _dedupe_batch(table, field_name, store, pending)
+                filtered, new_keys, field_sums = _dedupe_batch(
+                    table, field_name, store, pending, counter_fields
+                )
 
         dropped = len(table) - len(filtered)
         # Before done(): it may commit this very batch (and so run its
@@ -148,7 +198,9 @@ def run(node: PipelinedNode, store: BucketedDedupStore, field_name: str) -> None
         node.done(
             event,
             output_arrow=filtered,
-            after_commit=partial(_mark_seen, node, store, pending, new_keys, dropped),
+            after_commit=partial(
+                _mark_seen, node, store, pending, new_keys, dropped, field_sums
+            ),
         )
 
         logger.debug(
@@ -169,4 +221,4 @@ def main() -> None:
     # The store is entered first, so it closes last: after the node has
     # stopped and closed its clients.
     with closing(store), PipelinedNode.from_settings(settings, phases=_PHASES) as node:
-        run(node, store, settings.dedup.field)
+        run(node, store, settings.dedup.field, settings.dedup.counter_fields)

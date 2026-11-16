@@ -53,6 +53,7 @@ window_hours = 3         # rolling dedup window
 bucket_hours = 1         # on-disk bucket granularity (effective window is
                           # window_hours .. window_hours + bucket_hours)
 store_dir    = "/var/lib/tkati-node-dedup/store"
+counter_fields = ["traffic_in", "traffic_out"] # optional; defaults to []
 
 # Optional. Performance tuning for the embedded store; the defaults below are
 # the ones shipped, and were chosen by A/B measurement rather than reasoning
@@ -82,6 +83,30 @@ the metric names and the PromQL that reproduces the log line's percentages.
 On top of those, `tkati_node_dedup_dropped_rows_total` counts the rows this
 node deduplicated away (the log line's `dropped`), once their batch is
 committed.
+
+`dedup.counter_fields` selects input columns whose values should be summed on
+the dropped rows. Each configured field exposes a counter, initially zero:
+
+```promql
+tkati_node_dedup_dropped_field_total{field="traffic_in"}
+tkati_node_dedup_dropped_field_total{field="traffic_out"}
+```
+
+Only values from duplicate rows are counted, after their batch is committed,
+including duplicates found within a batch, in flight, or in the store.
+Integer, floating-point and decimal columns are supported. Missing columns,
+other column types (including strings and booleans), nulls, negative values,
+NaN and infinities contribute zero. A sum exceeding the finite float64 range
+also contributes zero. Values use the input field's units (for example bytes)
+and Prometheus's floating-point precision. Include these fields in
+`input.topic.schema` so they reach the node. An environment override uses a JSON
+array: `DEDUP__COUNTER_FIELDS='["traffic_in", "traffic_out"]'`.
+
+For the rate of discarded incoming traffic per second:
+
+```promql
+rate(tkati_node_dedup_dropped_field_total{field="traffic_in"}[5m])
+```
 
 Output and DLQ follow the same `OutputSettings` shape as `tkati-node-el`
 (`"kafka"` or `"clickhouse"`) — see that package's README for the full
